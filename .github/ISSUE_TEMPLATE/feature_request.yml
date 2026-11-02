@@ -1,0 +1,20 @@
+name: ✨ 功能建议 (Feature Request)
+description: 提出关于长程接力工作流、多栏工作台界面或宿主兼容性的改进建议
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: pain_point
+    attributes:
+      label: 这个建议想要解决什么实际痛点？
+      description: 请描述你在日常长程无人值守开发中遇到的不便或瓶颈。
+      placeholder: "例如：当同时运行 3 个以上长程任务时，希望能按项目目录自动分组..."
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 期望的解决方案或交互形态
+      description: 你希望在工作台界面、护盾接口或网桥扩展中如何呈现和运作？
+    validations:
+      required: true

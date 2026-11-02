@@ -1,0 +1,32 @@
+# Runtime data, DPAPI secrets, and local workspace state
+/data/
+/engine-data/
+/workspace/
+/logs/
+/dist/
+/.scratch/
+
+# Sensitive credential and tunnel profile files anywhere in tree
+*.dpapi
+*api-key*
+tunnel-profile.yaml
+control-panel-settings.json
+session-aliases.json
+window-layout.json
+web-bridge.json
+shield-activity.json
+
+# Python & test caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+*.tmp
+*.bak
+*.log
+
+# Compiled binaries (shipped via GitHub Releases, except application icon)
+*.exe
+*.dll
+*.pdb
+!RelayStudio.ico

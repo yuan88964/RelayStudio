@@ -1,0 +1,44 @@
+name: 🐛 缺陷报告 (Bug Report)
+description: 报告 RelayStudio 工作台、桥接护盾 (:8766)、浏览器扩展或桌面端 CDP 连接中的异常问题
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈问题！请尽量提供清晰的复现步骤（注意：**切勿粘贴你的真实 OpenAI API Key 或包含个人隐私的完整路径**）。
+  - type: dropdown
+    id: host_mode
+    attributes:
+      label: 发生问题时使用的对话宿主模式
+      options:
+        - "💻 Windows 桌面客户端模式 (Desktop:ChatGPT 原生 CDP)"
+        - "🌐 Chrome 浏览器扩展模式 (browser-bridge)"
+        - "🌐 Edge 浏览器扩展模式 (browser-bridge)"
+        - "⚙️ 仅涉及本地工作台界面 / 隧道与内核启动"
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: 故障现象描述
+      description: 请简明描述发生了什么现象、界面给出了什么提示，以及你原本期望的行为。
+      placeholder: "例如：在发射台选择 Chrome 发送新任务后，浏览器打开了新标签页但未自动填入提示词..."
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      placeholder: |
+        1. 打开 RelayStudio 并启动隧道
+        2. 在右侧选择 ...
+        3. 点击 ...
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 相关日志摘要（可选，请先脱敏）
+      description: 可附上 `data/logs/shield.err.log`、`tunnel.out.log` 或 `core.err.log` 的末尾报错行。
+      render: text

@@ -1,0 +1,49 @@
+{
+  "manifest_version": 3,
+  "name": "RelayStudio Web Bridge",
+  "version": "1.4.0",
+  "description": "RelayStudio 本地智能体工作台与 ChatGPT 网页端双向自动续航桥接器（动态模型协议与零点击拦截版）",
+  "permissions": [
+    "tabs",
+    "scripting",
+    "storage",
+    "alarms"
+  ],
+  "icons": {
+    "32": "icon-32.png",
+    "48": "icon-48.png",
+    "128": "icon-128.png"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "host_permissions": [
+    "http://127.0.0.1:8766/*",
+    "http://localhost:8766/*",
+    "https://chatgpt.com/*",
+    "https://chat.openai.com/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://chatgpt.com/*",
+        "https://chat.openai.com/*"
+      ],
+      "js": [
+        "bridge-page-hook.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "https://chatgpt.com/*",
+        "https://chat.openai.com/*"
+      ],
+      "js": [
+        "bridge-content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}

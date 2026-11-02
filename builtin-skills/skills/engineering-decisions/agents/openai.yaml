@@ -1,0 +1,3 @@
+interface:
+  display_name: "Engineering Decisions & Slow-Test Toolbox"
+  short_description: "Information alignment, timeout receipt recovery, and zero-conflict slow-test acceleration"
