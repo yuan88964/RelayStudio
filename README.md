@@ -4,7 +4,7 @@
 
 **面向 ChatGPT 桌面端与网页端的本地长程开发接力工作台**
 
-[![Release](https://img.shields.io/badge/Release-v1.1.0-2563EB?style=flat-square)](https://github.com/yuan88964/RelayStudio/releases/latest)
+[![Release](https://img.shields.io/badge/Release-v1.1.0%20Portable-2563EB?style=flat-square)](https://huggingface.co/datasets/yuan88964/RelayStudio-Releases)
 [![Platform](https://img.shields.io/badge/Platform-Windows%2010%2F11%20x64-0078D6?style=flat-square)](#快速开始quickstart)
 [![Architecture](https://img.shields.io/badge/Engine-Loopback%20MCP%20%2B%20CDP%20%2B%20MV3-16A34A?style=flat-square)](docs/architecture.md)
 [![License](https://img.shields.io/badge/License-MIT-F59E0B?style=flat-square)](LICENSE)
@@ -82,7 +82,7 @@ RelayStudio 将**会话窗口视为随时可替换的临时执行器，将本地
 - **基础依赖**：
   - **Python 3.11+**（必需，用于运行本地 `:8766` 桥接中枢 `McpReadOnlyShield.py`，仅依赖标准库）。
   - **Node.js 20+**（可选，仅在本地调用 `@agentclientprotocol/codex-acp` 或 `@agentclientprotocol/claude-agent-acp` 子代理时需要）。
-- **下载解压**：前往 [GitHub Releases](https://github.com/yuan88964/RelayStudio/releases/latest) 下载最新便携版压缩包（或直接克隆本仓库），解压至普通读写权限目录。启动时程序会自动将 [`builtin-skills/`](builtin-skills) 下的 `AGENTS.md` 与 13 项技能同步至 `engine-data/`；如需链接外部 Obsidian 知识库或自定义第三方 MCP，可参考 [`docs/architecture.md`](docs/architecture.md) 配置 `data/settings.json` 与 `engine-data/mcp/`。
+- **下载解压**：前往 [Hugging Face 发行仓](https://huggingface.co/datasets/yuan88964/RelayStudio-Releases) 直接下载最新绿色便携包 [**`RelayStudio-v1.1.0-win-x64-portable.zip`**](https://huggingface.co/datasets/yuan88964/RelayStudio-Releases/resolve/main/RelayStudio-v1.1.0-win-x64-portable.zip?download=true)（`SHA256: 044661be8ca985e758eb4bd1a8804ded1690b91a22b7c6d8a9d5832d0a3b2670`；也可直接克隆本纯源码仓库），解压至普通读写权限目录。启动时程序会自动将 [`builtin-skills/`](builtin-skills) 下的 `AGENTS.md` 与 13 项技能同步至 `engine-data/`；如需链接外部 Obsidian 知识库或自定义第三方 MCP，可参考 [`docs/architecture.md`](docs/architecture.md) 配置 `data/settings.json` 与 `engine-data/mcp/`。
 
 ### 2. 配置隧道凭据与外观主题
 
@@ -97,7 +97,7 @@ RelayStudio 将**会话窗口视为随时可替换的临时执行器，将本地
 ### 3. 关联对话宿主与连接器
 
 - **使用 ChatGPT 桌面端（默认）**：无需额外插件，首次点击「打开宿主窗口」或发起任务时，RelayStudio 会通过桌面包身份自动携带调试端口拉起客户端。
-- **使用 Chrome / Edge 浏览器**：打开 `chrome://extensions` 或 `edge://extensions` 开启「开发者模式」，点击「加载已解压的扩展程序」并选择仓库内的 **`browser-bridge`** 目录（或 Release 附带的扩展压缩包），随后刷新 [`https://chatgpt.com/`](https://chatgpt.com/) 页面即可在宿主下拉列表中看到对应浏览器配置。
+- **使用 Chrome / Edge 浏览器**：打开 `chrome://extensions` 或 `edge://extensions` 开启「开发者模式」，点击「加载已解压的扩展程序」并选择目录内的 **`browser-bridge`** 文件夹（或下载独立扩展包 [`relaystudio-browser-bridge-v1.1.0.zip`](https://huggingface.co/datasets/yuan88964/RelayStudio-Releases/resolve/main/relaystudio-browser-bridge-v1.1.0.zip?download=true) 解压加载），随后刷新 [`https://chatgpt.com/`](https://chatgpt.com/) 页面即可在宿主下拉列表中看到对应浏览器配置。
 - **启用 MCP 连接器**：在 ChatGPT 设置（Settings → Connectors / Developer mode）中绑定前面创建的隧道，并在会话输入框工具菜单中勾选启用。
 
 ### 4. 启动长程任务

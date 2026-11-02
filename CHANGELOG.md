@@ -1,6 +1,6 @@
 # 更新日志（Changelog）
 
-本项目的重要版本演进记录于此。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，最新发行包可前往 [GitHub Releases](https://github.com/yuan88964/RelayStudio/releases/latest) 获取。
+本项目的重要版本演进记录于此。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，最新绿色便携发行包可前往 [Hugging Face 发行仓](https://huggingface.co/datasets/yuan88964/RelayStudio-Releases) 获取。
 
 ---
 
