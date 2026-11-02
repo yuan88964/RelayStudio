@@ -10,7 +10,7 @@
 [![License](https://img.shields.io/badge/License-MIT-F59E0B?style=flat-square)](LICENSE)
 [![LINUX DO](https://img.shields.io/badge/Community-LINUX%20DO-0F172A?style=flat-square)](https://linux.do/)
 
-[设计背景](#设计背景与核心机制) · [长程工作流](#规格驱动的长程开发工作流) · [双宿主接入](#双宿主工作模式) · [快速开始](#快速开始quickstart) · [工程指南](docs/long-horizon-workflow.md) · [系统架构](docs/architecture.md) · [故障排查](docs/troubleshooting.md)
+[设计背景](#设计背景与核心机制) · [长程工作流](#规格驱动的长程开发工作流) · [双宿主接入](#双宿主工作模式) · [快速开始](#快速开始quickstart) · [从源码构建](#从源码构建build-from-source) · [工程指南](docs/long-horizon-workflow.md) · [系统架构](docs/architecture.md) · [友链](#友链与致谢)
 
 </div>
 
@@ -106,6 +106,28 @@ RelayStudio 将**会话窗口视为随时可替换的临时执行器，将本地
 
 ---
 
+## 从源码构建（Build from Source）
+
+为保持 Git 仓库 100% 纯文本源码可审阅（不向版本库提交编译产物 `.exe`），如果你选择直接 `git clone` 本源码仓而非下载预打包便携包，可按以下三步在本地完整构建并复现发行包：
+
+```powershell
+# 1. 克隆纯源码仓库
+git clone https://github.com/yuan88964/RelayStudio.git
+cd RelayStudio
+
+# 2. 调用 Windows 系统自带 .NET Framework csc.exe 本地编译无黑框启动器 RelayStudio.exe
+powershell -ExecutionPolicy Bypass -File .\scripts\build-launcher.ps1
+
+# 3. 准备上游开源运行时二进制至 .\bin\ 目录（开源组件，无需闭源依赖）：
+#    - bin\tunnel-client.exe : 下载官方开源 cloudflare/cloudflared (cloudflared-windows-amd64.exe) 重命名放入
+#    - bin\relaystudio-core.exe : 由 Apache-2.0 开源仓库 uvwt/agentdock 执行 cargo build --release 编译放入
+
+# （可选）一键生成与官方一致的便携发行包与 SHA256SUMS.txt
+powershell -ExecutionPolicy Bypass -File .\scripts\build-release.ps1 -Version "1.1.0"
+```
+
+---
+
 ## 文档导航
 
 | 文档路径 | 说明 |
@@ -118,9 +140,11 @@ RelayStudio 将**会话窗口视为随时可替换的临时执行器，将本地
 
 ---
 
-## 致谢与协议说明
+## 友链与致谢
 
-- **[LINUX DO 社区 (linux.do)](https://linux.do/)**：感谢社区开发者在 AI 工程化实践、MCP 工具链与长程智能体工作流上的持续讨论与经验分享。
+本项目积极参与并认可 **[LINUX DO 社区](https://linux.do)**（友链：https://linux.do ）。感谢社区佬友在 AI 工程化实践、MCP 工具链与长程智能体工作流上的持续讨论与经验分享。
+
+- **社区友链**：[LINUX DO - 新的理想型社区 (https://linux.do)](https://linux.do)
 - **[`uvwt/agentdock`](https://github.com/uvwt/agentdock)（Apache-2.0）**：上游本地执行内核与云端隧道桥接底座参考并基于该项目（Apache License 2.0）演进构建，特此致谢。
 - **[`mattpocock/skills`](https://github.com/mattpocock/skills)**：启发了 `grilling`、`to-spec`、`to-tickets`、`tdd` 等规格化软件开发技能结构。
 - **[Model Context Protocol (MCP)](https://modelcontextprotocol.io/)** & **[Agent Client Protocol (ACP)](https://agentclientprotocol.com/)**：提供跨宿主工具通信与本地子代理协作协议标准。
