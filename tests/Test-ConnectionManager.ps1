@@ -494,6 +494,9 @@ try {
         try { $probeTcp.Stop(); $psBg.Dispose() } catch {}
     }
     Assert-Throws { Test-PlatformConnectionProfile -Context $capCtx -Settings $capSettings -ProfileId $claudeDefProf.Id } 'F1: Test-PlatformConnectionProfile throws when endpoint is unreachable'
+    $enClaudeState = Set-ConnectionProfileEnabled -Context $capCtx -Settings $capSettings -ProfileId $claudeDefProf.Id -Enabled $true
+    $enClaudeProf = $enClaudeState.Profiles | Where-Object { $_.Id -eq $claudeDefProf.Id } | Select-Object -First 1
+    Assert ($enClaudeProf.Enabled -eq $true -and $enClaudeState.ActiveProfileByPlatform['claude'] -eq $claudeDefProf.Id) 'Set-ConnectionProfileEnabled resolves target profile, enables it, and updates active_profile_by_platform'
     $selClaudeRes = Select-ConnectionProfile -Context $capCtx -Settings $capSettings -ProfileId $claudeDefProf.Id
     $capSettingsAfter = Read-ConnectionSettings $capCtx
     $openaiKeyBytesAfter = [IO.File]::ReadAllText($capCtx.KeyPath)

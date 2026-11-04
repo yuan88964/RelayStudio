@@ -974,11 +974,6 @@ function Save-ConnectionProfile {
     if ($cleanKey -and ($cleanKey -match '^[a-z]+://' -or $cleanKey -match '\s' -or $cleanKey.Length -lt 12)) {
         throw 'API Key 栏请粘贴密钥本身，不是网页链接；密钥中不能有空格或换行。'
     }
-    $storePath = if ($Context.PSObject.Properties.Name -contains 'ProfilesStorePath' -and $Context.ProfilesStorePath) {
-        $Context.ProfilesStorePath
-    } else {
-        Join-Path $Context.DataRoot 'credential-profiles.json'
-    }
     $activeId = $state.ActiveProfileId
     $activeByPlat = [ordered]@{}
     if ($state.PSObject.Properties['ActiveProfileByPlatform'] -and $state.ActiveProfileByPlatform) {
@@ -1000,11 +995,20 @@ function Save-ConnectionProfile {
     foreach ($p in $state.Profiles) {
         if ($p.Id -eq $ProfileId) {
             $found = $true
+            $origPlat = if ($p.PSObject.Properties['Platform'] -and $p.Platform) { ([string]$p.Platform).ToLowerInvariant() } else { 'openai' }
+            $origKind = if ($p.PSObject.Properties['Kind'] -and $p.Kind) { ([string]$p.Kind).ToLowerInvariant() } elseif ($origPlat -eq 'openai') { 'tunnel' } else { 'apikey' }
+            if ($origPlat -eq 'openai' -and $origKind -eq 'tunnel' -and ($effPlatform -ne 'openai' -or $effKind -ne 'tunnel')) {
+                throw "不能将现有的 OpenAI 隧道配置 ($ProfileId) 变更为其他平台类型。"
+            }
             $newName = if ($Name.Trim()) { $Name.Trim() } else { $p.Name }
             $newTun = if ($effKind -eq 'tunnel') { $(if ($cleanTun) { $cleanTun } else { $p.TunnelId }) } else { '' }
             $newBaseUrl = if ($BaseUrl -and $BaseUrl.Trim()) { $BaseUrl.Trim() } elseif ($p.BaseUrl) { $p.BaseUrl } else { Get-DefaultPlatformBaseUrl $effPlatform $Settings }
-            $newEnabled = if ($null -ne $Enabled) { [bool]$Enabled } elseif ($cleanKey) { $true } else { [bool]$p.Enabled }
-            $keyFile = $p.KeyFile
+            $newEnabled = if ($null -ne $Enabled) { [bool]$Enabled } else { [bool]$p.Enabled }
+            $keyFile = if ($effPlatform -eq 'openai' -and $effKind -eq 'tunnel') {
+                if ($p.KeyFile) { $p.KeyFile } else { "openai-key-$($p.Id).dpapi" }
+            } else {
+                if ($p.KeyFile -and $p.KeyFile -notmatch '^openai-') { $p.KeyFile } else { "credential-$($p.Id).dpapi" }
+            }
             if ($cleanKey) {
                 Write-AtomicConnectionText (Join-Path $Context.DataRoot $keyFile) (Protect-ConnectionSecret $cleanKey)
             }
@@ -1117,11 +1121,6 @@ function Select-ConnectionProfile {
     $targetPlat = if ($target.PSObject.Properties['Platform'] -and $target.Platform) { ([string]$target.Platform).ToLowerInvariant() } else { 'openai' }
     $targetKind = if ($target.PSObject.Properties['Kind'] -and $target.Kind) { ([string]$target.Kind).ToLowerInvariant() } elseif ($targetPlat -eq 'openai') { 'tunnel' } else { 'apikey' }
 
-    $storePath = if ($Context.PSObject.Properties.Name -contains 'ProfilesStorePath' -and $Context.ProfilesStorePath) {
-        $Context.ProfilesStorePath
-    } else {
-        Join-Path $Context.DataRoot 'credential-profiles.json'
-    }
     $activeByPlat = [ordered]@{}
     if ($state.PSObject.Properties['ActiveProfileByPlatform'] -and $state.ActiveProfileByPlatform) {
         foreach ($k in $state.ActiveProfileByPlatform.Keys) {
@@ -1242,11 +1241,17 @@ function Set-ConnectionProfileEnabled {
     )
     if (-not $Settings) { $Settings = Read-ConnectionSettings $Context }
     $state = Get-ConnectionProfiles $Context $Settings
+    $target = $state.Profiles | Where-Object { $_.Id -eq $ProfileId } | Select-Object -First 1
+    if (-not $target) { throw "找不到指定的平台配置 ($ProfileId)。" }
     $activeByPlat = [ordered]@{}
     if ($state.PSObject.Properties['ActiveProfileByPlatform'] -and $state.ActiveProfileByPlatform) {
         foreach ($k in $state.ActiveProfileByPlatform.Keys) {
             $activeByPlat[[string]$k] = [string]$state.ActiveProfileByPlatform[$k]
         }
+    }
+    $targetPlat = if ($target.PSObject.Properties['Platform'] -and $target.Platform) { ([string]$target.Platform).Trim().ToLowerInvariant() } else { 'openai' }
+    if ($Enabled -and $targetPlat -ne 'openai') {
+        $activeByPlat[$targetPlat] = $ProfileId
     }
     $rawProfiles = @(foreach ($p in $state.Profiles) {
         $enOverride = if ($p.Id -eq $ProfileId) { [bool]$Enabled } else { [bool]$p.Enabled }

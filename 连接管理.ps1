@@ -1514,7 +1514,7 @@ function Sync-PopoverAnchorAndAnimate {
                 $ease = New-Object Windows.Media.Animation.QuarticEase
                 $ease.EasingMode = [Windows.Media.Animation.EasingMode]::EaseOut
                 if ($WasAlreadyOpen -and [Math]::Abs($prevLeft - $targetLeft) -gt 2.0) {
-                    $deltaX = [Math]::Max(-120.0, [Math]::Min(120.0, $prevLeft - $targetLeft))
+                    $deltaX = [double]($prevLeft - $targetLeft)
                     $animX = New-Object Windows.Media.Animation.DoubleAnimation($deltaX, 0.0, $dur)
                     $animX.EasingFunction = $ease
                     $transTrans.BeginAnimation([Windows.Media.TranslateTransform]::XProperty, $animX)
@@ -1823,6 +1823,9 @@ function Invoke-RemoveCurrentCapsulePlatform {
     $script:addPlatformPickerOpen = $false
     $script:viewingProfileId = $script:profilesState.ActiveProfileId
     Refresh-ProfilePopoverState
+    if ($script:popoverOpen -and $script:controls.KeyPopoverBorder) {
+        Sync-PopoverAnchorAndAnimate -PopoverBorder $script:controls.KeyPopoverBorder -TriggerElement $script:controls.ConnIconBadgeButton -WasAlreadyOpen $true
+    }
     Update-SessionCards
 }
 
@@ -2260,7 +2263,8 @@ function Refresh-ProfilePopoverState {
     # Bottom Start / Reconnect / Test / Disable Button State
     if ($script:controls.QuickConnectButton) {
         if ($curPlat -ne 'openai') {
-            $testedOk = ($viewProf -and $script:lastTestedApiKeyProfileId -eq $viewProf.Id -and $viewProf.HasKey)
+            $curProfTestSig = if ($viewProf) { "$($viewProf.Id)|$($viewProf.BaseUrl)|$($viewProf.PlainKey)" } else { '' }
+            $testedOk = ($viewProf -and $viewProf.HasKey -and [bool]$script:lastTestedApiKeyProfileSig -and $script:lastTestedApiKeyProfileSig -eq $curProfTestSig)
             $script:controls.QuickConnectButton.Content = $(if ($testedOk) { '✓ 接口连通正常' } else { '✓ 测试连接' })
             $script:controls.QuickConnectButton.Background = ConvertTo-Brush $(if ($testedOk) { '#16A34A' } else { '#2563EB' })
             $script:controls.QuickConnectButton.BorderBrush = ConvertTo-Brush $(if ($testedOk) { '#16A34A' } else { '#2563EB' })
@@ -2561,9 +2565,14 @@ function Invoke-PopoverQuickConnect {
         $script:popoverExpandedProfileId = ''
         $script:popoverEditMode = $false
         if ($curPlat -ne 'openai') {
+            $script:lastTestedApiKeyProfileId = ''
+            $script:lastTestedApiKeyProfileSig = ''
             $probeRes = Test-PlatformConnectionProfile -Context $script:context -Settings $script:settings -ProfileId $script:viewingProfileId
-            if ($probeRes -and $probeRes.Ok) {
+            $freshState = Get-ConnectionProfiles $script:context $script:settings
+            $freshProf = $freshState.Profiles | Where-Object { $_.Id -eq $script:viewingProfileId } | Select-Object -First 1
+            if ($probeRes -and $probeRes.Ok -and $freshProf) {
                 $script:lastTestedApiKeyProfileId = $script:viewingProfileId
+                $script:lastTestedApiKeyProfileSig = "$($freshProf.Id)|$($freshProf.BaseUrl)|$($freshProf.PlainKey)"
             }
             Refresh-ProfilePopoverState
             Update-SessionCards
@@ -2580,8 +2589,11 @@ function Invoke-PopoverQuickConnect {
         Show-Feedback $res.Message
         Show-QuickToast "✓ 已启动「$($res.ActiveProfile.Name)」隧道"
     } catch {
+        $script:lastTestedApiKeyProfileId = ''
+        $script:lastTestedApiKeyProfileSig = ''
         $script:popoverOpen = $true
         $script:controls.KeyPopoverBorder.Visibility = 'Visible'
+        Refresh-ProfilePopoverState
         Select-WindowTab 'Config'
         Show-Feedback $_.Exception.Message $true
     }
@@ -6787,13 +6799,17 @@ function Save-Form {
         $script:controls.ProfileNameInput.Text.Trim()
     } else { '' }
     if ($curPlat -ne 'openai') {
+        $script:lastTestedApiKeyProfileId = ''
+        $script:lastTestedApiKeyProfileSig = ''
         $platProfs = @(if ($script:profilesState -and $script:profilesState.Profiles) {
             $script:profilesState.Profiles | Where-Object { ([string]$_.Platform).ToLowerInvariant() -eq $curPlat }
         })
         $activeProf = $platProfs | Where-Object { $_.IsActive } | Select-Object -First 1
         $targetProfId = if ($script:viewingProfileId) { $script:viewingProfileId } elseif ($activeProf) { $activeProf.Id } else { 'new' }
+        $existingTarget = $platProfs | Where-Object { $_.Id -eq $targetProfId } | Select-Object -First 1
+        $preserveEnabled = if ($existingTarget) { [bool]$existingTarget.Enabled } else { $false }
         $isEditingActive = (-not $activeProf) -or ($targetProfId -eq $activeProf.Id) -or ($platProfs.Count -le 1 -and $targetProfId -ne 'new')
-        $savedState = Save-ConnectionProfile -Context $script:context -Settings $script:settings -ProfileId $targetProfId -Name $enteredName -TunnelId '' -ApiKey $enteredKey -Platform $curPlat -Kind 'apikey' -BaseUrl $script:controls.TunnelInput.Text -SetActive:$isEditingActive
+        $savedState = Save-ConnectionProfile -Context $script:context -Settings $script:settings -ProfileId $targetProfId -Name $enteredName -TunnelId '' -ApiKey $enteredKey -Platform $curPlat -Kind 'apikey' -BaseUrl $script:controls.TunnelInput.Text -Enabled $preserveEnabled -SetActive:$isEditingActive
         if ($savedState -and $savedState.PSObject.Properties['LastSavedProfileId'] -and $savedState.LastSavedProfileId) {
             $script:viewingProfileId = $savedState.LastSavedProfileId
         }

@@ -180,8 +180,8 @@
        - 自动展开从网页端读取到的真实模型列表与对应的思考强度档位（`min / standard / extended / max` 等），并显示网页当前生效的模型与思考强度（如 `🧠 默认 (standard)`）。
    - **顶栏胶囊分栏 ↔ 下方 `ModelCombo` 平台分组与呼吸灯同频呼应**：
      - 在 `ComboBoxItem` 模板与 `Sync-ComposerModelAndEffortCombos` 中，按照顶栏胶囊当前已启用的平台分栏（`enabled_platforms`）组织 `ModelCombo` 内的平台分组：
-       - 每个平台分组的首个条目上方通过模板绑定展示带同频呼吸灯（`🟢` 在线 / `⚪` 离线）的分组头（如 `🟢 OpenAI · yuan88964`、`⚪ Claude · 默认`），同时保持 `ModelCombo.Items[0]` 仍为当前主平台的 `inherit` 选项实例（确保 `$pod.Tag.ModelCombo.Items[0]` 引用稳定性与 `.Content` 字符串契约不变）；
-       - 当顶栏胶囊仅启用 1 个平台且处于离线单元测试环境（无 `$script:capsuleState`）时，保持原有单列表行为，确保 `Test-ReasoningEffort.ps1` 与 `Test-ConnectionManager.ps1` 100% 兼容。
+       - 当顶栏胶囊启用多个平台（`EnabledPlatforms.Count -gt 1`）时，按平台分组展示带同频呼吸灯（`🟢` 在线 / `⚪` 离线）的分组头（如 `🟢 OpenAI · yuan88964`、`⚪ Claude · 默认`），同时保持 `ModelCombo.Items[0]` 仍为当前主平台的 `inherit` 选项实例（确保 `$pod.Tag.ModelCombo.Items[0]` 引用稳定性与 `.Content` 字符串契约不变）；
+       - 当顶栏胶囊仅启用 1 个平台（`EnabledPlatforms.Count -le 1`）时，保持原有单列表行为（不插入分组头，冷启动时 `ModelCombo.Items.Count -eq 1`），确保 `Test-ReasoningEffort.ps1` 与 `Test-ConnectionManager.ps1` 100% 兼容。
 
 ---
 
