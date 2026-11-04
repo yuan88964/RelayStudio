@@ -29,6 +29,7 @@ class FakeChatGptPage:
         chat_mode_selected: bool = True,
         composer_text: str = "",
         archive_ok: bool = True,
+        archive_fail_uuids=None,
         fail_on_op: str = "",
         can_steer: bool = False,
     ):
@@ -44,6 +45,7 @@ class FakeChatGptPage:
         self.chat_mode_selected = chat_mode_selected
         self.composer_text = composer_text
         self.archive_ok = archive_ok
+        self.archive_fail_uuids = set(archive_fail_uuids or [])
         self.fail_on_op = fail_on_op
         self.can_steer = can_steer
         self.main_window_opened = 0
@@ -52,6 +54,12 @@ class FakeChatGptPage:
         self.fill_args = None
         self.sent = False
         self.archived = []
+        self.archived_conversations = self.archived
+        self.unarchived = []
+        self.unarchived_conversations = self.unarchived
+        self.deleted = []
+        self.deleted_conversations = self.deleted
+        self.retire_calls = []
         self.stopped = 0
         self.turn_seq = 1
         self.available_models = []
@@ -145,6 +153,16 @@ class FakeChatGptPage:
             self.main_window_opened += 1
             return {"ok": True}
         if op == "archive":
-            self.archived.append(_arg_after(expression, "const u="))
-            return {"ok": bool(self.archive_ok)}
+            target = _arg_after(expression, "const u=")
+            retire_op = _arg_after(expression, "const op=") if "const op=" in expression else "archive"
+            ok = bool(self.archive_ok) and (target not in self.archive_fail_uuids)
+            self.retire_calls.append({"conv_uuid": target, "operation": retire_op, "ok": ok})
+            if ok:
+                if retire_op == "unarchive":
+                    self.unarchived_conversations.append(target)
+                elif retire_op == "delete":
+                    self.deleted_conversations.append(target)
+                else:
+                    self.archived_conversations.append(target)
+            return {"ok": ok, "operation": retire_op}
         raise AssertionError(f"unexpected script op {op}")

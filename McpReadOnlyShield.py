@@ -491,6 +491,10 @@ def _default_web_bridge_state() -> dict:
         "retire_actions": [],
         "available_models": [],
         "available_models_by_profile": {},
+        "models_cache": {
+            "by_provider": {},
+            "by_carrier": {},
+        },
         "queue": [],
         "breakers": {},
         "auto_resend_config": {
@@ -519,37 +523,54 @@ def _enqueue_retire_action(
     now_iso: str = "",
     stop_before_archive: bool = False,
     not_before_epoch: float = 0.0,
+    operation: str = "archive",
+    provider: str = "chatgpt",
+    carrier: str = "",
 ) -> dict | None:
-    """Enqueue a session retirement action (optional stop + archive conversation + close tab) if conv_uuid is non-empty.
-
-    ``not_before_epoch`` (Spec v4.3 Q5) defers the real archive/close until that moment so a panel archive stays undoable.
-    """
+    """Enqueue a session retirement / restoration / deletion action on a conversation if conv_uuid is non-empty."""
     clean_uuid = str(conv_uuid or "").strip()
     if not clean_uuid:
         return None
+    op = str(operation or "archive").strip().lower()
+    if op not in ("archive", "unarchive", "delete"):
+        op = "archive"
+    eff_carrier = str(carrier or browser_profile or "").strip()
+    eff_provider = str(provider or "chatgpt").strip().lower() or "chatgpt"
+    ts_str = now_iso or _utc_now_iso()
     retire_list = state.setdefault("retire_actions", [])
     if not isinstance(retire_list, list):
         retire_list = []
         state["retire_actions"] = retire_list
     for existing in retire_list:
         if isinstance(existing, dict) and existing.get("conv_uuid") == clean_uuid and existing.get("status") == "pending":
-            if stop_before_archive:
-                existing["stop_before_archive"] = True
-            if not_before_epoch <= 0:
-                existing.pop("not_before_epoch", None)
-            return existing
-    ts_str = now_iso or _utc_now_iso()
+            ex_op = str(existing.get("operation") or "archive").strip().lower()
+            if ex_op == op:
+                if stop_before_archive and op != "unarchive":
+                    existing["stop_before_archive"] = True
+                    existing["stop_before_action"] = True
+                if not_before_epoch <= 0:
+                    existing.pop("not_before_epoch", None)
+                return existing
+            else:
+                existing["status"] = "cancelled"
+                existing["completed_at"] = ts_str
+    is_unarchive = op == "unarchive"
+    stop_flag = False if is_unarchive else bool(stop_before_archive)
     item = {
-        "id": f"ret_{int(time.time() * 1000)}_{clean_uuid[:8]}",
+        "id": f"ret_{int(time.time() * 1000)}_{clean_uuid[:8]}_{op[:3]}",
         "session_key": str(session_key or "").strip(),
+        "provider": eff_provider,
+        "carrier": eff_carrier,
         "conv_uuid": clean_uuid,
         "tab_id": str(tab_id or "").strip(),
-        "browser_profile": str(browser_profile or "").strip(),
+        "browser_profile": eff_carrier,
         "project_prefix": str(project_prefix or "").strip(),
-        "reason": str(reason or "retired").strip(),
-        "stop_before_archive": bool(stop_before_archive),
-        "archive_conversation": True,
-        "close_tab": True,
+        "operation": op,
+        "reason": str(reason or op).strip(),
+        "stop_before_archive": stop_flag,
+        "stop_before_action": stop_flag,
+        "archive_conversation": (op == "archive"),
+        "close_tab": (not is_unarchive),
         "status": "pending",
         "created_at": ts_str,
     }
@@ -559,6 +580,101 @@ def _enqueue_retire_action(
     if len(retire_list) > 80:
         state["retire_actions"] = retire_list[-80:]
     return item
+
+
+def _enqueue_retire_for_all_task_convs(
+    state: dict,
+    session_key: str,
+    binding: dict | None,
+    operation: str = "archive",
+    reason: str = "",
+    now_iso: str = "",
+    stop_before_archive: bool = True,
+    not_before_epoch: float = 0.0,
+) -> list[dict]:
+    """Enqueue retire_action (archive or delete) for both the primary conv_uuid and all historical retired_sessions/retired_uuids."""
+    if not isinstance(binding, dict):
+        return []
+    ts_str = now_iso or _utc_now_iso()
+    default_provider = str(binding.get("provider") or "chatgpt").strip() or "chatgpt"
+    default_carrier = str(binding.get("carrier") or binding.get("browser_profile") or "").strip()
+    proj_prefix = str(binding.get("project_prefix") or "").strip()
+    tab_id = str(binding.get("tab_id") or "").strip()
+    seen_uuids: set[str] = set()
+    enqueued: list[dict] = []
+
+    primary_u = str(binding.get("conv_uuid") or "").strip()
+    if primary_u:
+        seen_uuids.add(primary_u)
+        act = _enqueue_retire_action(
+            state,
+            session_key,
+            primary_u,
+            tab_id=tab_id,
+            browser_profile=default_carrier,
+            project_prefix=proj_prefix,
+            reason=reason,
+            now_iso=ts_str,
+            stop_before_archive=stop_before_archive,
+            not_before_epoch=not_before_epoch,
+            operation=operation,
+            provider=default_provider,
+            carrier=default_carrier,
+        )
+        if act:
+            enqueued.append(act)
+
+    for rs in (binding.get("retired_sessions") or []):
+        if not isinstance(rs, dict):
+            continue
+        ru = str(rs.get("conv_uuid") or "").strip()
+        if not ru or ru in seen_uuids:
+            continue
+        seen_uuids.add(ru)
+        r_prov = str(rs.get("provider") or default_provider).strip() or default_provider
+        r_carr = str(rs.get("carrier") or default_carrier).strip() or default_carrier
+        act = _enqueue_retire_action(
+            state,
+            session_key,
+            ru,
+            tab_id="",
+            browser_profile=r_carr,
+            project_prefix=proj_prefix,
+            reason=reason,
+            now_iso=ts_str,
+            stop_before_archive=stop_before_archive,
+            not_before_epoch=not_before_epoch,
+            operation=operation,
+            provider=r_prov,
+            carrier=r_carr,
+        )
+        if act:
+            enqueued.append(act)
+
+    for ru_raw in (binding.get("retired_uuids") or []):
+        ru = str(ru_raw or "").strip()
+        if not ru or ru in seen_uuids:
+            continue
+        seen_uuids.add(ru)
+        act = _enqueue_retire_action(
+            state,
+            session_key,
+            ru,
+            tab_id="",
+            browser_profile=default_carrier,
+            project_prefix=proj_prefix,
+            reason=reason,
+            now_iso=ts_str,
+            stop_before_archive=stop_before_archive,
+            not_before_epoch=not_before_epoch,
+            operation=operation,
+            provider=default_provider,
+            carrier=default_carrier,
+        )
+        if act:
+            enqueued.append(act)
+
+    return enqueued
 
 
 def _retire_due(retire_item: dict, now_epoch: float | None = None) -> bool:
@@ -637,31 +753,65 @@ def _ensure_binding_entry(raw_binding: dict | None, browser_profile: str = "Chro
     b = dict(raw_binding) if isinstance(raw_binding, dict) else {}
     cfg = default_cfg if isinstance(default_cfg, dict) else {}
     fallback_prof = str(cfg.get("default_browser_profile") or browser_profile or _get_default_browser_profile()).strip()
-    prof = _normalize_profile_spec(str(b.get("browser_profile") or fallback_prof or "Chrome:Default").strip(), str(b.get("browser") or "Chrome").strip())
+    raw_carrier = str(b.get("carrier") or b.get("browser_profile") or fallback_prof or "Chrome:Default").strip()
+    prof = _normalize_profile_spec(raw_carrier, str(b.get("browser") or "Chrome").strip())
     if prof.lower().startswith("desktop:"):
         browser = "Desktop"
     elif prof.lower().startswith("edge:"):
         browser = "Edge"
     else:
         browser = str(b.get("browser") or "Chrome").strip()
+    provider = str(b.get("provider") or "chatgpt").strip().lower() or "chatgpt"
     retired = b.get("retired_uuids")
     if not isinstance(retired, list):
         retired = []
     else:
         retired = [str(u).strip() for u in retired if str(u).strip()]
+    raw_ret_sessions = b.get("retired_sessions")
+    retired_sessions: list[dict] = []
+    seen_rs_uuids: set[str] = set()
+    if isinstance(raw_ret_sessions, list):
+        for rs in raw_ret_sessions:
+            if not isinstance(rs, dict):
+                continue
+            ru = str(rs.get("conv_uuid") or "").strip()
+            if not ru or ru in seen_rs_uuids:
+                continue
+            seen_rs_uuids.add(ru)
+            retired_sessions.append({
+                "provider": str(rs.get("provider") or provider).strip().lower() or provider,
+                "carrier": str(rs.get("carrier") or prof).strip() or prof,
+                "conv_uuid": ru,
+                "retired_at": str(rs.get("retired_at") or b.get("updated_at") or _utc_now_iso()),
+            })
+            if ru not in retired:
+                retired.append(ru)
+    for ru in retired:
+        if ru and ru not in seen_rs_uuids:
+            seen_rs_uuids.add(ru)
+            retired_sessions.append({
+                "provider": provider,
+                "carrier": prof,
+                "conv_uuid": ru,
+                "retired_at": str(b.get("updated_at") or _utc_now_iso()),
+            })
     def_stall_sec = _resolve_stall_seconds(cfg, 180)
     eff_stall_sec = _resolve_stall_seconds(b, def_stall_sec)
     def_retries = max(1, int(cfg.get("max_retries") or 1))
     def_model = str(cfg.get("default_target_model") or "inherit").strip()
     def_effort = str(cfg.get("default_reasoning_effort") or "inherit").strip()
+    user_locked_carrier = bool(b.get("user_locked_carrier", b.get("user_locked_browser", False)))
     return {
+        "provider": provider,
+        "carrier": prof,
         "conv_uuid": str(b.get("conv_uuid") or "").strip(),
         "project_prefix": _extract_project_prefix(str(b.get("url") or ""), str(b.get("project_prefix") or "")),
         "tab_id": str(b.get("tab_id") or "").strip(),
         "title": str(b.get("title") or "").strip(),
         "browser": browser,
         "browser_profile": prof,
-        "user_locked_browser": bool(b.get("user_locked_browser", False)),
+        "user_locked_browser": user_locked_carrier,
+        "user_locked_carrier": user_locked_carrier,
         "target_mode": _normalize_target_mode(str(b.get("target_mode") or "")),
         "target_model": str(b.get("target_model") or def_model or "inherit").strip(),
         "reasoning_effort": str(b.get("reasoning_effort") or def_effort or "inherit").strip(),
@@ -674,6 +824,7 @@ def _ensure_binding_entry(raw_binding: dict | None, browser_profile: str = "Chro
         "stall_seconds": eff_stall_sec,
         "max_retries": max(1, int(b.get("max_retries") or def_retries)),
         "retired_uuids": retired,
+        "retired_sessions": retired_sessions,
         "desktop_draft_conv": str(b.get("desktop_draft_conv") or "").strip(),
         "desktop_draft_until": float(b.get("desktop_draft_until") or 0.0),
         "desktop_draft_msg_id": str(b.get("desktop_draft_msg_id") or "").strip(),
@@ -745,19 +896,44 @@ def _ensure_breaker_entry(raw_brk: dict | None, default_cmd_count: int = 0, sess
 
 
 def _bind_conv_uuid(binding: dict, new_uuid: str, clear_if_empty: bool = False) -> None:
-    """Retire previous conv_uuid into retired_uuids and bind new_uuid cleanly."""
+    """Retire previous conv_uuid into retired_uuids & retired_sessions and bind new_uuid cleanly."""
     old_u = str(binding.get("conv_uuid") or "").strip()
     retired = binding.setdefault("retired_uuids", [])
+    ret_sessions = binding.setdefault("retired_sessions", [])
+    if not isinstance(ret_sessions, list):
+        ret_sessions = []
+        binding["retired_sessions"] = ret_sessions
+    provider = str(binding.get("provider") or "chatgpt").strip().lower() or "chatgpt"
+    carrier = str(binding.get("carrier") or binding.get("browser_profile") or "Chrome:Default").strip() or "Chrome:Default"
+    now_iso = _utc_now_iso()
+
+    def _add_retired(u_val: str) -> None:
+        if not u_val:
+            return
+        if u_val not in retired:
+            retired.append(u_val)
+        if not any(isinstance(rs, dict) and str(rs.get("conv_uuid") or "").strip() == u_val for rs in ret_sessions):
+            ret_sessions.append({
+                "provider": provider,
+                "carrier": carrier,
+                "conv_uuid": u_val,
+                "retired_at": now_iso,
+            })
+
     clean_new = str(new_uuid or "").strip()
     if clean_new:
-        if old_u and old_u != clean_new and old_u not in retired:
-            retired.append(old_u)
+        if old_u and old_u != clean_new:
+            _add_retired(old_u)
         if clean_new in retired:
             retired.remove(clean_new)
+        binding["retired_sessions"] = [
+            rs for rs in ret_sessions
+            if isinstance(rs, dict) and str(rs.get("conv_uuid") or "").strip() != clean_new
+        ]
         binding["conv_uuid"] = clean_new
     elif clear_if_empty:
-        if old_u and old_u not in retired:
-            retired.append(old_u)
+        if old_u:
+            _add_retired(old_u)
         binding["conv_uuid"] = ""
 
 
@@ -1567,18 +1743,21 @@ def rewrite_tools_call_response_payload(
 
 
 # ============================================================================
-# 【组块 M4】两段式生命周期（归档自动复活 + 物理粉碎机）与任务读取
+# ============================================================================
+# 【组块 M4】纯粹两段式生命周期（归档抽屉 + 双端确认彻底删除 + 账本① task-registry.json）
 # ============================================================================
 
-def load_task_archives(data_root: str) -> tuple[dict[str, str], dict[str, str]]:
-    """Return (overrides_state_map, archived_at_map) from data/task-archives.json."""
+def _load_task_archives_full(data_root: str) -> tuple[dict[str, str], dict[str, str], dict[str, str], dict[str, str]]:
+    """Return (overrides, archived_at, restored_at, archive_reasons) from data/task-archives.json, normalizing legacy 'deleted' to 'archived'."""
     overrides: dict[str, str] = {}
     archived_at: dict[str, str] = {}
+    restored_at: dict[str, str] = {}
+    archive_reasons: dict[str, str] = {}
     if not data_root:
-        return overrides, archived_at
+        return overrides, archived_at, restored_at, archive_reasons
     arch_path = os.path.join(data_root, "task-archives.json")
     if not os.path.isfile(arch_path):
-        return overrides, archived_at
+        return overrides, archived_at, restored_at, archive_reasons
     try:
         with open(arch_path, "r", encoding="utf-8-sig") as fh:
             doc = json.load(fh)
@@ -1587,41 +1766,71 @@ def load_task_archives(data_root: str) -> tuple[dict[str, str], dict[str, str]]:
             if isinstance(raw_ov, dict):
                 for k, v in raw_ov.items():
                     if isinstance(v, dict):
-                        st = str(v.get("state") or "auto").strip()
+                        st = str(v.get("state") or "auto").strip().lower()
+                        if st == "deleted":
+                            st = "archived"
                         overrides[str(k)] = st
                         if v.get("archived_at"):
                             archived_at[str(k)] = str(v.get("archived_at"))
                     elif isinstance(v, str):
-                        overrides[str(k)] = v.strip()
+                        st = v.strip().lower()
+                        if st == "deleted":
+                            st = "archived"
+                        overrides[str(k)] = st
             raw_at = doc.get("archived_at")
             if isinstance(raw_at, dict):
                 for k, v in raw_at.items():
                     if v:
                         archived_at[str(k)] = str(v)
+            raw_rest = doc.get("restored_at")
+            if isinstance(raw_rest, dict):
+                for k, v in raw_rest.items():
+                    if v:
+                        restored_at[str(k)] = str(v)
+            raw_reasons = doc.get("archive_reasons")
+            if isinstance(raw_reasons, dict):
+                for k, v in raw_reasons.items():
+                    if v:
+                        archive_reasons[str(k)] = str(v)
     except Exception:
         pass
+    return overrides, archived_at, restored_at, archive_reasons
+
+
+def load_task_archives(data_root: str) -> tuple[dict[str, str], dict[str, str]]:
+    """Return (overrides_state_map, archived_at_map) from data/task-archives.json."""
+    overrides, archived_at, _, _ = _load_task_archives_full(data_root)
     return overrides, archived_at
 
 
-def save_task_archive_state(data_root: str, session_key: str, state_val: str) -> dict:
-    """Persist archive state while keeping overrides[key] a plain string for PS backward compatibility."""
+def save_task_archive_state(data_root: str, session_key: str, state_val: str, reason: str = "") -> dict:
+    """Persist archive state while keeping overrides[key] a plain string for PS backward compatibility.
+    Legacy 'deleted' is normalized to 'archived' (no soft-deleted middle state).
+    """
     if not data_root or not session_key:
         return {}
-    overrides, archived_at = load_task_archives(data_root)
+    overrides, archived_at, restored_at, archive_reasons = _load_task_archives_full(data_root)
     now_iso = _utc_now_iso()
     norm_state = str(state_val or "auto").strip().lower()
+    if norm_state == "deleted":
+        norm_state = "archived"
     if norm_state == "auto":
         overrides.pop(session_key, None)
         archived_at.pop(session_key, None)
+        archive_reasons.pop(session_key, None)
+        restored_at[session_key] = now_iso
     elif norm_state == "archived":
         overrides[session_key] = "archived"
         archived_at[session_key] = now_iso
+        if reason:
+            archive_reasons[session_key] = str(reason)
+        elif session_key not in archive_reasons:
+            archive_reasons[session_key] = "手动归档"
     elif norm_state == "active":
         overrides[session_key] = "active"
         archived_at.pop(session_key, None)
-    elif norm_state == "deleted":
-        overrides[session_key] = "deleted"
-        archived_at[session_key] = now_iso
+        archive_reasons.pop(session_key, None)
+        restored_at[session_key] = now_iso
 
     arch_path = os.path.join(data_root, "task-archives.json")
     os.makedirs(os.path.dirname(arch_path), exist_ok=True)
@@ -1630,12 +1839,139 @@ def save_task_archive_state(data_root: str, session_key: str, state_val: str) ->
         "updated_at": now_iso,
         "overrides": overrides,
         "archived_at": archived_at,
+        "restored_at": restored_at,
+        "archive_reasons": archive_reasons,
     }
     tmp_path = f"{arch_path}.{threading.get_ident()}.tmp"
     with open(tmp_path, "w", encoding="utf-8") as fh:
         json.dump(payload, fh, ensure_ascii=False, indent=2)
     os.replace(tmp_path, arch_path)
+
+    # Keep Ledger ① (task-registry.json) synchronized if present
+    reg_path = os.path.join(data_root, "task-registry.json")
+    if os.path.isfile(reg_path):
+        try:
+            reg_doc = load_task_registry(data_root)
+            tasks_map = reg_doc.setdefault("tasks", {})
+            entry = tasks_map.get(session_key)
+            if isinstance(entry, dict):
+                if norm_state == "archived":
+                    entry["lifecycle"] = "archived"
+                    entry["archived_at"] = now_iso
+                    if archive_reasons.get(session_key):
+                        entry["archive_reason"] = archive_reasons[session_key]
+                else:
+                    entry["lifecycle"] = "completed" if entry.get("completed_at") else "active"
+                    entry["archived_at"] = ""
+                    entry["restored_at"] = now_iso
+                save_task_registry(data_root, reg_doc)
+        except Exception:
+            pass
     return payload
+
+
+def load_task_registry(data_root: str) -> dict:
+    """Load Ledger ① (data/task-registry.json)."""
+    if not data_root:
+        return {"schema_version": 1, "updated_at": _utc_now_iso(), "tasks": {}}
+    reg_path = os.path.join(data_root, "task-registry.json")
+    if os.path.isfile(reg_path):
+        try:
+            with open(reg_path, "r", encoding="utf-8-sig") as fh:
+                doc = json.load(fh)
+            if isinstance(doc, dict) and isinstance(doc.get("tasks"), dict):
+                return doc
+        except Exception:
+            pass
+    return {"schema_version": 1, "updated_at": _utc_now_iso(), "tasks": {}}
+
+
+def save_task_registry(data_root: str, reg_doc: dict) -> None:
+    """Atomically persist Ledger ① (data/task-registry.json)."""
+    if not data_root or not isinstance(reg_doc, dict):
+        return
+    reg_path = os.path.join(data_root, "task-registry.json")
+    os.makedirs(os.path.dirname(reg_path), exist_ok=True)
+    reg_doc["schema_version"] = 1
+    reg_doc["updated_at"] = _utc_now_iso()
+    tmp_path = f"{reg_path}.{threading.get_ident()}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as fh:
+        json.dump(reg_doc, fh, ensure_ascii=False, indent=2)
+    os.replace(tmp_path, reg_path)
+
+
+def sync_task_registry(
+    data_root: str,
+    tasks_by_id: dict[str, dict],
+    wb_state: dict,
+    overrides: dict[str, str],
+    archived_at: dict[str, str],
+    restored_at: dict[str, str],
+    archive_reasons: dict[str, str],
+    aliases: dict[str, str],
+) -> dict:
+    """Synchronize and auto-migrate Ledger ① (data/task-registry.json) from task ledgers, archives, aliases, and bindings."""
+    if not data_root:
+        return {"schema_version": 1, "updated_at": _utc_now_iso(), "tasks": {}}
+    reg_doc = load_task_registry(data_root)
+    reg_tasks = reg_doc.get("tasks") if isinstance(reg_doc.get("tasks"), dict) else {}
+    bindings = (wb_state.get("session_bindings") or {}) if isinstance(wb_state, dict) else {}
+    ar_cfg = (wb_state.get("auto_resend_config") or {}) if isinstance(wb_state, dict) else {}
+    new_tasks: dict[str, dict] = {}
+    changed = not os.path.isfile(os.path.join(data_root, "task-registry.json"))
+
+    all_ids = list(tasks_by_id.keys())
+    for tid in all_ids:
+        t_obj = tasks_by_id[tid]
+        prev = reg_tasks.get(tid) if isinstance(reg_tasks.get(tid), dict) else {}
+        b_entry = _ensure_binding_entry(bindings.get(tid), default_cfg=ar_cfg)
+        is_comp = is_task_completed(t_obj)
+        ov = overrides.get(tid, "")
+        lifecycle = "archived" if ov == "archived" else ("completed" if is_comp else "active")
+        comp_at = str(t_obj.get("completed_at") or prev.get("completed_at") or (t_obj.get("updated_at") if is_comp else "") or "")
+        arch_at = str(archived_at.get(tid) or (prev.get("archived_at") if lifecycle == "archived" else "") or "")
+        rest_at = str(restored_at.get(tid) or prev.get("restored_at") or "")
+        arch_reason = str(archive_reasons.get(tid) or (prev.get("archive_reason") if lifecycle == "archived" else "") or "")
+        entry = {
+            "task_id": tid,
+            "title": str(t_obj.get("title") or prev.get("title") or tid),
+            "custom_alias": str(aliases.get(tid) or ""),
+            "lifecycle": lifecycle,
+            "created_at": str(t_obj.get("created_at") or prev.get("created_at") or ""),
+            "completed_at": comp_at,
+            "archived_at": arch_at,
+            "restored_at": rest_at,
+            "archive_reason": arch_reason,
+            "active_binding": {
+                "provider": str(b_entry.get("provider") or "chatgpt"),
+                "carrier": str(b_entry.get("carrier") or b_entry.get("browser_profile") or "Chrome:Default"),
+                "conv_uuid": str(b_entry.get("conv_uuid") or ""),
+            },
+            "retired_sessions": list(b_entry.get("retired_sessions") or []),
+            "preferences": {
+                "target_model": str(b_entry.get("target_model") or "inherit"),
+                "reasoning_effort": str(b_entry.get("reasoning_effort") or "inherit"),
+                "user_locked_model": bool(b_entry.get("user_locked_model", False)),
+                "user_locked_effort": bool(b_entry.get("user_locked_effort", False)),
+                "user_locked_carrier": bool(b_entry.get("user_locked_carrier", b_entry.get("user_locked_browser", False))),
+                "auto_resend_enabled": bool(b_entry.get("auto_resend_enabled", True)),
+                "stall_seconds": int(b_entry.get("stall_seconds") or 180),
+                "max_retries": int(b_entry.get("max_retries") or 1),
+            },
+        }
+        new_tasks[tid] = entry
+        if prev != entry:
+            changed = True
+
+    if set(reg_tasks.keys()) != set(new_tasks.keys()):
+        changed = True
+    reg_doc["tasks"] = new_tasks
+    if changed:
+        try:
+            save_task_registry(data_root, reg_doc)
+        except Exception:
+            pass
+    return reg_doc
 
 
 def load_all_tasks(tasks_root: str) -> list[dict]:
@@ -1672,7 +2008,7 @@ def list_active_unfinished_tasks(tasks_root: str, data_root: str) -> list[dict]:
         if not tid:
             continue
         ov = overrides.get(tid, "")
-        if ov in ("archived", "deleted"):
+        if ov == "archived":
             continue
         status = str(t.get("status") or "").strip().lower()
         if status not in ACTIVE_TASK_STATUSES and ov != "active":
@@ -1684,9 +2020,15 @@ def list_active_unfinished_tasks(tasks_root: str, data_root: str) -> list[dict]:
 
 
 def purge_archived_session(data_root: str, tasks_root: str, session_key: str) -> dict:
-    """Stage 2 Physical Shredder: delete tsk_*.json, remove from archives/bindings, and trim tunnel.out.log."""
+    """Stage 2 Physical Shredder + Cloud Delete Enqueue:
+    - Physically delete engine-data/tasks/tsk_*.json
+    - Remove from task-archives.json, task-registry.json, session-aliases.json (never leave 'deleted' tombstone)
+    - Enqueue operation='delete' retire_actions for conv_uuid + all retired_sessions/retired_uuids before popping session_bindings
+    - Trim shield-activity.json and tunnel.out.log
+    """
     if not session_key:
         return {"ok": False, "purged": []}
+    now_iso = _utc_now_iso()
     purged_files = []
     if tasks_root:
         task_file = os.path.join(tasks_root, f"{session_key}.json")
@@ -1697,25 +2039,47 @@ def purge_archived_session(data_root: str, tasks_root: str, session_key: str) ->
             except Exception:
                 pass
 
-    # Clean task-archives.json
+    deleted_convs: list[str] = []
     if data_root:
-        overrides, archived_at = load_task_archives(data_root)
-        if purged_files:
-            overrides.pop(session_key, None)
-        else:
-            overrides[session_key] = "deleted"
+        # Read any binding from task-registry.json as backup before removing
+        reg_binding_backup: dict = {}
+        reg_path = os.path.join(data_root, "task-registry.json")
+        if os.path.isfile(reg_path):
+            try:
+                reg_doc = load_task_registry(data_root)
+                reg_entry = (reg_doc.get("tasks") or {}).pop(session_key, None)
+                if isinstance(reg_entry, dict):
+                    ab = reg_entry.get("active_binding") if isinstance(reg_entry.get("active_binding"), dict) else {}
+                    reg_binding_backup = {
+                        "provider": ab.get("provider", "chatgpt"),
+                        "carrier": ab.get("carrier", "Chrome:Default"),
+                        "browser_profile": ab.get("carrier", "Chrome:Default"),
+                        "conv_uuid": ab.get("conv_uuid", ""),
+                        "retired_sessions": reg_entry.get("retired_sessions") or [],
+                    }
+                save_task_registry(data_root, reg_doc)
+            except Exception:
+                pass
+
+        # Clean task-archives.json (strictly pop, never set overrides[session_key] = "deleted")
+        overrides, archived_at, restored_at, archive_reasons = _load_task_archives_full(data_root)
+        overrides.pop(session_key, None)
         archived_at.pop(session_key, None)
+        restored_at.pop(session_key, None)
+        archive_reasons.pop(session_key, None)
         arch_path = os.path.join(data_root, "task-archives.json")
-        if os.path.isfile(arch_path) or overrides or archived_at:
+        if os.path.isfile(arch_path) or overrides or archived_at or restored_at:
             os.makedirs(os.path.dirname(arch_path), exist_ok=True)
             tmp_arch = f"{arch_path}.{threading.get_ident()}.tmp"
             with open(tmp_arch, "w", encoding="utf-8") as fh:
                 json.dump(
                     {
                         "schema_version": 2,
-                        "updated_at": _utc_now_iso(),
+                        "updated_at": now_iso,
                         "overrides": overrides,
                         "archived_at": archived_at,
+                        "restored_at": restored_at,
+                        "archive_reasons": archive_reasons,
                     },
                     fh,
                     ensure_ascii=False,
@@ -1739,12 +2103,24 @@ def purge_archived_session(data_root: str, tasks_root: str, session_key: str) ->
             except Exception:
                 pass
 
-        # Clean web-bridge-state.json
+        # Enqueue cloud delete for conv_uuid + retired_sessions/retired_uuids and clean web-bridge-state.json
         wb_path = os.path.join(data_root, "logs", "web-bridge-state.json")
         with _WEB_BRIDGE_LOCK:
-            if os.path.isfile(wb_path):
+            if os.path.isfile(wb_path) or reg_binding_backup.get("conv_uuid") or reg_binding_backup.get("retired_sessions"):
                 state = _load_web_bridge_state(wb_path)
-                state["session_bindings"].pop(session_key, None)
+                raw_b = state["session_bindings"].pop(session_key, None)
+                b_to_purge = _ensure_binding_entry(raw_b if isinstance(raw_b, dict) else reg_binding_backup, default_cfg=state.get("auto_resend_config"))
+                enq_items = _enqueue_retire_for_all_task_convs(
+                    state,
+                    session_key,
+                    b_to_purge,
+                    operation="delete",
+                    reason="task_purged",
+                    now_iso=now_iso,
+                    stop_before_archive=True,
+                    not_before_epoch=0.0,
+                )
+                deleted_convs = [str(it.get("conv_uuid") or "") for it in enq_items if it.get("conv_uuid")]
                 state["breakers"].pop(session_key, None)
                 state["queue"] = [m for m in state["queue"] if m.get("session_key") != session_key]
                 _save_web_bridge_state(wb_path, state)
@@ -1799,7 +2175,13 @@ def purge_archived_session(data_root: str, tasks_root: str, session_key: str) ->
                 except Exception:
                     pass
 
-    return {"ok": True, "session_key": session_key, "purged_files": purged_files, "purged_task_file": bool(purged_files)}
+    return {
+        "ok": True,
+        "session_key": session_key,
+        "purged_files": purged_files,
+        "purged_task_file": bool(purged_files),
+        "deleted_conversations": deleted_convs,
+    }
 
 
 # ============================================================================
@@ -3545,12 +3927,49 @@ def build_queue_digest(wb_path: str, since_rev: str = "") -> dict:
     }
 
 
+def _resolve_auto_archive_completed_mode(data_root: str, ar_cfg: dict | None = None) -> tuple[str, float | None, str]:
+    """Resolve completed-task auto-archive setting: immediate | 1d | 3d (default) | 7d | off."""
+    raw_mode = ""
+    if isinstance(ar_cfg, dict) and ar_cfg.get("auto_archive_completed_mode"):
+        raw_mode = str(ar_cfg.get("auto_archive_completed_mode") or "").strip().lower()
+    if not raw_mode and data_root:
+        settings_path = os.path.join(data_root, "settings.json")
+        if os.path.isfile(settings_path):
+            try:
+                with open(settings_path, "r", encoding="utf-8-sig") as fh:
+                    sdoc = json.load(fh)
+                if isinstance(sdoc, dict) and sdoc.get("auto_archive_completed_mode"):
+                    raw_mode = str(sdoc.get("auto_archive_completed_mode") or "").strip().lower()
+            except Exception:
+                pass
+    if not raw_mode:
+        raw_mode = str(_get_local_settings().get("auto_archive_completed_mode") or "3d").strip().lower()
+    mode_map = {
+        "immediate": ("immediate", 0.0, "已完工立即自动归档"),
+        "0": ("immediate", 0.0, "已完工立即自动归档"),
+        "0d": ("immediate", 0.0, "已完工立即自动归档"),
+        "1d": ("1d", 86400.0, "已完工满 1 天自动归档"),
+        "1": ("1d", 86400.0, "已完工满 1 天自动归档"),
+        "3d": ("3d", 3 * 86400.0, "已完工满 3 天自动归档"),
+        "3": ("3d", 3 * 86400.0, "已完工满 3 天自动归档"),
+        "7d": ("7d", 7 * 86400.0, "已完工满 7 天自动归档"),
+        "7": ("7d", 7 * 86400.0, "已完工满 7 天自动归档"),
+        "off": ("off", None, ""),
+        "disabled": ("off", None, ""),
+        "none": ("off", None, ""),
+        "false": ("off", None, ""),
+    }
+    return mode_map.get(raw_mode, ("3d", 3 * 86400.0, "已完工满 3 天自动归档"))
+
+
 def _compute_studio_state_sig(data_root: str, tasks_root: str, wb_path: str, now_epoch: float | None = None) -> str:
     now = now_epoch if now_epoch is not None else time.time()
     logs_dir = os.path.join(data_root, "logs") if data_root else ""
     tunnel_log_path = os.path.join(logs_dir, "tunnel.out.log") if logs_dir else ""
     activity_path = os.path.join(logs_dir, "shield-activity.json") if logs_dir else ""
     archives_path = os.path.join(data_root, "task-archives.json") if data_root else ""
+    registry_path = os.path.join(data_root, "task-registry.json") if data_root else ""
+    settings_path = os.path.join(data_root, "settings.json") if data_root else ""
     aliases_path = os.path.join(data_root, "session-aliases.json") if data_root else ""
     wb_sig, _ = _get_wb_logical_sigs(wb_path, now)
     codex_path = _CODEX_GLOBAL_STATE_PATH or (
@@ -3563,6 +3982,8 @@ def _compute_studio_state_sig(data_root: str, tasks_root: str, wb_path: str, now
         _file_stat_sig(tunnel_log_path),
         _file_stat_sig(activity_path),
         _file_stat_sig(archives_path),
+        _file_stat_sig(registry_path),
+        _file_stat_sig(settings_path),
         _file_stat_sig(aliases_path),
         _file_stat_sig(codex_path),
         _tasks_dir_stat_sig(tasks_root),
@@ -3573,7 +3994,7 @@ def _compute_studio_state_sig(data_root: str, tasks_root: str, wb_path: str, now
 
 
 def build_studio_snapshot(data_root: str, tasks_root: str, web_bridge_path: str = "", since_sig: str = "") -> dict:
-    """Assemble <10ms unified studio snapshot with M2 attribution, M4 auto-revive, and full 43-field UI contract."""
+    """Assemble <10ms unified studio snapshot with M2 attribution, pure two-stage lifecycle, completed-task auto-archive, and Ledger ① sync."""
     now_epoch = time.time()
     now_iso = _utc_now_iso()
     logs_dir = os.path.join(data_root, "logs") if data_root else ""
@@ -3625,13 +4046,14 @@ def build_studio_snapshot(data_root: str, tasks_root: str, web_bridge_path: str 
             t["_updated_epoch"] = max(float(t.get("_updated_epoch") or 0.0), max(cp_epochs))
 
     tasks_by_id = {str(t["id"]): t for t in tasks if t.get("id")}
-    overrides, archived_at = load_task_archives(data_root)
+    overrides, archived_at, restored_at, archive_reasons = _load_task_archives_full(data_root)
     wb_state = _load_web_bridge_state(wb_path)
     effective_models = _get_effective_available_models(wb_state)
     bindings = wb_state.get("session_bindings") or {}
     breakers_map = wb_state.get("breakers") or {}
     queue_list = wb_state.get("queue") or []
     ar_cfg = wb_state.get("auto_resend_config") or {}
+    aa_mode, aa_threshold_sec, aa_label = _resolve_auto_archive_completed_mode(data_root, ar_cfg)
 
     aliases = {}
     if data_root:
@@ -3938,28 +4360,67 @@ def build_studio_snapshot(data_root: str, tasks_root: str, web_bridge_path: str 
 
     sessions = []
     archived_sessions = []
+    wb_state_dirty_from_auto_archive = False
 
     for key, item in grouped.items():
         ov = overrides.get(key, "")
-        if ov == "deleted":
-            continue
-
-        # 【组块 M4】Auto-Revive: if archived_at < LastEpoch, automatically revive to active!
-        if ov == "archived":
-            arch_iso = archived_at.get(key, "")
-            arch_epoch = _parse_iso_epoch(arch_iso)
-            if arch_epoch > 0 and item["LastEpoch"] > arch_epoch + 0.001:
-                save_task_archive_state(data_root, key, "active")
-                ov = "active"
+        t_obj = item.get("TaskObj")
+        task_completed = is_task_completed(t_obj)
 
         session_in_flight = bool(item.get("InFlight")) or (
             (unattributed_in_flight > 0 or (not calls_map and raw_in_flight > 0)) and bool(item.get("TaskObj"))
         )
         raw_elapsed = max(0, int(now_epoch - item["LastEpoch"])) if item["LastEpoch"] > 0 else 0
-        is_auto_archived = (ov != "active") and (item["LastEpoch"] > 0 and raw_elapsed >= 86400)
-        is_archived = (ov == "archived") or is_auto_archived
 
-        t_obj = item.get("TaskObj")
+        # Spec Decision 3.1 & 3.2:
+        # - Never auto-revive archived tasks on LastEpoch > arch_epoch
+        # - Never auto-archive unfinished tasks after 24h idle
+        # - Auto-archive ONLY completed tasks according to auto_archive_completed_mode (immediate | 1d | 3d | 7d | off)
+        is_completed_auto_archived = False
+        if ov != "archived" and task_completed and aa_threshold_sec is not None:
+            comp_iso = str(
+                (t_obj.get("completed_at") if isinstance(t_obj, dict) else "")
+                or (t_obj.get("updated_at") if isinstance(t_obj, dict) else "")
+                or item.get("LastIso")
+                or ""
+            )
+            comp_ep = max(_parse_iso_epoch(comp_iso), float(item.get("LastEpoch") or 0.0))
+            rest_ep = _parse_iso_epoch(str(restored_at.get(key) or ""))
+            eff_comp_ep = max(comp_ep, rest_ep)
+            # If user explicitly restored a completed task in 'immediate' mode, keep it visible until re-completed or manually archived
+            manually_restored_after_completion = (ov == "active" and rest_ep > 0 and rest_ep >= comp_ep - 0.001)
+            if aa_mode == "immediate":
+                should_auto_arch = not manually_restored_after_completion
+            else:
+                should_auto_arch = (eff_comp_ep > 0 and (now_epoch - eff_comp_ep) >= aa_threshold_sec)
+            if should_auto_arch:
+                is_completed_auto_archived = True
+                ov = "archived"
+                overrides[key] = "archived"
+                archived_at[key] = now_iso
+                archive_reasons[key] = aa_label or "已完工自动归档"
+                if data_root:
+                    save_task_archive_state(data_root, key, "archived", reason=archive_reasons[key])
+                b_auto_arch = _ensure_binding_entry(bindings.get(key), default_cfg=ar_cfg)
+                if b_auto_arch.get("conv_uuid") or b_auto_arch.get("retired_uuids") or b_auto_arch.get("retired_sessions"):
+                    _enqueue_retire_for_all_task_convs(
+                        wb_state,
+                        key,
+                        b_auto_arch,
+                        operation="archive",
+                        reason="completed_auto_archive",
+                        now_iso=now_iso,
+                        stop_before_archive=True,
+                        not_before_epoch=0.0,
+                    )
+                    wb_state_dirty_from_auto_archive = True
+                for qm in queue_list:
+                    if isinstance(qm, dict) and str(qm.get("session_key") or "") == key and qm.get("status") in ("pending", "claimed"):
+                        qm["status"] = "cancelled"
+                        qm["cancelled_at"] = now_iso
+                        wb_state_dirty_from_auto_archive = True
+
+        is_archived = (ov == "archived")
         raw_steps = t_obj.get("steps") if (isinstance(t_obj, dict) and isinstance(t_obj.get("steps"), list)) else []
         done_steps = 0
         ui_steps = []
@@ -4276,9 +4737,12 @@ def build_studio_snapshot(data_root: str, tasks_root: str, web_bridge_path: str 
             "AutoWakeupEnabled": task_auto_enabled,
             "AutoResendEnabled": task_auto_enabled,
             "TargetMode": b_entry["target_mode"],
+            "Provider": b_entry.get("provider", "chatgpt"),
+            "Carrier": b_entry.get("carrier", b_entry["browser_profile"]),
             "BrowserProfile": b_entry["browser_profile"],
             "BoundConvUuid": str(b_entry.get("conv_uuid") or ""),
             "UserLockedBrowser": b_entry["user_locked_browser"],
+            "UserLockedCarrier": b_entry.get("user_locked_carrier", b_entry["user_locked_browser"]),
             "TargetModel": b_entry["target_model"],
             "ReasoningEffort": b_entry["reasoning_effort"],
             "WebCurrentModel": web_cur_model,
@@ -4295,11 +4759,16 @@ def build_studio_snapshot(data_root: str, tasks_root: str, web_bridge_path: str 
             "CardBg": card_bg,
             "CardBorder": card_border,
             "DotColor": dot_color,
+            "Lifecycle": "archived" if is_archived else ("completed" if task_completed else "active"),
             "IsCompleted": bool(task_completed),
             "IsStalled": is_stalled,
             "IsActive": is_active,
             "IsArchived": is_archived,
-            "ArchiveReason": "手动归档" if ov == "archived" else ("超 24h 自动归档" if is_auto_archived else ""),
+            "ArchiveReason": (
+                str(archive_reasons.get(key) or "手动归档")
+                if is_archived
+                else ""
+            ),
             "ArchivedAtText": arch_text,
             "CommandCount": int(item["Count"]),
             "SubagentCount": int(item["SubagentCount"]),
@@ -4308,6 +4777,13 @@ def build_studio_snapshot(data_root: str, tasks_root: str, web_bridge_path: str 
             archived_sessions.append(card)
         else:
             sessions.append(card)
+
+    if wb_state_dirty_from_auto_archive and wb_path:
+        with _WEB_BRIDGE_LOCK:
+            _save_web_bridge_state(wb_path, wb_state)
+
+    if data_root:
+        sync_task_registry(data_root, tasks_by_id, wb_state, overrides, archived_at, restored_at, archive_reasons, aliases)
 
     sessions.sort(key=lambda s: s["ElapsedSeconds"])
     if sessions:
@@ -5114,10 +5590,17 @@ class DesktopAppBridge:
         archived_ok: set[str] = set()
         retired_attempted: list[str] = []
         if pending_retires and page_state:
-            if any(bool(r.get("stop_before_archive")) for r in pending_retires):
+            if any(
+                bool(r.get("stop_before_archive") or r.get("stop_before_action"))
+                and str(r.get("operation") or "archive").strip().lower() != "unarchive"
+                for r in pending_retires
+            ):
                 session.stop_generation()
-            uuids = [str(r.get("conv_uuid") or "") for r in pending_retires if r.get("conv_uuid")]
-            archived_ok = set(session.archive(uuids))
+            if hasattr(session, "execute_retire_actions"):
+                archived_ok = set(session.execute_retire_actions(pending_retires))
+            else:
+                uuids = [str(r.get("conv_uuid") or "") for r in pending_retires if r.get("conv_uuid")]
+                archived_ok = set(session.archive(uuids))
             retired_attempted = [str(r.get("id") or "") for r in pending_retires]
 
         processed = 0
@@ -5185,9 +5668,6 @@ class DesktopAppBridge:
                             r["status"] = "completed"
                             r["completed_at"] = now_iso
                             processed += 1
-                        elif r["attempts"] >= 5:
-                            r["status"] = "failed"
-                            r["completed_at"] = now_iso
             _save_web_bridge_state(wb_path, state)
         return {"ok": True, "processed": processed, "desktop_online": True, "delivery": delivery}
 
@@ -5215,15 +5695,37 @@ class DesktopAppBridge:
                     "visible": True,
                 })
 
-        def _promote_binding_to_conv(b_entry: dict, real_conv: str, obsolete_draft: str = "") -> None:
+        def _promote_binding_to_conv(sk_key: str, b_entry: dict, real_conv: str, obsolete_draft: str = "") -> None:
             ret_list = b_entry.get("retired_uuids") if isinstance(b_entry.get("retired_uuids"), list) else []
             if real_conv in ret_list:
                 return
-            b_entry["conv_uuid"] = real_conv
+            old_c = str(b_entry.get("conv_uuid") or "").strip()
+            draft_c_cur = str(b_entry.get("desktop_draft_conv") or "").strip()
+            if old_c and old_c != real_conv and old_c not in (obsolete_draft, draft_c_cur):
+                _enqueue_retire_action(
+                    state,
+                    sk_key,
+                    old_c,
+                    tab_id=str(b_entry.get("tab_id") or cls.TAB_ID),
+                    browser_profile=cls.PROFILE,
+                    project_prefix=str(b_entry.get("project_prefix") or ""),
+                    reason="desktop_drawer_promoted",
+                    now_iso=now_iso,
+                    stop_before_archive=True,
+                    operation="archive",
+                )
+                _bind_conv_uuid(b_entry, real_conv)
+            else:
+                b_entry["conv_uuid"] = real_conv
             if isinstance(ret_list, list):
-                for d_old in (obsolete_draft, str(b_entry.get("desktop_draft_conv") or "").strip()):
+                for d_old in (obsolete_draft, draft_c_cur):
                     if d_old and d_old in ret_list:
                         ret_list.remove(d_old)
+            if isinstance(b_entry.get("retired_sessions"), list):
+                b_entry["retired_sessions"] = [
+                    rs for rs in b_entry["retired_sessions"]
+                    if isinstance(rs, dict) and str(rs.get("conv_uuid") or "").strip() not in (obsolete_draft, draft_c_cur, real_conv)
+                ]
             draft_mid = str(b_entry.get("desktop_draft_msg_id") or "").strip()
             if draft_mid:
                 for qm in state.get("queue", []):
@@ -5263,7 +5765,7 @@ class DesktopAppBridge:
                     cur_bound_c = str(b_val.get("conv_uuid") or "").strip()
                     pending_uuid = bool(b_val.get("desktop_handover_pending_uuid"))
                     if (draft_c == d_draft or cur_bound_c == d_draft) and (d_conv != cur_bound_c or pending_uuid or bool(draft_c)):
-                        _promote_binding_to_conv(b_val, d_conv, obsolete_draft=d_draft)
+                        _promote_binding_to_conv(sk_b, b_val, d_conv, obsolete_draft=d_draft)
                         promoted_this_drawer = True
                         break
             # Priority 2: Drawer task_hints match for pending/unbound or draft-bound desktop task
@@ -5276,7 +5778,7 @@ class DesktopAppBridge:
                     cur_bound_c = str(b_val.get("conv_uuid") or "").strip()
                     pending_uuid = bool(b_val.get("desktop_handover_pending_uuid"))
                     if (not cur_bound_c or pending_uuid or (draft_c and cur_bound_c == draft_c) or (d_draft and cur_bound_c == d_draft)) and (d_conv != cur_bound_c or pending_uuid or bool(draft_c)):
-                        _promote_binding_to_conv(b_val, d_conv, obsolete_draft=d_draft or draft_c)
+                        _promote_binding_to_conv(h_key, b_val, d_conv, obsolete_draft=d_draft or draft_c)
                         promoted_this_drawer = True
                         break
 
@@ -5292,7 +5794,7 @@ class DesktopAppBridge:
                     continue
                 if (draft_c and cur_bound_c == draft_c) or (pending_uuid and not cur_bound_c):
                     if live_desk_conv != draft_c:
-                        _promote_binding_to_conv(b_val, live_desk_conv, obsolete_draft=draft_c)
+                        _promote_binding_to_conv(sk_b, b_val, live_desk_conv, obsolete_draft=draft_c)
 
     @classmethod
     def _apply_delivery(cls, state: dict, selected: dict, delivery: dict, tasks_root: str, now_iso: str) -> int:
@@ -5318,6 +5820,8 @@ class DesktopAppBridge:
                         project_prefix=str(b.get("project_prefix") or ""),
                         reason="handover_superseded",
                         now_iso=now_iso,
+                        stop_before_archive=True,
+                        operation="archive",
                     )
                 if new_conv:
                     _bind_conv_uuid(b, new_conv)
@@ -5369,7 +5873,7 @@ class DesktopAppBridge:
 
 
 _UNBOUND_MANUAL_GRACE_SEC = 20.0
-ARCHIVE_UNDO_GRACE_SEC = 5.0  # Spec v4.3 Q5: how long a panel archive stays undoable before the web conversation is really archived
+ARCHIVE_UNDO_GRACE_SEC = 0.0  # Spec Decision 2.1: archive is reversible via the Archive Drawer ('↺ 还原'); no 5s undo delay needed
 
 
 def _upgrade_msg_to_stop_loss_handover(state: dict, msg: dict, tasks_root: str, now_iso: str, reason: str, stop_old: bool) -> None:
@@ -5530,6 +6034,11 @@ def _update_tab_and_bindings(state: dict, tab_payload: dict, default_browser: st
         state["available_models"] = tab_models
         if browser_profile:
             state.setdefault("available_models_by_profile", {})[browser_profile] = tab_models
+        m_cache = state.setdefault("models_cache", {"by_provider": {}, "by_carrier": {}})
+        if isinstance(m_cache, dict):
+            m_cache.setdefault("by_provider", {})["chatgpt"] = tab_models
+            if browser_profile:
+                m_cache.setdefault("by_carrier", {})[f"chatgpt|{browser_profile}"] = tab_models
     eff_catalog = (
         tab_models
         or (state.get("available_models_by_profile") or {}).get(browser_profile)
@@ -5577,9 +6086,23 @@ def _update_tab_and_bindings(state: dict, tab_payload: dict, default_browser: st
                 s_key = msg["session_key"]
                 raw_b = dict(state["session_bindings"].get(s_key) or {})
                 prev_bound = str(raw_b.get("conv_uuid") or "").strip()
+                prev_tab = str(raw_b.get("tab_id") or "").strip()
                 _apply_polled_browser_to_binding(raw_b, browser, browser_profile)
                 b = _ensure_binding_entry(raw_b, browser_profile, default_cfg=ar_cfg)
                 if conv_uuid:
+                    if prev_bound and prev_bound != conv_uuid:
+                        _enqueue_retire_action(
+                            state,
+                            s_key,
+                            prev_bound,
+                            tab_id=prev_tab if prev_tab != tab_key else "",
+                            browser_profile=str(b.get("browser_profile") or browser_profile),
+                            project_prefix=str(b.get("project_prefix") or project_prefix),
+                            reason="handover_token_transfer",
+                            now_iso=now_iso,
+                            stop_before_archive=True,
+                            operation="archive",
+                        )
                     _bind_conv_uuid(b, conv_uuid)
                     if not prev_bound:
                         reconcile_delivered_by_activity_in_state(state, s_key, now_iso=now_iso, conv_uuid=conv_uuid)
@@ -5623,8 +6146,10 @@ def _update_tab_and_bindings(state: dict, tab_payload: dict, default_browser: st
                 and not browser_profile.lower().endswith(":default")
             ):
                 b["browser_profile"] = browser_profile
+                b["carrier"] = browser_profile
                 b["browser"] = browser
                 b["user_locked_browser"] = False
+                b["user_locked_carrier"] = False
             b["conv_uuid"] = conv_uuid
             if project_prefix:
                 b["project_prefix"] = project_prefix
@@ -5650,6 +6175,19 @@ def _update_tab_and_bindings(state: dict, tab_payload: dict, default_browser: st
                 if isinstance(t_existing, dict) and t_existing.get("conv_uuid") == cur_bound
             )
             if is_generating and not bound_tab_Generating:
+                prev_tab = str(b.get("tab_id") or "").strip()
+                _enqueue_retire_action(
+                    state,
+                    primary_hint,
+                    cur_bound,
+                    tab_id=prev_tab if prev_tab != tab_key else "",
+                    browser_profile=str(b.get("browser_profile") or browser_profile),
+                    project_prefix=str(b.get("project_prefix") or project_prefix),
+                    reason="active_work_transfer",
+                    now_iso=now_iso,
+                    stop_before_archive=True,
+                    operation="archive",
+                )
                 _bind_conv_uuid(b, conv_uuid)
                 if project_prefix:
                     b["project_prefix"] = project_prefix
@@ -6942,76 +7480,80 @@ def handle_studio_action(data_root: str, tasks_root: str, wb_path: str, payload:
     now_iso = _utc_now_iso()
 
     if action in ("archive", "restore", "delete_soft", "set_archive_state"):
-        if action == "archive":
+        if action in ("archive", "delete_soft"):
             target_state = "archived"
         elif action == "restore":
             target_state = "active"
-        elif action == "delete_soft":
-            target_state = "deleted"
         else:
-            target_state = str(payload.get("state") or "archived").strip().lower()
-        save_task_archive_state(data_root, session_key, target_state)
+            raw_st = str(payload.get("state") or "archived").strip().lower()
+            target_state = "archived" if raw_st in ("archived", "deleted") else raw_st
+        arch_reason = str(payload.get("reason") or ("手动归档" if target_state == "archived" else "")).strip()
+        save_task_archive_state(data_root, session_key, target_state, reason=arch_reason)
         if wb_path and session_key:
             with _WEB_BRIDGE_LOCK:
                 state = _load_web_bridge_state(wb_path)
-                b_arch = state.get("session_bindings", {}).get(session_key)
-                if target_state in ("archived", "deleted"):
-                    # Spec v4.3 Q5: a panel archive is undoable for a short grace window. The conversation is neither stopped nor
-                    # closed and its room number is kept until the grace window passes without an undo; only then is the real
-                    # stop/archive/close action released to the web / desktop host.
-                    if isinstance(b_arch, dict) and b_arch.get("conv_uuid"):
+                raw_b_arch = state.get("session_bindings", {}).get(session_key)
+                b_arch = _ensure_binding_entry(raw_b_arch, default_cfg=state.get("auto_resend_config")) if isinstance(raw_b_arch, dict) else None
+                wb_changed = False
+                if target_state == "archived":
+                    # Spec Decision 2.1: Archiving a task keeps active_binding.conv_uuid intact, cancels pending/claimed
+                    # messages in queue, and enqueues operation='archive' (stop + archive + close tab) for conv_uuid + retired_sessions.
+                    for qm in state.get("queue", []):
+                        if isinstance(qm, dict) and str(qm.get("session_key") or "") == session_key and qm.get("status") in ("pending", "claimed"):
+                            qm["status"] = "cancelled"
+                            qm["cancelled_at"] = now_iso
+                            wb_changed = True
+                    if isinstance(b_arch, dict) and (b_arch.get("conv_uuid") or b_arch.get("retired_uuids") or b_arch.get("retired_sessions")):
+                        _enqueue_retire_for_all_task_convs(
+                            state,
+                            session_key,
+                            b_arch,
+                            operation="archive",
+                            reason="task_archived",
+                            now_iso=now_iso,
+                            stop_before_archive=True,
+                            not_before_epoch=0.0,
+                        )
+                        wb_changed = True
+                elif target_state in ("active", "auto") and isinstance(b_arch, dict):
+                    # Spec Decision 2.2: Restoring a task keeps active_binding.conv_uuid intact, cancels any pending archive
+                    # for that conv_uuid, and enqueues operation='unarchive' ONLY for the primary conv_uuid.
+                    restored_conv = str(b_arch.get("conv_uuid") or "").strip()
+                    b_arch["conv_archived"] = False
+                    if b_arch.get("archive_auto_paused"):
+                        b_arch["auto_resend_enabled"] = True
+                        b_arch["archive_auto_paused"] = False
+                        brk_r = _ensure_breaker_entry(state.setdefault("breakers", {}).get(session_key), session_key=session_key)
+                        brk_r["auto_enabled"] = True
+                        brk_r["message"] = brk_r["last_message"] = ""
+                        state["breakers"][session_key] = brk_r
+                    b_arch["updated_at"] = now_iso
+                    state["session_bindings"][session_key] = b_arch
+                    wb_changed = True
+                    if restored_conv:
                         _enqueue_retire_action(
                             state,
                             session_key,
-                            str(b_arch["conv_uuid"]),
+                            restored_conv,
                             tab_id=str(b_arch.get("tab_id") or ""),
                             browser_profile=str(b_arch.get("browser_profile") or ""),
                             project_prefix=str(b_arch.get("project_prefix") or ""),
-                            reason=f"task_{target_state}",
+                            reason="task_restored",
                             now_iso=now_iso,
-                            not_before_epoch=time.time() + ARCHIVE_UNDO_GRACE_SEC,
+                            stop_before_archive=False,
+                            not_before_epoch=0.0,
+                            operation="unarchive",
+                            provider=str(b_arch.get("provider") or "chatgpt"),
+                            carrier=str(b_arch.get("carrier") or b_arch.get("browser_profile") or ""),
                         )
-                        _save_web_bridge_state(wb_path, state)
-                elif target_state in ("active", "auto") and isinstance(b_arch, dict):
-                    restored_conv = str(b_arch.get("conv_uuid") or "").strip()
-                    changed_restore = False
-                    for r_item in state.get("retire_actions", []):
-                        if not isinstance(r_item, dict) or str(r_item.get("session_key") or "") != session_key:
-                            continue
-                        if str(r_item.get("conv_uuid") or "") != restored_conv or not restored_conv:
-                            continue
-                        r_stat = str(r_item.get("status") or "")
-                        if r_stat == "pending" and not _retire_due(r_item):
-                            # Undo inside the grace window: nothing was stopped or closed -> cancel the pending retire, keep binding.
-                            r_item["status"] = "cancelled"
-                            r_item["completed_at"] = now_iso
-                            changed_restore = True
-                        elif r_stat in ("pending", "completed"):
-                            # The old conversation is already (being) archived: release it so the next send / stall opens a fresh handover.
-                            _bind_conv_uuid(b_arch, "", clear_if_empty=True)
-                            b_arch["tab_id"] = ""
-                            b_arch["conv_archived"] = False
-                            if b_arch.get("archive_auto_paused"):
-                                b_arch["auto_resend_enabled"] = True
-                                b_arch["archive_auto_paused"] = False
-                                brk_r = _ensure_breaker_entry(state.setdefault("breakers", {}).get(session_key), session_key=session_key)
-                                brk_r["auto_enabled"] = True
-                                brk_r["message"] = brk_r["last_message"] = ""
-                                state["breakers"][session_key] = brk_r
-                            if r_stat == "pending":
-                                r_item["status"] = "cancelled"
-                                r_item["completed_at"] = now_iso
-                            state["session_bindings"][session_key] = b_arch
-                            changed_restore = True
-                    if changed_restore:
-                        _save_web_bridge_state(wb_path, state)
+                if wb_changed:
+                    _save_web_bridge_state(wb_path, state)
         return {"ok": True, "action": action, "session_key": session_key, "state": target_state}
 
     if action in ("purge", "delete_session"):
         return purge_archived_session(data_root, tasks_root, session_key)
 
     if action in ("purge_all_archived", "clear_archived"):
-        physical_purge = bool(payload.get("physical_purge", True))
         snap = build_studio_snapshot(data_root, tasks_root, wb_path)
         target_keys = []
         raw_keys = payload.get("session_keys")
@@ -7029,10 +7571,7 @@ def handle_studio_action(data_root: str, tasks_root: str, wb_path: str, payload:
                 target_keys.append(ok_k)
         purged = []
         for s_key in target_keys:
-            if physical_purge:
-                purge_archived_session(data_root, tasks_root, s_key)
-            else:
-                save_task_archive_state(data_root, s_key, "deleted")
+            purge_archived_session(data_root, tasks_root, s_key)
             purged.append(s_key)
         return {"ok": True, "action": action, "purged": purged}
 
@@ -7081,7 +7620,7 @@ def handle_studio_action(data_root: str, tasks_root: str, wb_path: str, payload:
             _save_web_bridge_state(wb_path, state)
         return {"ok": True, "action": "set_auto_wakeup", "session_key": session_key, "enabled": enabled}
 
-    if action == "update_resend_config":
+    if action in ("update_resend_config", "set_global_settings", "set_auto_archive_config"):
         with _WEB_BRIDGE_LOCK:
             state = _load_web_bridge_state(wb_path)
             cfg = state["auto_resend_config"]
@@ -7099,6 +7638,28 @@ def handle_studio_action(data_root: str, tasks_root: str, wb_path: str, payload:
                 cfg["custom_prompt"] = str(payload["custom_prompt"] or "")
             if "default_browser_profile" in payload and payload["default_browser_profile"]:
                 cfg["default_browser_profile"] = str(payload["default_browser_profile"]).strip()
+            if "default_carrier" in payload and payload["default_carrier"]:
+                cfg["default_browser_profile"] = str(payload["default_carrier"]).strip()
+            arch_mode_val = payload.get("auto_archive_completed_mode") or (payload.get("mode") if action == "set_auto_archive_config" else None)
+            if arch_mode_val:
+                cfg["auto_archive_completed_mode"] = str(arch_mode_val).strip().lower()
+                if data_root:
+                    settings_path = os.path.join(data_root, "settings.json")
+                    try:
+                        sdoc = {}
+                        if os.path.isfile(settings_path):
+                            with open(settings_path, "r", encoding="utf-8-sig") as sfh:
+                                loaded_s = json.load(sfh)
+                            if isinstance(loaded_s, dict):
+                                sdoc = loaded_s
+                        sdoc["auto_archive_completed_mode"] = cfg["auto_archive_completed_mode"]
+                        os.makedirs(os.path.dirname(settings_path), exist_ok=True)
+                        tmp_s = f"{settings_path}.{threading.get_ident()}.tmp"
+                        with open(tmp_s, "w", encoding="utf-8") as sfh:
+                            json.dump(sdoc, sfh, ensure_ascii=False, indent=2)
+                        os.replace(tmp_s, settings_path)
+                    except Exception:
+                        pass
             cfg["updated_at"] = now_iso
             state["auto_resend_config"] = cfg
             if "enabled" in payload and isinstance(state.get("session_bindings"), dict):
@@ -7118,7 +7679,7 @@ def handle_studio_action(data_root: str, tasks_root: str, wb_path: str, payload:
                     brk_item["max_retries"] = cfg["max_retries"]
                     state["breakers"][bk] = brk_item
             _save_web_bridge_state(wb_path, state)
-        return {"ok": True, "action": "update_resend_config", "auto_resend_config": cfg}
+        return {"ok": True, "action": action, "auto_resend_config": cfg}
 
     if action == "delete_queued_message":
         msg_id = str(payload.get("msg_id") or payload.get("id") or "").strip()
@@ -7207,24 +7768,43 @@ def handle_studio_action(data_root: str, tasks_root: str, wb_path: str, payload:
             state = _load_web_bridge_state(wb_path)
             ar_cfg = state["auto_resend_config"]
             b = _ensure_binding_entry(state["session_bindings"].get(session_key), default_cfg=ar_cfg)
-            new_prof = str(payload.get("browser_profile") or "").strip()
+            new_prof = str(payload.get("carrier") or payload.get("browser_profile") or "").strip()
+            new_provider = str(payload.get("provider") or "").strip().lower()
             new_conv = str(payload.get("conv_uuid") or "").strip()
             new_tab_id = str(payload.get("tab_id") or "").strip()
             new_title = str(payload.get("title") or "").strip()
             new_proj = _extract_project_prefix("", str(payload.get("project_prefix") or ""))
             new_mode = str(payload.get("target_mode") or "").strip()
 
+            if new_provider:
+                b["provider"] = new_provider
             prev_prof = str(b.get("browser_profile") or "").strip()
             if new_prof:
                 b["user_locked_browser"] = True
-                ar_cfg["default_browser_profile"] = new_prof
+                b["user_locked_carrier"] = True
+                if session_key in ("", "__new_task__"):
+                    ar_cfg["default_browser_profile"] = new_prof
                 if action in ("bind_browser", "set_task_composer_config") and prev_prof and new_prof != prev_prof:
-                    old_u = b.get("conv_uuid", "")
-                    if old_u and old_u not in b["retired_uuids"]:
-                        b["retired_uuids"].append(old_u)
-                    b["conv_uuid"] = ""
+                    old_u = str(b.get("conv_uuid") or "").strip()
+                    if old_u:
+                        _enqueue_retire_action(
+                            state,
+                            session_key,
+                            old_u,
+                            tab_id=str(b.get("tab_id") or ""),
+                            browser_profile=prev_prof,
+                            project_prefix=str(b.get("project_prefix") or ""),
+                            reason="carrier_switched",
+                            now_iso=now_iso,
+                            stop_before_archive=True,
+                            operation="archive",
+                            provider=str(b.get("provider") or "chatgpt"),
+                            carrier=prev_prof,
+                        )
+                        _bind_conv_uuid(b, "", clear_if_empty=True)
                     b["tab_id"] = ""
                 b["browser_profile"] = new_prof
+                b["carrier"] = new_prof
                 b["browser"] = (
                     "Desktop"
                     if new_prof.lower().startswith("desktop:")
@@ -7232,6 +7812,22 @@ def handle_studio_action(data_root: str, tasks_root: str, wb_path: str, payload:
                 )
 
             if new_conv:
+                old_u_rebind = str(b.get("conv_uuid") or "").strip()
+                if old_u_rebind and old_u_rebind != new_conv:
+                    _enqueue_retire_action(
+                        state,
+                        session_key,
+                        old_u_rebind,
+                        tab_id=str(b.get("tab_id") or ""),
+                        browser_profile=str(b.get("browser_profile") or ""),
+                        project_prefix=str(b.get("project_prefix") or ""),
+                        reason="session_rebound",
+                        now_iso=now_iso,
+                        stop_before_archive=True,
+                        operation="archive",
+                        provider=str(b.get("provider") or "chatgpt"),
+                        carrier=str(b.get("carrier") or b.get("browser_profile") or ""),
+                    )
                 _bind_conv_uuid(b, new_conv)
                 b["desktop_handover_pending_uuid"] = False
                 for q_item in state.get("queue", []):
@@ -7374,6 +7970,10 @@ def handle_web_bridge_ack_deliver(wb_path: str, payload: dict, now_iso: str = ""
                         project_prefix=str(b.get("project_prefix") or ""),
                         reason="handover_superseded",
                         now_iso=eff_now,
+                        stop_before_archive=True,
+                        operation="archive",
+                        provider=str(b.get("provider") or "chatgpt"),
+                        carrier=str(b.get("carrier") or b.get("browser_profile") or ""),
                     )
                 if conv_uuid:
                     _bind_conv_uuid(b, conv_uuid)
@@ -7450,13 +8050,18 @@ def handle_web_bridge_ack_retire(wb_path: str, payload: dict, now_iso: str = "")
     eff_now = now_iso or _utc_now_iso()
     retire_id = str(payload.get("retire_id") or "").strip()
     conv_uuid = str(payload.get("conv_uuid") or "").strip()
+    op_filter = str(payload.get("operation") or "").strip().lower()
+    if payload.get("ok") is False:
+        return {"ok": False, "retire_id": retire_id, "conv_uuid": conv_uuid, "error": "cloud_receipt_not_ok"}
     acked = False
     with _WEB_BRIDGE_LOCK:
         state = _load_web_bridge_state(wb_path)
         for r in state.get("retire_actions", []):
             if not isinstance(r, dict):
                 continue
-            if (retire_id and r.get("id") == retire_id) or (conv_uuid and r.get("conv_uuid") == conv_uuid):
+            if op_filter and str(r.get("operation") or "archive").strip().lower() != op_filter:
+                continue
+            if (retire_id and r.get("id") == retire_id) or (conv_uuid and r.get("conv_uuid") == conv_uuid and r.get("status") == "pending"):
                 r["status"] = "completed"
                 r["completed_at"] = eff_now
                 acked = True

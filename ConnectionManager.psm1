@@ -35,28 +35,30 @@ function ConvertTo-TunnelId {
 
 function Get-DefaultConnectionSettings {
     param($Context)
+    $relRoot = if ($Context -and $Context.PSObject.Properties['ReleaseRoot'] -and $Context.ReleaseRoot) { [string]$Context.ReleaseRoot } elseif ($PSScriptRoot) { Split-Path $PSScriptRoot -Parent } else { '' }
+    $legProf = if ($Context -and $Context.PSObject.Properties['LegacyProfilePath'] -and $Context.LegacyProfilePath) { [string]$Context.LegacyProfilePath } else { '' }
     $root = if ($PSScriptRoot -and (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'bin\relaystudio-core.exe'))) {
         $PSScriptRoot
-    } elseif ($Context.ReleaseRoot -and (Test-Path -LiteralPath (Join-Path $Context.ReleaseRoot 'bin\relaystudio-core.exe'))) {
-        $Context.ReleaseRoot
+    } elseif ($relRoot -and (Test-Path -LiteralPath (Join-Path $relRoot 'bin\relaystudio-core.exe'))) {
+        $relRoot
     } elseif ($PSScriptRoot) {
         $PSScriptRoot
     } else {
         Join-Path $env:LOCALAPPDATA 'RelayStudio'
     }
     $id = ''; $base = 'https://api.openai.com'
-    if ($Context.LegacyProfilePath -and (Test-Path -LiteralPath $Context.LegacyProfilePath)) {
-        $text = [IO.File]::ReadAllText($Context.LegacyProfilePath)
+    if ($legProf -and (Test-Path -LiteralPath $legProf)) {
+        $text = [IO.File]::ReadAllText($legProf)
         if ($text -match 'tunnel_id:\s*"?([^"\s]+)') { $id = $Matches[1] }
         if ($text -match 'base_url:\s*"?([^"\s]+)') { $base = $Matches[1] }
     }
     $tunBin = if ($PSScriptRoot -and (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'bin\tunnel-client.exe'))) {
         Join-Path $PSScriptRoot 'bin\tunnel-client.exe'
-    } elseif (Test-Path -LiteralPath (Join-Path $Context.ReleaseRoot 'bin\tunnel-client.exe')) {
-        Join-Path $Context.ReleaseRoot 'bin\tunnel-client.exe'
-    } else {
-        Join-Path $Context.ReleaseRoot 'tunnel\tunnel-client.exe'
-    }
+    } elseif ($relRoot -and (Test-Path -LiteralPath (Join-Path $relRoot 'bin\tunnel-client.exe'))) {
+        Join-Path $relRoot 'bin\tunnel-client.exe'
+    } elseif ($relRoot) {
+        Join-Path $relRoot 'tunnel\tunnel-client.exe'
+    } else { '' }
     [pscustomobject]@{
         schema_version = 1; tunnel_id = $id; api_base_url = $base
         runtime_root = $root; tunnel_client = $tunBin
@@ -67,6 +69,7 @@ function Get-DefaultConnectionSettings {
         acp_default_profile = 'codex'
         browser_enabled = $true
         startup_mode = 'tray'
+        auto_archive_completed_mode = '3d'
     }
 }
 
@@ -74,13 +77,18 @@ function Read-ConnectionSettings {
     param($Context)
     $defaultSettings = Get-DefaultConnectionSettings $Context
     $settings = Get-DefaultConnectionSettings $Context
-    if (Test-Path -LiteralPath $Context.SettingsPath) {
-        $saved = [IO.File]::ReadAllText($Context.SettingsPath) | ConvertFrom-Json
+    $setPath = if ($Context -and $Context.PSObject.Properties['SettingsPath'] -and $Context.SettingsPath) {
+        [string]$Context.SettingsPath
+    } elseif ($Context -and $Context.PSObject.Properties['DataRoot'] -and $Context.DataRoot) {
+        Join-Path $Context.DataRoot 'settings.json'
+    } else { '' }
+    if ($setPath -and (Test-Path -LiteralPath $setPath)) {
+        $saved = [IO.File]::ReadAllText($setPath) | ConvertFrom-Json
         if ($saved.schema_version -ne 1) { throw '配置版本不兼容，请保留现有文件并查看使用说明。' }
         foreach ($property in $settings.PSObject.Properties.Name) {
             if ($saved.PSObject.Properties.Name -contains $property) { $settings.$property = $saved.$property }
         }
-        foreach ($optProp in @('default_browser_profile', 'preferred_browser_profiles', 'workspace_roots', 'skills_junction_target', 'agents_md_target', 'python_path', 'extra_bin_dirs')) {
+        foreach ($optProp in @('default_browser_profile', 'preferred_browser_profiles', 'workspace_roots', 'skills_junction_target', 'agents_md_target', 'python_path', 'extra_bin_dirs', 'auto_archive_completed_mode', 'custom_cli_agents')) {
             if ($saved.PSObject.Properties.Name -contains $optProp) {
                 $settings | Add-Member -NotePropertyName $optProp -NotePropertyValue $saved.$optProp -Force
             }
@@ -152,14 +160,14 @@ function Save-ConnectionSettings {
     if (Test-Path -LiteralPath $Context.SettingsPath) {
         try {
             $diskSaved = [IO.File]::ReadAllText($Context.SettingsPath) | ConvertFrom-Json
-            foreach ($optProp in @('default_browser_profile', 'preferred_browser_profiles', 'workspace_roots', 'skills_junction_target', 'agents_md_target', 'python_path', 'extra_bin_dirs')) {
+            foreach ($optProp in @('default_browser_profile', 'preferred_browser_profiles', 'workspace_roots', 'skills_junction_target', 'agents_md_target', 'python_path', 'extra_bin_dirs', 'auto_archive_completed_mode', 'custom_cli_agents')) {
                 if (-not ($Settings.PSObject.Properties.Name -contains $optProp) -and ($diskSaved.PSObject.Properties.Name -contains $optProp)) {
                     $Settings | Add-Member -NotePropertyName $optProp -NotePropertyValue $diskSaved.$optProp -Force
                 }
             }
         } catch {}
     }
-    $writes[$Context.SettingsPath] = $Settings | ConvertTo-Json -Depth 4
+    $writes[$Context.SettingsPath] = $Settings | ConvertTo-Json -Depth 6
     [IO.Directory]::CreateDirectory($Context.DataRoot) | Out-Null
     $lock = [IO.File]::Open((Join-Path $Context.DataRoot 'save.lock'), [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
     $before = @{}; $committed = New-Object 'System.Collections.Generic.List[string]'
@@ -497,38 +505,23 @@ function Start-OfficialCoreIfNeeded {
                 }
             }
             $browserEn = if ($Settings.PSObject.Properties['browser_enabled']) { [bool]$Settings.browser_enabled } else { $true }
-            $extraBinDirs = @()
-            if ($Settings.PSObject.Properties['extra_bin_dirs'] -and $Settings.extra_bin_dirs) {
-                $extraBinDirs += @($Settings.extra_bin_dirs | ForEach-Object { [string]$_ })
-            }
-            if ($env:APPDATA) { $extraBinDirs += (Join-Path $env:APPDATA 'npm') }
-            $codexCmd = (Get-Command codex-acp.cmd -ErrorAction SilentlyContinue).Source
-            if (-not $codexCmd) {
-                foreach ($bd in $extraBinDirs) {
-                    $cPath = Join-Path $bd 'codex-acp.cmd'
-                    if (Test-Path -LiteralPath $cPath) { $codexCmd = $cPath; break }
+            $detectedAgents = @(Get-DetectedCliAgents -ForceRescan -Settings $Settings -Context $Context)
+            $acpList = @(foreach ($ag in $detectedAgents) {
+                $rawKind = ([string]$ag.kind).Trim().ToLowerInvariant()
+                $safeKind = if ($rawKind -in @('codex', 'claude')) { $rawKind } else { 'custom' }
+                @{
+                    id = [string]$ag.id
+                    display_name = [string]$ag.display_name
+                    kind = $safeKind
+                    command = [string]$ag.command
+                    args = @($ag.args)
+                    enabled = $true
                 }
+            })
+            $acpProfilesJson = if ($acpList.Count -gt 0) { ConvertTo-Json -InputObject @($acpList) -Depth 4 -Compress } else { '[]' }
+            if ($acpList.Count -eq 1 -and -not $acpProfilesJson.StartsWith('[')) {
+                $acpProfilesJson = '[' + $acpProfilesJson + ']'
             }
-            $claudeCmd = (Get-Command claude-agent-acp.cmd -ErrorAction SilentlyContinue).Source
-            if (-not $claudeCmd) {
-                foreach ($bd in $extraBinDirs) {
-                    $cPath = Join-Path $bd 'claude-agent-acp.cmd'
-                    if (Test-Path -LiteralPath $cPath) { $claudeCmd = $cPath; break }
-                }
-            }
-            $npxCmd = if (Test-Path -LiteralPath 'C:\Program Files\nodejs\npx.cmd') { 'C:\Program Files\nodejs\npx.cmd' } else { (Get-Command npx.cmd -ErrorAction SilentlyContinue).Source }
-            $acpList = @()
-            if ($codexCmd) {
-                $acpList += @{ id = 'codex'; display_name = 'Codex'; kind = 'codex'; command = $codexCmd; args = @(); enabled = $true }
-            } elseif ($npxCmd) {
-                $acpList += @{ id = 'codex'; display_name = 'Codex'; kind = 'codex'; command = $npxCmd; args = @('-y','@agentclientprotocol/codex-acp'); enabled = $true }
-            }
-            if ($claudeCmd) {
-                $acpList += @{ id = 'claude'; display_name = 'Claude'; kind = 'claude'; command = $claudeCmd; args = @(); enabled = $true }
-            } elseif ($npxCmd) {
-                $acpList += @{ id = 'claude'; display_name = 'Claude'; kind = 'claude'; command = $npxCmd; args = @('-y','@agentclientprotocol/claude-agent-acp'); enabled = $true }
-            }
-            $acpProfilesJson = ($acpList | ConvertTo-Json -Depth 4 -Compress)
             $environment = [Environment]::GetEnvironmentVariables()
             $environment['GODEBUG'] = 'winsymlink=0'
             $environment['RELAYCORE_HOME'] = $engineHome
@@ -1008,6 +1001,88 @@ function Invoke-StudioHubAction {
     return $null
 }
 
+function Get-TaskRegistryPath {
+    param($Context)
+    if ($Context -and $Context.PSObject.Properties['TaskRegistryPath'] -and $Context.TaskRegistryPath) {
+        return [string]$Context.TaskRegistryPath
+    }
+    return (Join-Path $Context.DataRoot 'task-registry.json')
+}
+
+function Get-LocalTaskRegistry {
+    param($Context)
+    $path = Get-TaskRegistryPath $Context
+    if ($path -and (Test-Path -LiteralPath $path)) {
+        try {
+            $obj = [IO.File]::ReadAllText($path, [Text.Encoding]::UTF8) | ConvertFrom-Json
+            if ($obj -and $obj.PSObject.Properties['tasks'] -and $obj.tasks) {
+                return $obj
+            }
+        } catch { }
+    }
+    return [pscustomobject]@{
+        schema_version = 1
+        tasks = [pscustomobject]@{}
+    }
+}
+
+function Save-LocalTaskRegistry {
+    param($Context, $Registry)
+    $path = Get-TaskRegistryPath $Context
+    if (-not $path) { return }
+    $json = $Registry | ConvertTo-Json -Depth 10
+    Write-AtomicConnectionText $path $json
+}
+
+function Add-LocalRetireAction {
+    param(
+        $Context,
+        [string]$TaskId,
+        [string]$ConvUuid,
+        [string]$BrowserProfile = '',
+        [string]$ProjectPrefix = '',
+        [ValidateSet('archive','unarchive','delete')][string]$Operation = 'archive',
+        [switch]$StopBeforeAction,
+        [switch]$CloseTab
+    )
+    if (-not $Context -or -not $ConvUuid) { return }
+    try {
+        $state = Get-WebBridgeState $Context
+        $actions = New-Object 'System.Collections.Generic.List[object]'
+        $alreadyQueued = $false
+        if ($state.PSObject.Properties['retire_actions'] -and $state.retire_actions) {
+            foreach ($ra in @($state.retire_actions)) {
+                if (-not $ra) { continue }
+                $raOp = if ($ra.PSObject.Properties['operation'] -and $ra.operation) { [string]$ra.operation } else { 'archive' }
+                if ([string]$ra.conv_uuid -eq $ConvUuid -and [string]$ra.status -eq 'pending' -and $raOp -eq $Operation) {
+                    $alreadyQueued = $true
+                }
+                [void]$actions.Add($ra)
+            }
+        }
+        if (-not $alreadyQueued) {
+            [void]$actions.Add([pscustomobject]@{
+                id = 'ret_' + ([guid]::NewGuid().ToString('N').Substring(0, 10))
+                session_key = $TaskId
+                conv_uuid = $ConvUuid
+                browser_profile = $BrowserProfile
+                project_prefix = $ProjectPrefix
+                operation = $Operation
+                stop_before_archive = [bool]$StopBeforeAction
+                stop_before_action = [bool]$StopBeforeAction
+                close_tab = [bool]$CloseTab
+                status = 'pending'
+                created_at = [DateTimeOffset]::UtcNow.ToString('o')
+            })
+            if ($actions.Count -gt 50) {
+                $actions = New-Object 'System.Collections.Generic.List[object]' (,($actions | Select-Object -Last 50))
+            }
+            $state | Add-Member -NotePropertyName 'retire_actions' -NotePropertyValue $actions.ToArray() -Force
+            Save-WebBridgeState $Context $state
+        }
+    } catch { }
+}
+
 function Get-TaskArchiveOverrides {
     param($Context)
     $result = @{}
@@ -1021,10 +1096,23 @@ function Get-TaskArchiveOverrides {
             $obj = [IO.File]::ReadAllText($path, [Text.Encoding]::UTF8) | ConvertFrom-Json
             if ($obj -and $obj.PSObject.Properties.Name -contains 'overrides' -and $obj.overrides) {
                 foreach ($p in $obj.overrides.PSObject.Properties) {
-                    if ($p.Value) { $result[$p.Name] = [string]$p.Value }
+                    if ($p.Value -and [string]$p.Value -ne 'deleted') { $result[$p.Name] = [string]$p.Value }
                 }
             }
         } catch { }
+    }
+    $reg = Get-LocalTaskRegistry $Context
+    if ($reg -and $reg.tasks) {
+        foreach ($tp in $reg.tasks.PSObject.Properties) {
+            if ($tp.Value -and $tp.Value.PSObject.Properties['lifecycle'] -and $tp.Value.lifecycle) {
+                $lc = [string]$tp.Value.lifecycle
+                if ($lc -eq 'archived') {
+                    $result[$tp.Name] = 'archived'
+                } elseif ($lc -in @('active', 'completed') -and (-not $result.ContainsKey($tp.Name))) {
+                    $result[$tp.Name] = $lc
+                }
+            }
+        }
     }
     return $result
 }
@@ -1054,10 +1142,12 @@ function Get-TaskArchiveTimestamps {
 }
 
 function Set-TaskArchiveState {
-    param($Context, [string]$TaskId, [ValidateSet('archived','active','auto','deleted')][string]$State)
+    param($Context, [string]$TaskId, [ValidateSet('archived','active','completed','auto')][string]$State)
     if (-not $TaskId) { return }
-    $hubResp = Invoke-StudioHubAction -Context $Context -Payload @{ action = 'set_archive_state'; task_id = $TaskId; session_key = $TaskId; state = $State }
+    $effState = if ($State -eq 'auto') { 'active' } else { $State }
+    $hubResp = Invoke-StudioHubAction -Context $Context -Payload @{ action = 'set_archive_state'; task_id = $TaskId; session_key = $TaskId; state = $effState }
     if ($hubResp -and $hubResp.ok) { return }
+    $nowIso = [DateTimeOffset]::UtcNow.ToString('o')
     $path = if ($Context.PSObject.Properties.Name -contains 'TaskArchivesPath' -and $Context.TaskArchivesPath) {
         $Context.TaskArchivesPath
     } else {
@@ -1079,9 +1169,9 @@ function Set-TaskArchiveState {
         [void]$overrides.Remove($TaskId)
         [void]$archivedAtRaw.Remove($TaskId)
     } else {
-        $overrides[$TaskId] = $State
-        if ($State -eq 'archived') {
-            $archivedAtRaw[$TaskId] = [DateTimeOffset]::UtcNow.ToString('o')
+        $overrides[$TaskId] = $effState
+        if ($effState -eq 'archived') {
+            $archivedAtRaw[$TaskId] = $nowIso
         } else {
             [void]$archivedAtRaw.Remove($TaskId)
         }
@@ -1096,20 +1186,80 @@ function Set-TaskArchiveState {
         archived_at = [pscustomobject]$orderedTs
     } | ConvertTo-Json -Depth 4
     Write-AtomicConnectionText $path $payload
+
+    # Sync Ledger 1 (data\task-registry.json) & cloud retire_actions in offline fallback
+    $reg = Get-LocalTaskRegistry $Context
+    if (-not ($reg.PSObject.Properties['tasks'] -and $reg.tasks)) {
+        $reg | Add-Member -NotePropertyName 'tasks' -NotePropertyValue ([pscustomobject]@{}) -Force
+    }
+    $entry = if ($reg.tasks.PSObject.Properties[$TaskId]) { $reg.tasks.$TaskId } else { $null }
+    if (-not $entry) {
+        $entry = [pscustomobject]@{
+            task_id = $TaskId
+            title = ''
+            lifecycle = $effState
+            created_at = $nowIso
+            updated_at = $nowIso
+            completed_at = $null
+            archived_at = $null
+            archive_reason = $null
+            active_binding = $null
+            retired_sessions = @()
+        }
+        $reg.tasks | Add-Member -NotePropertyName $TaskId -NotePropertyValue $entry -Force
+    }
+    $entry | Add-Member -NotePropertyName 'lifecycle' -NotePropertyValue $effState -Force
+    $entry | Add-Member -NotePropertyName 'updated_at' -NotePropertyValue $nowIso -Force
+    if ($effState -eq 'archived') {
+        $entry | Add-Member -NotePropertyName 'archived_at' -NotePropertyValue $nowIso -Force
+        $entry | Add-Member -NotePropertyName 'archive_reason' -NotePropertyValue 'manual' -Force
+    } elseif ($effState -eq 'completed') {
+        $entry | Add-Member -NotePropertyName 'completed_at' -NotePropertyValue $nowIso -Force
+    } else {
+        $entry | Add-Member -NotePropertyName 'archived_at' -NotePropertyValue $null -Force
+        $entry | Add-Member -NotePropertyName 'archive_reason' -NotePropertyValue $null -Force
+    }
+    Save-LocalTaskRegistry $Context $reg
+
+    try {
+        $wb = Get-WebBridgeState $Context
+        $bind = if ($wb.PSObject.Properties['session_bindings'] -and $wb.session_bindings -and $wb.session_bindings.PSObject.Properties[$TaskId]) { $wb.session_bindings.$TaskId } else { $null }
+        $primaryUuid = if ($entry.active_binding -and $entry.active_binding.PSObject.Properties['conv_uuid'] -and $entry.active_binding.conv_uuid) {
+            [string]$entry.active_binding.conv_uuid
+        } elseif ($bind -and $bind.PSObject.Properties['conv_uuid'] -and $bind.conv_uuid) {
+            [string]$bind.conv_uuid
+        } else { '' }
+        $bProf = if ($bind -and $bind.PSObject.Properties['browser_profile'] -and $bind.browser_profile) { [string]$bind.browser_profile } else { '' }
+        $pPref = if ($bind -and $bind.PSObject.Properties['project_prefix'] -and $bind.project_prefix) { [string]$bind.project_prefix } else { '' }
+        if ($effState -eq 'archived') {
+            if ($primaryUuid) {
+                Add-LocalRetireAction -Context $Context -TaskId $TaskId -ConvUuid $primaryUuid -BrowserProfile $bProf -ProjectPrefix $pPref -Operation 'archive' -StopBeforeAction -CloseTab
+            }
+            if ($bind -and $bind.PSObject.Properties['retired_uuids'] -and $bind.retired_uuids) {
+                foreach ($ru in @($bind.retired_uuids)) {
+                    if ($ru) {
+                        Add-LocalRetireAction -Context $Context -TaskId $TaskId -ConvUuid ([string]$ru) -BrowserProfile $bProf -ProjectPrefix $pPref -Operation 'archive' -StopBeforeAction -CloseTab
+                    }
+                }
+            }
+        } elseif ($effState -eq 'active' -and $primaryUuid) {
+            Add-LocalRetireAction -Context $Context -TaskId $TaskId -ConvUuid $primaryUuid -BrowserProfile $bProf -ProjectPrefix $pPref -Operation 'unarchive'
+        }
+    } catch { }
 }
 
 function Remove-ArchivedTaskSession {
-    param($Context, [string]$SessionKey, $Settings = $null)
+    param($Context, [string]$SessionKey, [switch]$PhysicalPurge, $Settings = $null)
     if (-not $SessionKey) {
         return [pscustomobject]@{ SessionKey = ''; PurgedTaskFile = $false; CleanedState = $false }
     }
-    $hubResp = Invoke-StudioHubAction -Context $Context -Payload @{ action = 'delete_session'; session_key = $SessionKey }
+    $hubResp = Invoke-StudioHubAction -Context $Context -Payload @{ action = 'delete_session'; session_key = $SessionKey; physical_purge = $true }
     if ($hubResp -and $hubResp.ok) {
         $purged = if ($hubResp.PSObject.Properties['purged_task_file']) {
             [bool]$hubResp.purged_task_file
         } elseif ($hubResp.PSObject.Properties['purged_files']) {
             (@($hubResp.purged_files).Count -gt 0)
-        } else { $false }
+        } else { $true }
         return [pscustomobject]@{
             SessionKey = $SessionKey
             PurgedTaskFile = $purged
@@ -1142,16 +1292,48 @@ function Remove-ArchivedTaskSession {
         }
     }
 
+    # Collect bound and retired conv_uuids before removing registry/binding entries so we can enqueue cloud delete
+    $uuidsToDelete = New-Object 'System.Collections.Generic.List[object]'
+    $reg = Get-LocalTaskRegistry $Context
+    if ($reg -and $reg.tasks -and $reg.tasks.PSObject.Properties[$SessionKey]) {
+        $tEntry = $reg.tasks.$SessionKey
+        if ($tEntry.PSObject.Properties['active_binding'] -and $tEntry.active_binding -and $tEntry.active_binding.PSObject.Properties['conv_uuid'] -and $tEntry.active_binding.conv_uuid) {
+            [void]$uuidsToDelete.Add([pscustomobject]@{
+                ConvUuid = [string]$tEntry.active_binding.conv_uuid
+                BrowserProfile = $(if ($tEntry.active_binding.PSObject.Properties['browser_profile']) { [string]$tEntry.active_binding.browser_profile } else { '' })
+                ProjectPrefix = $(if ($tEntry.active_binding.PSObject.Properties['project_prefix']) { [string]$tEntry.active_binding.project_prefix } else { '' })
+            })
+        }
+        if ($tEntry.PSObject.Properties['retired_sessions'] -and $tEntry.retired_sessions) {
+            foreach ($rs in @($tEntry.retired_sessions)) {
+                if ($rs -and $rs.PSObject.Properties['conv_uuid'] -and $rs.conv_uuid) {
+                    [void]$uuidsToDelete.Add([pscustomobject]@{
+                        ConvUuid = [string]$rs.conv_uuid
+                        BrowserProfile = $(if ($rs.PSObject.Properties['browser_profile']) { [string]$rs.browser_profile } else { '' })
+                        ProjectPrefix = $(if ($rs.PSObject.Properties['project_prefix']) { [string]$rs.project_prefix } else { '' })
+                    })
+                }
+            }
+        }
+        $reg.tasks.PSObject.Properties.Remove($SessionKey)
+        Save-LocalTaskRegistry $Context $reg
+    }
+
     $archPath = if ($Context.PSObject.Properties.Name -contains 'TaskArchivesPath' -and $Context.TaskArchivesPath) {
         $Context.TaskArchivesPath
     } else {
         Join-Path $Context.DataRoot 'task-archives.json'
     }
-    $overrides = Get-TaskArchiveOverrides $Context
+    $overrides = @{}
     $archivedAtRaw = @{}
     if (Test-Path -LiteralPath $archPath) {
         try {
             $obj = [IO.File]::ReadAllText($archPath, [Text.Encoding]::UTF8) | ConvertFrom-Json
+            if ($obj -and $obj.PSObject.Properties.Name -contains 'overrides' -and $obj.overrides) {
+                foreach ($p in $obj.overrides.PSObject.Properties) {
+                    if ($p.Value -and [string]$p.Value -ne 'deleted') { $overrides[$p.Name] = [string]$p.Value }
+                }
+            }
             if ($obj -and $obj.PSObject.Properties.Name -contains 'archived_at' -and $obj.archived_at) {
                 foreach ($p in $obj.archived_at.PSObject.Properties) {
                     if ($p.Value) { $archivedAtRaw[$p.Name] = [string]$p.Value }
@@ -1159,11 +1341,7 @@ function Remove-ArchivedTaskSession {
             }
         } catch { }
     }
-    if ($purgedTaskFile) {
-        [void]$overrides.Remove($SessionKey)
-    } else {
-        $overrides[$SessionKey] = 'deleted'
-    }
+    [void]$overrides.Remove($SessionKey)
     [void]$archivedAtRaw.Remove($SessionKey)
     $ordered = [ordered]@{}
     foreach ($k in ($overrides.Keys | Sort-Object)) { $ordered[$k] = $overrides[$k] }
@@ -1181,6 +1359,19 @@ function Remove-ArchivedTaskSession {
         $state = Get-WebBridgeState $Context
         $wbChanged = $false
         if ($state.PSObject.Properties['session_bindings'] -and $state.session_bindings -and $state.session_bindings.PSObject.Properties[$SessionKey]) {
+            $bind = $state.session_bindings.$SessionKey
+            $bProf = if ($bind -and $bind.PSObject.Properties['browser_profile'] -and $bind.browser_profile) { [string]$bind.browser_profile } else { '' }
+            $pPref = if ($bind -and $bind.PSObject.Properties['project_prefix'] -and $bind.project_prefix) { [string]$bind.project_prefix } else { '' }
+            if ($bind -and $bind.PSObject.Properties['conv_uuid'] -and $bind.conv_uuid) {
+                [void]$uuidsToDelete.Add([pscustomobject]@{ ConvUuid = [string]$bind.conv_uuid; BrowserProfile = $bProf; ProjectPrefix = $pPref })
+            }
+            if ($bind -and $bind.PSObject.Properties['retired_uuids'] -and $bind.retired_uuids) {
+                foreach ($ru in @($bind.retired_uuids)) {
+                    if ($ru) {
+                        [void]$uuidsToDelete.Add([pscustomobject]@{ ConvUuid = [string]$ru; BrowserProfile = $bProf; ProjectPrefix = $pPref })
+                    }
+                }
+            }
             $state.session_bindings.PSObject.Properties.Remove($SessionKey)
             $wbChanged = $true
         }
@@ -1207,6 +1398,11 @@ function Remove-ArchivedTaskSession {
             }
         }
         if ($wbChanged) { Save-WebBridgeState $Context $state }
+        foreach ($ud in $uuidsToDelete) {
+            if ($ud -and $ud.ConvUuid) {
+                Add-LocalRetireAction -Context $Context -TaskId $SessionKey -ConvUuid $ud.ConvUuid -BrowserProfile $ud.BrowserProfile -ProjectPrefix $ud.ProjectPrefix -Operation 'delete' -StopBeforeAction -CloseTab
+            }
+        }
     } catch { }
 
     $logPath = Join-Path (Join-Path $Context.DataRoot 'logs') 'tunnel.out.log'
@@ -1227,55 +1423,47 @@ function Remove-ArchivedTaskSession {
     }
 }
 
+function Invoke-PurgeArchivedSession {
+    param($Context, [string]$SessionKey, [switch]$PhysicalPurge, $Settings = $null)
+    return (Remove-ArchivedTaskSession -Context $Context -SessionKey $SessionKey -PhysicalPurge -Settings $Settings)
+}
+
 function Clear-AllArchivedSessions {
     param($Context, $ArchivedSessions = @(), [switch]$PhysicalPurge, $Settings = $null)
-    $path = if ($Context.PSObject.Properties.Name -contains 'TaskArchivesPath' -and $Context.TaskArchivesPath) {
-        $Context.TaskArchivesPath
-    } else {
-        Join-Path $Context.DataRoot 'task-archives.json'
-    }
     $overrides = Get-TaskArchiveOverrides $Context
     $clearedKeys = New-Object 'System.Collections.Generic.List[string]'
     $previousStates = @{}
     foreach ($ar in @($ArchivedSessions)) {
         $k = if ($ar -is [string]) { $ar } elseif ($ar -and $ar.PSObject.Properties['SessionKey']) { [string]$ar.SessionKey } else { '' }
         if ($k) {
-            $previousStates[$k] = if ($overrides.ContainsKey($k)) { $overrides[$k] } else { 'auto' }
-            $overrides[$k] = 'deleted'
+            $previousStates[$k] = if ($overrides.ContainsKey($k)) { $overrides[$k] } else { 'archived' }
             if (-not $clearedKeys.Contains($k)) { $clearedKeys.Add($k) }
         }
     }
     foreach ($existingKey in @($overrides.Keys)) {
         if ($overrides[$existingKey] -eq 'archived' -and -not $clearedKeys.Contains($existingKey)) {
             $previousStates[$existingKey] = 'archived'
-            $overrides[$existingKey] = 'deleted'
             $clearedKeys.Add($existingKey)
         }
     }
     $hubClearResp = Invoke-StudioHubAction -Context $Context -Payload @{
         action = 'clear_archived'
-        physical_purge = [bool]$PhysicalPurge
+        physical_purge = $true
         session_keys = $clearedKeys.ToArray()
     }
     if ($hubClearResp -and $hubClearResp.ok) {
-        $purgedCnt = if ($hubClearResp.PSObject.Properties['purged']) { @($hubClearResp.purged).Count } else { 0 }
+        $purgedCnt = if ($hubClearResp.PSObject.Properties['purged']) { @($hubClearResp.purged).Count } else { $clearedKeys.Count }
         return [pscustomobject]@{
             ClearedCount = [Math]::Max($clearedKeys.Count, $purgedCnt)
             ClearedKeys = $clearedKeys.ToArray()
             PreviousStates = $previousStates
-            PurgedFileCount = $(if ($PhysicalPurge) { $purgedCnt } else { 0 })
+            PurgedFileCount = $purgedCnt
         }
     }
-    $ordered = [ordered]@{}
-    foreach ($k in ($overrides.Keys | Sort-Object)) { $ordered[$k] = $overrides[$k] }
-    $payload = [pscustomobject]@{ schema_version = 2; overrides = [pscustomobject]$ordered; archived_at = [pscustomobject]@{} } | ConvertTo-Json -Depth 4
-    Write-AtomicConnectionText $path $payload
     $purgedFiles = 0
-    if ($PhysicalPurge) {
-        foreach ($ck in $clearedKeys) {
-            $pr = Remove-ArchivedTaskSession -Context $Context -SessionKey $ck -Settings $Settings
-            if ($pr.PurgedTaskFile) { $purgedFiles++ }
-        }
+    foreach ($ck in $clearedKeys) {
+        $pr = Remove-ArchivedTaskSession -Context $Context -SessionKey $ck -PhysicalPurge -Settings $Settings
+        if ($pr.PurgedTaskFile) { $purgedFiles++ }
     }
     return [pscustomobject]@{
         ClearedCount = $clearedKeys.Count
@@ -1283,6 +1471,11 @@ function Clear-AllArchivedSessions {
         PreviousStates = $previousStates
         PurgedFileCount = $purgedFiles
     }
+}
+
+function Invoke-PurgeAllArchivedSessions {
+    param($Context, $ArchivedSessions = @(), [switch]$PhysicalPurge, $Settings = $null)
+    return (Clear-AllArchivedSessions -Context $Context -ArchivedSessions $ArchivedSessions -PhysicalPurge -Settings $Settings)
 }
 
 function Get-VerifiedBindingConvUuid {
@@ -1923,43 +2116,66 @@ function Resolve-RelayBrowserProfile {
     try {
         $s = if ($Context) { Read-ConnectionSettings $Context } else { $null }
         if ($s -and $s.PSObject.Properties['default_browser_profile'] -and $s.default_browser_profile) {
-            return [string]$s.default_browser_profile
+            $cfgProf = ([string]$s.default_browser_profile).Trim()
+            if ($cfgProf -match '^Profile\s+\d+$' -or $cfgProf -eq 'Default') { return "Chrome:$cfgProf" }
+            return $cfgProf
         }
         $defSettingsPath = if ($PSScriptRoot) { Join-Path $PSScriptRoot 'data\settings.json' } else { '' }
         if ($defSettingsPath -and (Test-Path -LiteralPath $defSettingsPath)) {
             $rawSet = [IO.File]::ReadAllText($defSettingsPath, [Text.Encoding]::UTF8) | ConvertFrom-Json
             if ($rawSet -and $rawSet.PSObject.Properties['default_browser_profile'] -and $rawSet.default_browser_profile) {
-                return [string]$rawSet.default_browser_profile
+                $cfgProf2 = ([string]$rawSet.default_browser_profile).Trim()
+                if ($cfgProf2 -match '^Profile\s+\d+$' -or $cfgProf2 -eq 'Default') { return "Chrome:$cfgProf2" }
+                return $cfgProf2
             }
         }
+        $avail = @(Get-AvailableBrowserProfiles -Context $Context)
+        $defObj = $avail | Where-Object { $_.IsDefault } | Select-Object -First 1
+        if ($defObj -and $defObj.Id) {
+            return [string]$defObj.Id
+        }
     } catch {}
-    return 'Chrome:Default'
+    return 'Desktop:ChatGPT'
 }
 
 function Get-AvailableBrowserProfiles {
-    param([switch]$ForceRefresh)
-    if ((-not $ForceRefresh) -and $script:BrowserProfilesCache -and (([DateTime]::UtcNow - $script:BrowserProfilesCacheUtc).TotalSeconds -lt 15.0)) {
-        return $script:BrowserProfilesCache
-    }
-    $detected = New-Object 'System.Collections.Generic.List[object]'
-    # Out-of-the-box default is always Desktop:ChatGPT until the user manually locks a choice in the dropdown.
-    $detected.Add([pscustomobject]@{
-        Id = 'Desktop:ChatGPT'
-        Label = '💻 ChatGPT 桌面端 (Web聊天)'
-        UserName = 'ChatGPT Desktop App'
-        IsDefault = $true
-        SortOrder = 0
-    })
+    param(
+        [switch]$ForceRefresh,
+        $Context = $null
+    )
+    $configuredDefault = ''
     $preferredIds = @()
     try {
+        if ($Context -and $Context.PSObject.Properties['SettingsPath'] -and $Context.SettingsPath -and (Test-Path -LiteralPath $Context.SettingsPath)) {
+            $ctxSet = [IO.File]::ReadAllText($Context.SettingsPath, [Text.Encoding]::UTF8) | ConvertFrom-Json
+            if ($ctxSet -and $ctxSet.PSObject.Properties['default_browser_profile'] -and $ctxSet.default_browser_profile) {
+                $configuredDefault = ([string]$ctxSet.default_browser_profile).Trim()
+            }
+            if ($ctxSet -and $ctxSet.PSObject.Properties['preferred_browser_profiles'] -and $ctxSet.preferred_browser_profiles) {
+                $preferredIds = @($ctxSet.preferred_browser_profiles | ForEach-Object { [string]$_ })
+            }
+        }
         $defSettingsPath = if ($PSScriptRoot) { Join-Path $PSScriptRoot 'data\settings.json' } else { '' }
         if ($defSettingsPath -and (Test-Path -LiteralPath $defSettingsPath)) {
             $rawSet = [IO.File]::ReadAllText($defSettingsPath, [Text.Encoding]::UTF8) | ConvertFrom-Json
-            if ($rawSet -and $rawSet.PSObject.Properties['preferred_browser_profiles'] -and $rawSet.preferred_browser_profiles) {
+            if ((-not $configuredDefault) -and $rawSet -and $rawSet.PSObject.Properties['default_browser_profile'] -and $rawSet.default_browser_profile) {
+                $configuredDefault = ([string]$rawSet.default_browser_profile).Trim()
+            }
+            if ($preferredIds.Count -eq 0 -and $rawSet -and $rawSet.PSObject.Properties['preferred_browser_profiles'] -and $rawSet.preferred_browser_profiles) {
                 $preferredIds = @($rawSet.preferred_browser_profiles | ForEach-Object { [string]$_ })
             }
         }
     } catch {}
+    if ($configuredDefault -match '^Profile\s+\d+$' -or $configuredDefault -eq 'Default') {
+        $configuredDefault = "Chrome:$configuredDefault"
+    }
+    if ((-not $ForceRefresh) -and $script:BrowserProfilesCache -and (([DateTime]::UtcNow - $script:BrowserProfilesCacheUtc).TotalSeconds -lt 15.0)) {
+        $cachedDefault = ($script:BrowserProfilesCache | Where-Object { $_.IsDefault } | Select-Object -First 1)
+        if ((-not $configuredDefault) -or ($cachedDefault -and [string]$cachedDefault.Id -eq $configuredDefault)) {
+            return $script:BrowserProfilesCache
+        }
+    }
+    $extDetected = New-Object 'System.Collections.Generic.List[object]'
     $browsers = @(
         @{ Name = 'Chrome'; Root = "$env:LOCALAPPDATA\Google\Chrome\User Data" },
         @{ Name = 'Edge';   Root = "$env:LOCALAPPDATA\Microsoft\Edge\User Data" }
@@ -2000,7 +2216,7 @@ function Get-AvailableBrowserProfiles {
                 }
                 $prefIdx = [Array]::IndexOf($preferredIds, $id)
                 $priority = if ($prefIdx -ge 0) { $prefIdx + 1 } else { 10 }
-                $detected.Add([pscustomobject]@{
+                $extDetected.Add([pscustomobject]@{
                     Id = $id
                     Label = $label
                     UserName = $uName
@@ -2010,31 +2226,56 @@ function Get-AvailableBrowserProfiles {
             }
         } catch { }
     }
-    if ($detected.Count -gt 0) {
-        $sortedProfs = @($detected | Sort-Object SortOrder, Label)
-        if (-not ($sortedProfs | Where-Object { $_.IsDefault })) {
-            $sortedProfs[0].IsDefault = $true
-        }
-        $finalProfs = @($sortedProfs | ForEach-Object {
-            [pscustomobject]@{
-                Id = $_.Id
-                Label = $_.Label
-                UserName = $_.UserName
-                IsDefault = $_.IsDefault
-            }
-        })
-        $script:BrowserProfilesCache = $finalProfs
-        $script:BrowserProfilesCacheUtc = [DateTime]::UtcNow
-        return $finalProfs
+    $detected = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($ep in ($extDetected | Sort-Object SortOrder, Label)) {
+        $detected.Add($ep)
     }
-    $fallbackProfs = @(
-        [pscustomobject]@{ Id = 'Desktop:ChatGPT'; Label = '💻 ChatGPT 桌面端 (Web聊天)'; UserName = 'ChatGPT Desktop App'; IsDefault = $true },
-        [pscustomobject]@{ Id = 'Chrome:Default';  Label = 'Chrome · Default'; UserName = ''; IsDefault = $false },
-        [pscustomobject]@{ Id = 'Edge:Default';    Label = 'Edge · Default'; UserName = ''; IsDefault = $false }
-    )
-    $script:BrowserProfilesCache = $fallbackProfs
+    $detected.Add([pscustomobject]@{
+        Id = 'Desktop:ChatGPT'
+        Label = '💻 ChatGPT 桌面端 (桌面客户端)'
+        UserName = 'ChatGPT Desktop App'
+        IsDefault = $false
+        SortOrder = 20
+    })
+    if ($extDetected.Count -eq 0) {
+        $detected.Add([pscustomobject]@{ Id = 'Chrome:Default'; Label = 'Chrome · Default'; UserName = ''; IsDefault = $false; SortOrder = 21 })
+        $detected.Add([pscustomobject]@{ Id = 'Edge:Default';   Label = 'Edge · Default';   UserName = ''; IsDefault = $false; SortOrder = 22 })
+    }
+    if ($configuredDefault) {
+        $existingMatch = $detected | Where-Object { $_.Id -eq $configuredDefault } | Select-Object -First 1
+        if (-not $existingMatch) {
+            $cfgLabel = ($configuredDefault -replace ':', ' · ')
+            $detected.Insert(0, [pscustomobject]@{
+                Id = $configuredDefault
+                Label = $cfgLabel
+                UserName = ''
+                IsDefault = $true
+                SortOrder = 0
+            })
+        } else {
+            $existingMatch.IsDefault = $true
+        }
+    } elseif ($extDetected.Count -gt 0) {
+        $detected[0].IsDefault = $true
+    } else {
+        $deskItem = $detected | Where-Object { $_.Id -eq 'Desktop:ChatGPT' } | Select-Object -First 1
+        if ($deskItem) { $deskItem.IsDefault = $true }
+    }
+    $sortedProfs = @($detected | Sort-Object SortOrder, Label)
+    if (-not ($sortedProfs | Where-Object { $_.IsDefault })) {
+        $sortedProfs[0].IsDefault = $true
+    }
+    $finalProfs = @($sortedProfs | ForEach-Object {
+        [pscustomobject]@{
+            Id = $_.Id
+            Label = $_.Label
+            UserName = $_.UserName
+            IsDefault = [bool]$_.IsDefault
+        }
+    })
+    $script:BrowserProfilesCache = $finalProfs
     $script:BrowserProfilesCacheUtc = [DateTime]::UtcNow
-    return $fallbackProfs
+    return $finalProfs
 }
 
 function Set-SessionBridgeBinding {
@@ -4067,7 +4308,7 @@ function Get-TunnelActivityPulse {
                 } elseif ($isPrimaryWsHint) {
                     foreach ($gs in @($groupedSessions.Values | Sort-Object { if ($_.LastTime) { $_.LastTime } else { [DateTimeOffset]::MinValue } } -Descending)) {
                         $gsOv = if ($archiveOverridesPre.ContainsKey($gs.SessionKey)) { $archiveOverridesPre[$gs.SessionKey] } elseif ($archiveOverridesPre.ContainsKey($gs.WfrId)) { $archiveOverridesPre[$gs.WfrId] } else { '' }
-                        if ($gsOv -notin @('deleted', 'archived') -and $gs.TaskId) {
+                        if ($gsOv -ne 'archived' -and $gs.TaskId) {
                             $boundObj = if ($bridgeStatePre -and $bridgeStatePre.session_bindings -and $bridgeStatePre.session_bindings.PSObject.Properties[$gs.TaskId]) { $bridgeStatePre.session_bindings.$($gs.TaskId) } else { $null }
                             $boundUuid = if ($boundObj -and $boundObj.PSObject.Properties['conv_uuid'] -and $boundObj.conv_uuid) { [string]$boundObj.conv_uuid } else { '' }
                             if ($slash.HasRealCall -and -not $slashTaskId -and $boundUuid -and $boundUuid -ne $slash.WfrId) {
@@ -4081,7 +4322,7 @@ function Get-TunnelActivityPulse {
                     if (-not $targetSession -and -not $slash.HasRealCall -and -not $skippedBoundTask) {
                         foreach ($gs in @($groupedSessions.Values | Sort-Object { if ($_.LastTime) { $_.LastTime } else { [DateTimeOffset]::MinValue } } -Descending)) {
                             $gsOv = if ($archiveOverridesPre.ContainsKey($gs.SessionKey)) { $archiveOverridesPre[$gs.SessionKey] } elseif ($archiveOverridesPre.ContainsKey($gs.WfrId)) { $archiveOverridesPre[$gs.WfrId] } else { '' }
-                            if ($gsOv -notin @('deleted', 'archived')) {
+                            if ($gsOv -ne 'archived') {
                                 $targetSession = $gs
                                 break
                             }
@@ -4093,8 +4334,8 @@ function Get-TunnelActivityPulse {
                             $bObj = if ($bridgeStatePre -and $bridgeStatePre.session_bindings -and $bridgeStatePre.session_bindings.PSObject.Properties[$_.TaskId]) { $bridgeStatePre.session_bindings.$($_.TaskId) } else { $null }
                             $bUuid = if ($bObj -and $bObj.PSObject.Properties['conv_uuid'] -and $bObj.conv_uuid) { [string]$bObj.conv_uuid } else { '' }
                             $notBoundToOther = (-not ($slash.HasRealCall -and -not $slashTaskId -and $bUuid -and $bUuid -ne $slash.WfrId))
-                            $isRecentActive = ($_.Status -eq 'active' -and (-not $_.UpdatedAt -or ($now - $_.UpdatedAt).TotalHours -lt 24))
-                            $notBoundToOther -and (($slashTaskId -and $_.TaskId -eq $slashTaskId) -or ($tOv -eq 'active') -or ($tOv -notin @('deleted', 'archived') -and $isRecentActive))
+                            $isRecentActive = ($_.Status -eq 'active')
+                            $notBoundToOther -and (($slashTaskId -and $_.TaskId -eq $slashTaskId) -or ($tOv -eq 'active') -or ($tOv -ne 'archived' -and $isRecentActive))
                         } | Select-Object -First 1
                         if ($activeTaskCandidate) {
                             $tKey = $activeTaskCandidate.TaskId
@@ -4303,22 +4544,6 @@ function Get-TunnelActivityPulse {
                      elseif ($archiveOverrides.ContainsKey($fsItem.WfrId)) { $fsItem.WfrId }
                      else { '' }
             $ov = if ($ovKey) { $archiveOverrides[$ovKey] } else { '' }
-            if ($ov -eq 'deleted') { continue }
-
-            # Stage 1 Auto-Revive: if archived session receives new tool or task activity > archived_at, revive to auto
-            if ($ov -eq 'archived' -and $ovKey -and $archiveTimestamps.ContainsKey($ovKey)) {
-                $sOrig = $kept | Where-Object { $_.SessionKey -eq $fsItem.SessionKey } | Select-Object -First 1
-                $latestAct = if ($sOrig -and $sOrig.LastTime) { $sOrig.LastTime } else { $null }
-                if ($sOrig -and $sOrig.TaskObj -and $sOrig.TaskObj.UpdatedAt -and (-not $latestAct -or $sOrig.TaskObj.UpdatedAt -gt $latestAct)) {
-                    $latestAct = $sOrig.TaskObj.UpdatedAt
-                }
-                if ($latestAct -and $latestAct -gt $archiveTimestamps[$ovKey].AddMilliseconds(10)) {
-                    Set-TaskArchiveState -Context $Context -TaskId $ovKey -State 'auto'
-                    [void]$archiveOverrides.Remove($ovKey)
-                    [void]$archiveTimestamps.Remove($ovKey)
-                    $ov = ''
-                }
-            }
 
             # Auto-persist conv_uuid from browser tabs if not bound yet (respecting retired_uuids)
             if ($bridgeState -and $bridgeState.tabs) {
@@ -4396,20 +4621,29 @@ function Get-TunnelActivityPulse {
             }
         }
 
+        $autoArchMode = '3d'
+        try {
+            $sCfgLocal = Read-ConnectionSettings $Context
+            if ($sCfgLocal -and $sCfgLocal.PSObject.Properties['auto_archive_completed_mode'] -and $sCfgLocal.auto_archive_completed_mode) {
+                $autoArchMode = [string]$sCfgLocal.auto_archive_completed_mode
+            }
+        } catch { }
         foreach ($t in $tasks) {
             if ($seenTaskIds.ContainsKey($t.TaskId)) { continue }
             $ov = if ($archiveOverrides.ContainsKey($t.TaskId)) { $archiveOverrides[$t.TaskId] } else { '' }
-            if ($ov -eq 'deleted') { continue }
-            if ($ov -eq 'archived' -and $archiveTimestamps.ContainsKey($t.TaskId) -and $t.UpdatedAt -and $t.UpdatedAt -gt $archiveTimestamps[$t.TaskId].AddMilliseconds(10)) {
-                Set-TaskArchiveState -Context $Context -TaskId $t.TaskId -State 'auto'
-                [void]$archiveOverrides.Remove($t.TaskId)
-                [void]$archiveTimestamps.Remove($t.TaskId)
-                $ov = ''
-            }
             $idleSec = if ($t.UpdatedAt) { [Math]::Max(0, [int]($now - $t.UpdatedAt).TotalSeconds) } else { 999999 }
             $idleHours = $idleSec / 3600.0
-            $isAutoArchived = ($idleHours -ge 24) -or ($t.Status -eq 'completed')
-            $isActiveTask = ($ov -eq 'active') -or ($ov -ne 'archived' -and -not $isAutoArchived -and $t.Status -in @('active', 'in_progress') -and $activeList.Count -eq 0)
+            $isCompletedAutoArchived = if ($t.Status -eq 'completed') {
+                switch ($autoArchMode) {
+                    'off'       { $false }
+                    'immediate' { $true }
+                    '1d'        { ($idleHours -ge 24.0) }
+                    '7d'        { ($idleHours -ge 168.0) }
+                    default     { ($idleHours -ge 72.0) }
+                }
+            } else { $false }
+            $isAutoArchived = $isCompletedAutoArchived
+            $isActiveTask = ($ov -eq 'active') -or ($ov -ne 'archived' -and -not $isAutoArchived -and $t.Status -in @('active', 'in_progress', 'completed'))
             $isRestoredAncient = ($ov -eq 'active' -and $isAutoArchived)
             $isTaskStalled = ($isActiveTask -and -not $isRestoredAncient -and $idleSec -ge $stallThresholdSec -and $inFlightCount -eq 0)
 
@@ -4423,9 +4657,8 @@ function Get-TunnelActivityPulse {
                           elseif ($isRestoredAncient) { '已从归档还原' }
                           elseif ($isTaskStalled) { '已停顿3分钟，请检查网页端' }
                           elseif ($isActiveTask) { '活跃运行中' }
-                          elseif ($t.Status -eq 'completed') { '已完结归档' }
-                          elseif ($idleHours -ge 24) { '超 24h 自动归档' }
-                          else { '子任务自动归档' }
+                          elseif ($t.Status -eq 'completed') { '已完工自动归档' }
+                          else { '手动归档' }
 
             # Auto-persist conv_uuid for task if present in tabs (respecting retired_uuids)
             if ($bridgeState -and $bridgeState.tabs) {
@@ -4815,19 +5048,182 @@ if out.isdigit():
     }
 }
 
+$script:DetectedCliAgentsCache = $null
+$script:DetectedCliAgentsCacheSig = ''
+
+function Get-DetectedCliAgents {
+    param(
+        [switch]$ForceRescan,
+        $Settings = $null,
+        $Context = $null
+    )
+    if ((-not $Settings) -and $Context) {
+        try { $Settings = Read-ConnectionSettings $Context } catch {}
+    }
+    $extraDirs = @()
+    if ($Settings -and $Settings.PSObject.Properties['extra_bin_dirs'] -and $Settings.extra_bin_dirs) {
+        $extraDirs += @($Settings.extra_bin_dirs | ForEach-Object { [string]$_ } | Where-Object { $_ })
+    }
+    $customArr = @()
+    if ($Settings -and $Settings.PSObject.Properties['custom_cli_agents'] -and $Settings.custom_cli_agents) {
+        $customArr = @($Settings.custom_cli_agents)
+    }
+    $customSig = (@($customArr | ForEach-Object { "$($_.id)|$($_.command)" }) -join ';')
+    $sig = (($extraDirs -join ';') + '||' + $customSig)
+    if ((-not $ForceRescan) -and $null -ne $script:DetectedCliAgentsCache -and $script:DetectedCliAgentsCacheSig -eq $sig) {
+        return $script:DetectedCliAgentsCache
+    }
+
+    $searchDirs = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($ed in $extraDirs) {
+        if ($ed -and -not $searchDirs.Contains($ed)) { [void]$searchDirs.Add($ed) }
+    }
+    foreach ($fixedDir in @(
+        'D:\Dev\npm-global',
+        $(if ($env:APPDATA) { Join-Path $env:APPDATA 'npm' } else { '' }),
+        'D:\Dev\antigravity-cli\bin',
+        'D:\workbuddy'
+    )) {
+        if ($fixedDir -and -not $searchDirs.Contains($fixedDir)) { [void]$searchDirs.Add($fixedDir) }
+    }
+    if ($env:PATH) {
+        foreach ($pd in ($env:PATH -split ';')) {
+            $pt = if ($pd) { $pd.Trim() } else { '' }
+            if ($pt -and -not $searchDirs.Contains($pt)) { [void]$searchDirs.Add($pt) }
+        }
+    }
+
+    $findBin = {
+        param([string[]]$CandidateNames)
+        foreach ($cn in $CandidateNames) {
+            foreach ($dir in $searchDirs) {
+                try {
+                    $full = [IO.Path]::Combine($dir, $cn)
+                    if ([IO.File]::Exists($full)) { return $full }
+                } catch {}
+            }
+        }
+        return ''
+    }
+
+    $results = New-Object 'System.Collections.Generic.List[object]'
+    $seenIds = @{}
+
+    $codexPath = & $findBin @('codex-acp.cmd', 'codex.cmd', 'codex.exe')
+    if ($codexPath) {
+        $seenIds['codex'] = $true
+        [void]$results.Add([pscustomobject]@{
+            id = 'codex'; display_name = 'Codex'; kind = 'codex'; command = $codexPath; args = @(); is_custom = $false
+        })
+    }
+
+    $claudePath = & $findBin @('claude-agent-acp.cmd', 'claude.cmd', 'claude.exe')
+    if ($claudePath) {
+        $seenIds['claude'] = $true
+        [void]$results.Add([pscustomobject]@{
+            id = 'claude'; display_name = 'Claude'; kind = 'claude'; command = $claudePath; args = @(); is_custom = $false
+        })
+    }
+
+    $wbCmdPath = & $findBin @('codebuddy.cmd')
+    $wbExePath = if (-not $wbCmdPath) { & $findBin @('WorkBuddy.exe') } else { '' }
+    if ($wbCmdPath) {
+        $seenIds['workbuddy'] = $true
+        [void]$results.Add([pscustomobject]@{
+            id = 'workbuddy'; display_name = 'WorkBuddy'; kind = 'custom'; command = $wbCmdPath; args = @('--acp'); is_custom = $false
+        })
+    } elseif ($wbExePath) {
+        $seenIds['workbuddy'] = $true
+        [void]$results.Add([pscustomobject]@{
+            id = 'workbuddy'; display_name = 'WorkBuddy'; kind = 'custom'; command = $wbExePath; args = @(); is_custom = $false
+        })
+    }
+
+    $agyPath = & $findBin @('agy.exe', 'agy-node.cmd', 'agy.cmd')
+    if ($agyPath) {
+        $seenIds['agy'] = $true
+        [void]$results.Add([pscustomobject]@{
+            id = 'agy'; display_name = 'AGY'; kind = 'custom'; command = $agyPath; args = @(); is_custom = $false
+        })
+    }
+
+    foreach ($c in $customArr) {
+        if (-not $c) { continue }
+        $cId = if ($c.PSObject.Properties['id'] -and $c.id) { ([string]$c.id).Trim() } else { '' }
+        $cCmd = if ($c.PSObject.Properties['command'] -and $c.command) { ([string]$c.command).Trim() } else { '' }
+        if (-not $cId -or -not $cCmd -or $seenIds.ContainsKey($cId)) { continue }
+        if (-not [IO.File]::Exists($cCmd)) { continue }
+        $cDisp = if ($c.PSObject.Properties['display_name'] -and $c.display_name) { ([string]$c.display_name).Trim() } else { $cId }
+        $rawCKind = if ($c.PSObject.Properties['kind'] -and $c.kind) { ([string]$c.kind).Trim().ToLowerInvariant() } else { 'custom' }
+        $cKind = if ($rawCKind -in @('codex', 'claude')) { $rawCKind } else { 'custom' }
+        $cArgs = @(if ($c.PSObject.Properties['args'] -and $c.args) { $c.args | ForEach-Object { [string]$_ } })
+        $seenIds[$cId] = $true
+        [void]$results.Add([pscustomobject]@{
+            id = $cId; display_name = $cDisp; kind = $cKind; command = $cCmd; args = $cArgs; is_custom = $true
+        })
+    }
+
+    $finalArr = @($results.ToArray())
+    $script:DetectedCliAgentsCache = $finalArr
+    $script:DetectedCliAgentsCacheSig = $sig
+    return $finalArr
+}
+Set-Alias -Name Discover-LocalCliAgents -Value Get-DetectedCliAgents
+
+function Add-CustomCliAgent {
+    param(
+        $Context,
+        [string]$CommandPath,
+        [string]$DisplayName = '',
+        [string[]]$Args = @()
+    )
+    $cleanPath = if ($CommandPath) { $CommandPath.Trim() } else { '' }
+    if (-not $cleanPath -or -not (Test-Path -LiteralPath $cleanPath)) {
+        throw "未找到指定的 CLI 可执行文件：$cleanPath"
+    }
+    $fullPath = [IO.Path]::GetFullPath($cleanPath)
+    $baseName = [IO.Path]::GetFileNameWithoutExtension($fullPath)
+    $idSlug = (($baseName.ToLowerInvariant() -replace '[^a-z0-9_-]', '-').Trim('-'))
+    if (-not $idSlug) { $idSlug = 'custom-cli' }
+    $disp = if ($DisplayName -and $DisplayName.Trim()) { $DisplayName.Trim() } else { $baseName }
+    $settings = Read-ConnectionSettings $Context
+    $existing = @(if ($settings.PSObject.Properties['custom_cli_agents'] -and $settings.custom_cli_agents) { $settings.custom_cli_agents })
+    $filtered = @($existing | Where-Object { $_ -and [string]$_.id -ne $idSlug })
+    $newEntry = [pscustomobject]@{
+        id = $idSlug
+        display_name = $disp
+        kind = 'custom'
+        command = $fullPath
+        args = @($Args)
+    }
+    $updatedList = @($filtered) + @($newEntry)
+    $settings | Add-Member -NotePropertyName 'custom_cli_agents' -NotePropertyValue $updatedList -Force
+    Write-AtomicConnectionText $Context.SettingsPath ($settings | ConvertTo-Json -Depth 6)
+    $agents = @(Get-DetectedCliAgents -ForceRescan -Settings $settings -Context $Context)
+    return [pscustomobject]@{
+        AddedAgent = $newEntry
+        Agents = $agents
+        Settings = $settings
+    }
+}
+
 function Get-CoreEngineConfig {
     param($Context)
     $settings = Read-ConnectionSettings $Context
     $corePort = if (($settings.PSObject.Properties.Name -contains 'core_port') -and [int]$settings.core_port -gt 0) { [int]$settings.core_port } else { 8765 }
-    $acpProf = if (($settings.PSObject.Properties.Name -contains 'acp_default_profile') -and [string]$settings.acp_default_profile -in @('codex','claude')) { [string]$settings.acp_default_profile } else { 'codex' }
+    $acpProf = if (($settings.PSObject.Properties.Name -contains 'acp_default_profile') -and [string]$settings.acp_default_profile) { ([string]$settings.acp_default_profile).Trim() } else { 'codex' }
     $browserEn = if ($settings.PSObject.Properties.Name -contains 'browser_enabled') { [bool]$settings.browser_enabled } else { $true }
     $startupMode = if (($settings.PSObject.Properties.Name -contains 'startup_mode') -and [string]$settings.startup_mode -in @('popup','tray','off')) { [string]$settings.startup_mode } else { 'tray' }
+    $autoArchiveMode = if (($settings.PSObject.Properties.Name -contains 'auto_archive_completed_mode') -and [string]$settings.auto_archive_completed_mode -in @('immediate','1d','3d','7d','off')) { [string]$settings.auto_archive_completed_mode } else { '3d' }
+    $defCarrier = Resolve-RelayBrowserProfile '' $Context
     return [pscustomobject]@{
         CorePort = $corePort
         AcpDefaultProfile = $acpProf
         AcpMaxConcurrentPrompts = (Get-AcpConcurrencyLimit $Context)
         BrowserEnabled = $browserEn
         StartupMode = $startupMode
+        AutoArchiveCompletedMode = $autoArchiveMode
+        DefaultBrowserProfile = $defCarrier
         Settings = $settings
     }
 }
@@ -4838,14 +5234,17 @@ function Set-CoreEngineConfig {
         [string]$AcpDefaultProfile = '',
         $BrowserEnabled = $null,
         [string]$StartupMode = '',
+        [string]$AutoArchiveCompletedMode = '',
+        [string]$DefaultBrowserProfile = '',
         [switch]$ApplyStartup
     )
     $settings = Read-ConnectionSettings $Context
-    if ($AcpDefaultProfile -in @('codex','claude')) {
+    if ($AcpDefaultProfile -and $AcpDefaultProfile.Trim()) {
+        $cleanAcp = $AcpDefaultProfile.Trim()
         if ($settings.PSObject.Properties.Name -contains 'acp_default_profile') {
-            $settings.acp_default_profile = $AcpDefaultProfile
+            $settings.acp_default_profile = $cleanAcp
         } else {
-            $settings | Add-Member -NotePropertyName 'acp_default_profile' -NotePropertyValue $AcpDefaultProfile -Force
+            $settings | Add-Member -NotePropertyName 'acp_default_profile' -NotePropertyValue $cleanAcp -Force
         }
     }
     if ($null -ne $BrowserEnabled) {
@@ -4863,16 +5262,34 @@ function Set-CoreEngineConfig {
             $settings | Add-Member -NotePropertyName 'startup_mode' -NotePropertyValue $StartupMode -Force
         }
     }
-    Write-AtomicConnectionText $Context.SettingsPath ($settings | ConvertTo-Json -Depth 5)
+    if ($AutoArchiveCompletedMode -in @('immediate','1d','3d','7d','off')) {
+        if ($settings.PSObject.Properties.Name -contains 'auto_archive_completed_mode') {
+            $settings.auto_archive_completed_mode = $AutoArchiveCompletedMode
+        } else {
+            $settings | Add-Member -NotePropertyName 'auto_archive_completed_mode' -NotePropertyValue $AutoArchiveCompletedMode -Force
+        }
+        [void](Invoke-StudioHubAction -Context $Context -Payload @{ action = 'set_global_settings'; auto_archive_completed_mode = $AutoArchiveCompletedMode })
+    }
+    if ($DefaultBrowserProfile -and $DefaultBrowserProfile.Trim()) {
+        $cleanDefProf = $DefaultBrowserProfile.Trim()
+        if ($settings.PSObject.Properties.Name -contains 'default_browser_profile') {
+            $settings.default_browser_profile = $cleanDefProf
+        } else {
+            $settings | Add-Member -NotePropertyName 'default_browser_profile' -NotePropertyValue $cleanDefProf -Force
+        }
+        $script:BrowserProfilesCache = $null
+        [void](Invoke-StudioHubAction -Context $Context -Payload @{ action = 'set_global_settings'; default_browser_profile = $cleanDefProf })
+    }
+    Write-AtomicConnectionText $Context.SettingsPath ($settings | ConvertTo-Json -Depth 6)
 
     # Sync to legacy control-panel-settings.json if present
     $cpPath = if ($settings.runtime_root) { Join-Path $settings.runtime_root 'control-panel-settings.json' } else { '' }
     if ($cpPath -and (Test-Path -LiteralPath $cpPath)) {
         try {
             $cpObj = [IO.File]::ReadAllText($cpPath) | ConvertFrom-Json
-            if ($AcpDefaultProfile -in @('codex','claude')) {
-                if ($cpObj.PSObject.Properties.Name -contains 'acp_default_profile') { $cpObj.acp_default_profile = $AcpDefaultProfile }
-                else { $cpObj | Add-Member -NotePropertyName 'acp_default_profile' -NotePropertyValue $AcpDefaultProfile -Force }
+            if ($AcpDefaultProfile -and $AcpDefaultProfile.Trim()) {
+                if ($cpObj.PSObject.Properties.Name -contains 'acp_default_profile') { $cpObj.acp_default_profile = $AcpDefaultProfile.Trim() }
+                else { $cpObj | Add-Member -NotePropertyName 'acp_default_profile' -NotePropertyValue $AcpDefaultProfile.Trim() -Force }
             }
             if ($null -ne $BrowserEnabled) {
                 if ($cpObj.PSObject.Properties.Name -contains 'browser_enabled') { $cpObj.browser_enabled = [bool]$BrowserEnabled }
@@ -5104,4 +5521,4 @@ function Resolve-ThemeColorHex {
     }
 }
 
-Export-ModuleMember -Function *-*
+Export-ModuleMember -Function *-* -Alias *

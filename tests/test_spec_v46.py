@@ -932,6 +932,243 @@ Write-Output 'SLICE6_PS_OK'
         self.assertEqual(proc.returncode, 0, f"PowerShell failed:\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}")
         self.assertIn("SLICE6_PS_OK", proc.stdout)
 
+    def test_slice7_pure_two_stage_lifecycle_archive_restore_purge_and_handover_retire(self):
+        tid = "tsk_lifecycle0000007"
+        now_iso = shield._utc_now_iso()
+        with open(os.path.join(self.tasks_root, f"{tid}.json"), "w", encoding="utf-8") as fh:
+            json.dump(
+                {
+                    "schema_version": 1,
+                    "id": tid,
+                    "title": "两段式生命周期与全链路云端同步测试",
+                    "goal": "验证交接退居、归档全扫、还原当前、双端彻底删除",
+                    "status": "in_progress",
+                    "steps": [{"id": "1", "title": "步骤一", "status": "in_progress", "updated_at": now_iso}],
+                    "created_at": now_iso,
+                    "updated_at": now_iso,
+                },
+                fh,
+                ensure_ascii=False,
+                indent=2,
+            )
+
+        conv_1 = "71111111-1111-4111-8111-111111111111"
+        conv_2 = "72222222-2222-4222-8222-222222222222"
+        conv_3 = "73333333-3333-4333-8333-333333333333"
+        conv_4 = "74444444-4444-4444-8444-444444444444"
+
+        # Bind initial conv_1
+        self._post_json(
+            "/studio/action",
+            {
+                "action": "bind_session",
+                "session_key": tid,
+                "provider": "chatgpt",
+                "carrier": "Chrome:Work",
+                "conv_uuid": conv_1,
+                "tab_id": "tab_c1",
+            },
+        )
+
+        # Handover Path 1: ?msg_id token transfer in _update_tab_and_bindings (conv_1 -> conv_2)
+        with shield._WEB_BRIDGE_LOCK:
+            st = shield._load_web_bridge_state(self.wb_state_path)
+            st["queue"].append({"id": "msg_h1", "session_key": tid, "mode": "new_window_handover", "status": "claimed"})
+            shield._save_web_bridge_state(self.wb_state_path, st)
+
+        self._post_json(
+            "/web-bridge/poll",
+            {
+                "browser": "Chrome",
+                "browser_profile": "Chrome:Work",
+                "tabs": [
+                    {
+                        "tab_id": "tab_c2",
+                        "url": f"https://chatgpt.com/c/{conv_2}?relay_handover=1&msg_id=msg_h1",
+                        "conv_uuid": conv_2,
+                        "handover_msg_id": "msg_h1",
+                        "is_generating": True,
+                        "sse_active": True,
+                        "page_hints": [tid],
+                    }
+                ],
+            },
+        )
+        wb1 = self._get_json("/web-bridge/state")
+        self.assertEqual(wb1["session_bindings"][tid]["conv_uuid"], conv_2)
+        self.assertIn(conv_1, wb1["session_bindings"][tid]["retired_uuids"])
+        self.assertTrue(
+            any(r["conv_uuid"] == conv_1 and r["operation"] == "archive" and r["status"] == "pending" for r in wb1["retire_actions"]),
+            "Handover ?msg_id transfer must enqueue operation='archive' for superseded conv_1",
+        )
+
+        # Handover Path 2: Manual active-work transfer in _update_tab_and_bindings (conv_2 idle -> conv_3 generating)
+        self._post_json(
+            "/web-bridge/poll",
+            {
+                "browser": "Chrome",
+                "browser_profile": "Chrome:Work",
+                "tabs": [
+                    {
+                        "tab_id": "tab_c2",
+                        "url": f"https://chatgpt.com/c/{conv_2}",
+                        "conv_uuid": conv_2,
+                        "is_generating": False,
+                        "sse_active": False,
+                        "page_hints": [tid],
+                    },
+                    {
+                        "tab_id": "tab_c3",
+                        "url": f"https://chatgpt.com/c/{conv_3}",
+                        "conv_uuid": conv_3,
+                        "is_generating": True,
+                        "sse_active": True,
+                        "page_hints": [tid],
+                    },
+                ],
+            },
+        )
+        wb2 = self._get_json("/web-bridge/state")
+        self.assertEqual(wb2["session_bindings"][tid]["conv_uuid"], conv_3)
+        self.assertTrue(
+            any(r["conv_uuid"] == conv_2 and r["operation"] == "archive" and r["status"] == "pending" for r in wb2["retire_actions"]),
+            "Manual active-work transfer must enqueue operation='archive' for superseded conv_2",
+        )
+
+        # Handover Path 3: bind_session rebind (conv_3 -> conv_4)
+        self._post_json(
+            "/studio/action",
+            {
+                "action": "bind_session",
+                "session_key": tid,
+                "conv_uuid": conv_4,
+                "tab_id": "tab_c4",
+            },
+        )
+        wb3 = self._get_json("/web-bridge/state")
+        self.assertEqual(wb3["session_bindings"][tid]["conv_uuid"], conv_4)
+        self.assertTrue(
+            any(r["conv_uuid"] == conv_3 and r["operation"] == "archive" and r["status"] == "pending" for r in wb3["retire_actions"]),
+            "Session rebind must enqueue operation='archive' for superseded conv_3",
+        )
+
+        # Mark historical retire_actions completed and add a pending queue message before testing archive full sweep
+        with shield._WEB_BRIDGE_LOCK:
+            st = shield._load_web_bridge_state(self.wb_state_path)
+            for r in st["retire_actions"]:
+                r["status"] = "completed"
+            st["queue"].append({"id": "msg_pending_before_arch", "session_key": tid, "mode": "custom_message", "status": "pending"})
+            shield._save_web_bridge_state(self.wb_state_path, st)
+
+        # Archive task -> must cancel pending queue message, keep conv_4 bound, and enqueue archive for conv_4 + conv_1..3
+        self._post_json("/studio/action", {"action": "archive", "session_key": tid})
+        wb_arch = self._get_json("/web-bridge/state")
+        self.assertEqual(wb_arch["session_bindings"][tid]["conv_uuid"], conv_4)
+        q_msg = next(m for m in wb_arch["queue"] if m["id"] == "msg_pending_before_arch")
+        self.assertEqual(q_msg["status"], "cancelled")
+        pending_arch_uuids = {r["conv_uuid"] for r in wb_arch["retire_actions"] if r["status"] == "pending" and r["operation"] == "archive"}
+        self.assertEqual(pending_arch_uuids, {conv_1, conv_2, conv_3, conv_4})
+
+        # Restore task ('↺ 还原') -> must keep conv_4 bound, cancel pending archive for conv_4, and enqueue unarchive ONLY for conv_4
+        self._post_json("/studio/action", {"action": "restore", "session_key": tid})
+        wb_rest = self._get_json("/web-bridge/state")
+        self.assertEqual(wb_rest["session_bindings"][tid]["conv_uuid"], conv_4)
+        pending_unarch_uuids = {r["conv_uuid"] for r in wb_rest["retire_actions"] if r["status"] == "pending" and r["operation"] == "unarchive"}
+        self.assertEqual(pending_unarch_uuids, {conv_4}, "Restore must only unarchive the primary conv_uuid, never retired_sessions")
+
+        # Purge task ('🗑️ 彻底删除') -> must delete tsk_*.json, remove binding, and enqueue operation='delete' for ALL conv_1..4
+        purge_res = self._post_json("/studio/action", {"action": "purge", "session_key": tid})
+        self.assertTrue(purge_res["ok"])
+        self.assertFalse(os.path.exists(os.path.join(self.tasks_root, f"{tid}.json")))
+        wb_purge = self._get_json("/web-bridge/state")
+        self.assertNotIn(tid, wb_purge["session_bindings"])
+        pending_del_uuids = {r["conv_uuid"] for r in wb_purge["retire_actions"] if r["status"] == "pending" and r["operation"] == "delete"}
+        self.assertEqual(pending_del_uuids, {conv_1, conv_2, conv_3, conv_4})
+
+    def test_slice8_completed_auto_archive_modes_and_ledger_1_task_registry(self):
+        now_ep = time.time()
+        four_days_ago = datetime.datetime.fromtimestamp(now_ep - 4 * 86400, datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+        two_days_ago = datetime.datetime.fromtimestamp(now_ep - 2 * 86400, datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+
+        # 1. Unfinished task idle for 4 days (> 24h) must NEVER auto-archive
+        tid_unfin = "tsk_unfinished_4d001"
+        with open(os.path.join(self.tasks_root, f"{tid_unfin}.json"), "w", encoding="utf-8") as fh:
+            json.dump(
+                {
+                    "schema_version": 1,
+                    "id": tid_unfin,
+                    "title": "未完工闲置4天任务",
+                    "status": "in_progress",
+                    "steps": [{"id": "1", "title": "进行中", "status": "in_progress", "updated_at": four_days_ago}],
+                    "created_at": four_days_ago,
+                    "updated_at": four_days_ago,
+                },
+                fh,
+                ensure_ascii=False,
+                indent=2,
+            )
+
+        # 2. Completed task finished 2 days ago (under default '3d' threshold) -> stays in main sessions list
+        tid_comp = "tsk_completed_auto02"
+        conv_comp = "82222222-2222-4222-8222-222222222222"
+        with open(os.path.join(self.tasks_root, f"{tid_comp}.json"), "w", encoding="utf-8") as fh:
+            json.dump(
+                {
+                    "schema_version": 1,
+                    "id": tid_comp,
+                    "title": "已完工2天任务",
+                    "status": "completed",
+                    "completed_at": two_days_ago,
+                    "steps": [{"id": "1", "title": "已完成", "status": "completed", "updated_at": two_days_ago}],
+                    "created_at": four_days_ago,
+                    "updated_at": two_days_ago,
+                },
+                fh,
+                ensure_ascii=False,
+                indent=2,
+            )
+        self._post_json(
+            "/studio/action",
+            {
+                "action": "bind_session",
+                "session_key": tid_comp,
+                "provider": "chatgpt",
+                "carrier": "Chrome:Default",
+                "conv_uuid": conv_comp,
+            },
+        )
+
+        snap_3d = self._get_json("/studio/snapshot")
+        active_keys_3d = [s["SessionKey"] for s in snap_3d["sessions"]]
+        arch_keys_3d = [s["SessionKey"] for s in snap_3d["archived_sessions"]]
+        self.assertIn(tid_unfin, active_keys_3d, "Unfinished task idle for 4 days must remain active")
+        self.assertIn(tid_comp, active_keys_3d, "Completed task at 2d must remain visible when mode is default 3d")
+        self.assertEqual(arch_keys_3d, [])
+
+        # Verify Ledger ① (data/task-registry.json) was created & synced with triple contract
+        reg_doc = shield.load_task_registry(self.data_root)
+        self.assertIn(tid_comp, reg_doc["tasks"])
+        self.assertEqual(reg_doc["tasks"][tid_comp]["lifecycle"], "completed")
+        self.assertEqual(reg_doc["tasks"][tid_comp]["active_binding"]["provider"], "chatgpt")
+        self.assertEqual(reg_doc["tasks"][tid_comp]["active_binding"]["carrier"], "Chrome:Default")
+        self.assertEqual(reg_doc["tasks"][tid_comp]["active_binding"]["conv_uuid"], conv_comp)
+
+        # 3. Switch auto_archive_completed_mode to '1d' -> tid_comp (2 days old) auto-archives and enqueues cloud archive!
+        self._post_json("/studio/action", {"action": "set_global_settings", "auto_archive_completed_mode": "1d"})
+        snap_1d = self._get_json("/studio/snapshot")
+        self.assertIn(tid_unfin, [s["SessionKey"] for s in snap_1d["sessions"]])
+        self.assertIn(tid_comp, [s["SessionKey"] for s in snap_1d["archived_sessions"]])
+        wb_1d = self._get_json("/web-bridge/state")
+        self.assertTrue(
+            any(r["conv_uuid"] == conv_comp and r["operation"] == "archive" and r["status"] == "pending" for r in wb_1d["retire_actions"])
+        )
+
+        # 4. Restore tid_comp ('↺ 还原') -> refreshes restored_at so it stays visible on main board until another 1d passes
+        self._post_json("/studio/action", {"action": "restore", "session_key": tid_comp})
+        snap_restored = self._get_json("/studio/snapshot")
+        self.assertIn(tid_comp, [s["SessionKey"] for s in snap_restored["sessions"]])
+        self.assertNotIn(tid_comp, [s["SessionKey"] for s in snap_restored["archived_sessions"]])
+
 
 if __name__ == "__main__":
     unittest.main()

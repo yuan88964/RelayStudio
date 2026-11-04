@@ -457,13 +457,10 @@ class DesktopCdpBridgeTests(V41Base):
         self._bind("tsk_desk_t", profile="Desktop:ChatGPT")
         self._bind("tsk_desk_t", conv=BOUND_CONV)
         self._post_json("/studio/action", {"action": "archive", "session_key": "tsk_desk_t"})
-        # Spec v4.3 Q5: a panel archive is undoable first - the real archive is released only after the grace window.
+        # Spec Decision 2.1: archiving immediately releases retire_actions with ARCHIVE_UNDO_GRACE_SEC = 0.0 (no 5s undo delay).
         with shield._WEB_BRIDGE_LOCK:
             wb_g = shield._load_web_bridge_state(self.wb_state_path)
-            self.assertTrue(all(float(r.get("not_before_epoch") or 0) > time.time() for r in wb_g["retire_actions"]))
-            for r in wb_g["retire_actions"]:
-                r["not_before_epoch"] = 1.0
-            shield._save_web_bridge_state(self.wb_state_path, wb_g)
+            self.assertTrue(all(float(r.get("not_before_epoch") or 0) <= time.time() for r in wb_g["retire_actions"]))
         flaky = FakeChatGptPage(conv_uuid=BOUND_CONV, archive_ok=False)
         self._tick(flaky)
         self.assertTrue(all(r["status"] == "pending" and r.get("attempts") == 1 for r in self._wb()["retire_actions"]))

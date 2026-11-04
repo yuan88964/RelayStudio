@@ -1,0 +1,1623 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>RelayStudio — 顶栏无隔板节奏与呼吸灯分段胶囊原型</title>
+<style>
+  :root {
+    --bg-shell: #F3F4F6;
+    --bg-surface: #FFFFFF;
+    --bg-subtle: #F8FAFC;
+    --bg-hover: #E4E4E7;
+    --bg-active-tint: #EFF6FF;
+    --border-hairline: #E4E4E7;
+    --border-strong: #D4D4D8;
+    --text-primary: #18181B;
+    --text-secondary: #52525B;
+    --text-muted: #71717A;
+    --accent: #2563EB;
+    --accent-hover: #1D4ED8;
+    --accent-soft: #DBEAFE;
+    --accent-text: #1E40AF;
+    --success: #16A34A;
+    --success-ring: rgba(22, 163, 74, 0.24);
+    --warning: #D97706;
+    --danger: #DC2626;
+    --shadow-popover: 0 16px 36px -8px rgba(9, 9, 11, 0.14), 0 4px 10px -2px rgba(9, 9, 11, 0.06);
+  }
+
+  [data-theme="dark"] {
+    --bg-shell: #09090B;
+    --bg-surface: #18181B;
+    --bg-subtle: #121215;
+    --bg-hover: #27272A;
+    --bg-active-tint: #172554;
+    --border-hairline: #27272A;
+    --border-strong: #3F3F46;
+    --text-primary: #FAFAFA;
+    --text-secondary: #A1A1AA;
+    --text-muted: #71717A;
+    --accent: #3B82F6;
+    --accent-hover: #60A5FA;
+    --accent-soft: rgba(59, 130, 246, 0.2);
+    --accent-text: #BFDBFE;
+    --success: #22C55E;
+    --success-ring: rgba(34, 197, 94, 0.28);
+    --warning: #F59E0B;
+    --danger: #EF4444;
+    --shadow-popover: 0 20px 42px -8px rgba(0, 0, 0, 0.65);
+  }
+
+  * {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+  }
+
+  ::selection {
+    background: var(--accent-soft);
+    color: var(--accent-text);
+  }
+
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--border-strong);
+    border-radius: 999px;
+  }
+
+  body {
+    font-family: "Segoe UI Variable Text", "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: #E4E4E7;
+    color: var(--text-primary);
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    user-select: none;
+    -webkit-font-smoothing: antialiased;
+    font-variant-numeric: tabular-nums;
+  }
+
+  [data-theme="dark"] body {
+    background: #020617;
+  }
+
+  button, input, select {
+    font: inherit;
+    color: inherit;
+  }
+
+  button:focus-visible, input:focus-visible, select:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+  }
+
+  /* Top Prototype Context Strip */
+  .proto-strip {
+    background: #18181B;
+    color: #F4F4F5;
+    padding: 6px 16px;
+    font-size: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    border-bottom: 1px solid #27272A;
+    flex-shrink: 0;
+  }
+  .proto-badge {
+    background: #2563EB;
+    color: #FFFFFF;
+    font-weight: 600;
+    padding: 2px 7px;
+    border-radius: 4px;
+    font-size: 11px;
+    margin-right: 8px;
+  }
+
+  /* App Shell Stage */
+  .app-stage {
+    flex: 1;
+    display: flex;
+    justify-content: center;
+    align-items: stretch;
+    padding: 12px 16px 16px 16px;
+    overflow: hidden;
+  }
+
+  .app-window {
+    width: 100%;
+    max-width: 1400px;
+    background: var(--bg-shell);
+    border: 1px solid var(--border-strong);
+    border-radius: 12px;
+    padding: 8px 10px 10px 10px;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    position: relative;
+  }
+
+  /* ================= UNIFIED TOP TITLE BAR (NO DIVIDERS, SPACING RHYTHM) ================= */
+  .titlebar {
+    min-height: 36px;
+    background: var(--bg-shell);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 4px 6px 8px 6px;
+    position: relative;
+    z-index: 60;
+    flex-shrink: 0;
+  }
+
+  .titlebar-left {
+    display: flex;
+    align-items: center;
+    min-width: 0;
+    flex: 1;
+  }
+
+  /* Group 1: Brand + Sidebar Toggle (Tightly coupled, 6px gap, NO divider line) */
+  .brand-rail-group {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-shrink: 0;
+  }
+
+  .brand-mark {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .brand-logo {
+    width: 19px;
+    height: 19px;
+    border-radius: 4.5px;
+    background: var(--text-primary);
+    color: var(--bg-surface);
+    font-weight: 700;
+    font-size: 11px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .brand-title {
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    color: var(--text-primary);
+  }
+
+  /* Generous breathing room (20px) between Sidebar Toggle and Settings Gear — NO vertical bar */
+  .utility-tunnel-group {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    margin-left: 20px;
+    min-width: 0;
+  }
+
+  /* Pure Icon Buttons (Sidebar, Settings, Theme) */
+  .icon-btn {
+    width: 28px;
+    height: 28px;
+    border-radius: 6px;
+    border: 1px solid transparent;
+    background: transparent;
+    color: var(--text-secondary);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    position: relative;
+    transition: background 0.12s ease, color 0.12s ease;
+  }
+  .icon-btn:hover {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+  }
+  .icon-btn.active {
+    background: var(--bg-surface);
+    color: var(--text-primary);
+    border-color: var(--border-hairline);
+  }
+  .icon-btn svg {
+    width: 15px;
+    height: 15px;
+    stroke: currentColor;
+    fill: none;
+    stroke-width: 1.85;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+
+  /* Hover Tooltip */
+  [data-tip] {
+    position: relative;
+  }
+  [data-tip]::after {
+    content: attr(data-tip);
+    position: absolute;
+    top: calc(100% + 6px);
+    left: 50%;
+    transform: translateX(-50%) translateY(-2px);
+    background: #18181B;
+    color: #FAFAFA;
+    font-size: 11.5px;
+    font-weight: 500;
+    padding: 4px 8px;
+    border-radius: 5px;
+    white-space: nowrap;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.12s ease, transform 0.12s ease;
+    z-index: 250;
+  }
+  [data-tip]:hover::after {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+  }
+
+  /* ================= SEGMENTED TUNNEL CAPSULE (BREATHING DOT + ACCOUNT NAME + [+]) ================= */
+  .tunnel-capsule {
+    margin-left: 4px;
+    height: 28px;
+    display: inline-flex;
+    align-items: stretch;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-hairline);
+    border-radius: 999px;
+    overflow: visible;
+    transition: border-color 0.15s ease;
+  }
+  .tunnel-capsule:hover {
+    border-color: var(--border-strong);
+  }
+
+  .capsule-cell {
+    height: 26px;
+    padding: 0 10px;
+    border: none;
+    background: transparent;
+    color: var(--text-primary);
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.12s ease, color 0.12s ease;
+    white-space: nowrap;
+  }
+  .capsule-cell:first-child {
+    border-top-left-radius: 999px;
+    border-bottom-left-radius: 999px;
+    padding-left: 11px;
+  }
+  .capsule-cell:hover {
+    background: var(--bg-subtle);
+  }
+  .capsule-cell.active {
+    background: var(--bg-active-tint);
+    color: var(--accent);
+  }
+
+  .capsule-cell-plat {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-muted);
+    margin-right: -2px;
+  }
+  .capsule-cell.active .capsule-cell-plat {
+    color: var(--accent);
+    opacity: 0.85;
+  }
+
+  /* Internal Divider inside the Capsule */
+  .capsule-sep {
+    width: 1px;
+    height: 14px;
+    background: var(--border-hairline);
+    align-self: center;
+    flex-shrink: 0;
+  }
+
+  /* Breathing Light Indicator (呼吸灯) */
+  .breathing-dot {
+    width: 7.5px;
+    height: 7.5px;
+    border-radius: 50%;
+    display: inline-block;
+    flex-shrink: 0;
+    position: relative;
+  }
+  .breathing-dot.online {
+    background: var(--success);
+    box-shadow: 0 0 0 0 var(--success-ring);
+    animation: breathePulse 2.4s infinite cubic-bezier(0.4, 0, 0.6, 1);
+  }
+  .breathing-dot.offline {
+    background: var(--text-muted);
+  }
+
+  @keyframes breathePulse {
+    0%, 100% {
+      box-shadow: 0 0 0 0 rgba(22, 163, 74, 0.38);
+      transform: scale(1);
+    }
+    50% {
+      box-shadow: 0 0 0 4px rgba(22, 163, 74, 0);
+      transform: scale(1.06);
+    }
+  }
+
+  /* Tail [+] Cell inside the Capsule */
+  .capsule-plus-cell {
+    height: 26px;
+    padding: 0 9px 0 8px;
+    border: none;
+    background: transparent;
+    color: var(--text-secondary);
+    border-top-right-radius: 999px;
+    border-bottom-right-radius: 999px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: background 0.12s ease, color 0.12s ease;
+  }
+  .capsule-plus-cell:hover, .capsule-plus-cell.active {
+    background: var(--bg-active-tint);
+    color: var(--accent);
+  }
+  .capsule-plus-cell svg {
+    width: 13px;
+    height: 13px;
+    stroke: currentColor;
+    stroke-width: 2.1;
+    fill: none;
+  }
+
+  /* Far Right Window System Buttons */
+  .titlebar-right {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    flex-shrink: 0;
+  }
+  .win-ctrl-btn {
+    width: 32px;
+    height: 26px;
+    border: none;
+    background: transparent;
+    color: var(--text-secondary);
+    border-radius: 5px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .win-ctrl-btn:hover { background: var(--bg-hover); }
+  .win-ctrl-btn.close:hover { background: var(--danger); color: #FFFFFF; }
+  .win-ctrl-btn svg {
+    width: 12px;
+    height: 12px;
+    stroke: currentColor;
+    stroke-width: 1.8;
+    fill: none;
+  }
+
+  /* ================= POPOVER CARDS ================= */
+  .popover-anchor {
+    position: absolute;
+    top: 40px;
+    left: 200px;
+    z-index: 120;
+    pointer-events: none;
+  }
+
+  .popover-panel {
+    pointer-events: auto;
+    width: 420px;
+    background: var(--bg-surface);
+    border-radius: 12px;
+    box-shadow: var(--shadow-popover);
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    animation: panelEnter 0.14s cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  @keyframes panelEnter {
+    from { opacity: 0; transform: translateY(-5px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  .panel-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .panel-title-group {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .panel-title {
+    font-size: 13.5px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    color: var(--text-primary);
+  }
+  .panel-sub {
+    font-size: 11.5px;
+    color: var(--text-secondary);
+    margin-top: 2px;
+  }
+
+  /* Account List inside Card */
+  .acct-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .acct-item {
+    border: 1px solid var(--border-hairline);
+    border-radius: 8px;
+    padding: 8px 10px;
+    background: var(--bg-subtle);
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+    transition: border-color 0.12s ease, background 0.12s ease;
+  }
+  .acct-item:hover {
+    border-color: var(--border-strong);
+  }
+  .acct-item.active {
+    background: var(--bg-active-tint);
+    border-color: var(--accent);
+  }
+  .acct-item-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    cursor: pointer;
+  }
+  .acct-item-left {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .acct-name {
+    font-size: 12.5px;
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+  .acct-meta {
+    font-size: 11px;
+    color: var(--text-secondary);
+    font-family: "Cascadia Mono", Consolas, monospace;
+  }
+  .badge-active {
+    font-size: 10.5px;
+    font-weight: 600;
+    padding: 1px 6px;
+    border-radius: 4px;
+    background: var(--accent);
+    color: #FFFFFF;
+  }
+
+  .inline-form {
+    padding-top: 8px;
+    border-top: 1px solid var(--border-hairline);
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+  }
+  .field-label {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    margin-bottom: 2px;
+    display: block;
+  }
+  .field-input {
+    width: 100%;
+    height: 28px;
+    padding: 0 8px;
+    border-radius: 6px;
+    border: 1px solid var(--border-strong);
+    background: var(--bg-surface);
+    font-size: 12px;
+  }
+
+  .card-footer {
+    padding-top: 10px;
+    border-top: 1px solid var(--border-hairline);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+  .footer-links {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .text-link {
+    border: none;
+    background: none;
+    color: var(--accent);
+    font-size: 11.5px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .text-link:hover {
+    text-decoration: underline;
+    text-underline-offset: 3px;
+  }
+
+  .btn {
+    height: 27px;
+    padding: 0 10px;
+    border-radius: 6px;
+    border: 1px solid var(--border-strong);
+    background: var(--bg-surface);
+    color: var(--text-primary);
+    font-size: 11.5px;
+    font-weight: 600;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .btn:hover { background: var(--bg-subtle); }
+  .btn-primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #FFFFFF;
+  }
+  .btn-primary:hover { background: var(--accent-hover); }
+
+  /* Preset Add List when clicking [+] */
+  .preset-option {
+    border: 1px solid var(--border-hairline);
+    border-radius: 8px;
+    padding: 9px 11px;
+    background: var(--bg-subtle);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    cursor: pointer;
+    transition: border-color 0.12s ease;
+  }
+  .preset-option:hover {
+    border-color: var(--accent);
+    background: var(--bg-active-tint);
+  }
+
+  /* ================= BODY: SEAMLESS RAIL + ELEVATED WORKSPACE ================= */
+  .app-body {
+    flex: 1;
+    display: flex;
+    overflow: hidden;
+    padding: 0 7px 7px 0;
+  }
+
+  .left-rail {
+    width: 256px;
+    background: var(--bg-shell);
+    padding: 4px 8px 10px 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    transition: width 0.18s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.14s ease, padding 0.18s ease;
+    flex-shrink: 0;
+  }
+  .left-rail.collapsed {
+    width: 0;
+    padding-left: 0;
+    padding-right: 0;
+    opacity: 0;
+    overflow: hidden;
+  }
+
+  .rail-task {
+    padding: 9px 11px;
+    border-radius: 8px;
+    background: transparent;
+    cursor: pointer;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+  .rail-task:hover {
+    background: rgba(113, 113, 122, 0.08);
+  }
+  .rail-task.selected {
+    background: var(--bg-surface);
+    box-shadow: 0 1px 3px rgba(9, 9, 11, 0.06);
+  }
+  .rail-task-title {
+    font-size: 12.5px;
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+  .rail-task-sub {
+    font-size: 11px;
+    color: var(--text-secondary);
+  }
+
+  /* Elevated White Workspace Surface */
+  .workspace-card {
+    flex: 1;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-hairline);
+    border-radius: 10px;
+    padding: 24px 28px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+  }
+
+  .truth-section {
+    max-width: 68ch;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .truth-heading {
+    font-size: 16px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    color: var(--text-primary);
+  }
+  .truth-lead {
+    font-size: 13.5px;
+    line-height: 1.65;
+    color: var(--text-secondary);
+  }
+
+  .comparison-table {
+    width: 100%;
+    max-width: 820px;
+    border-collapse: collapse;
+    font-size: 12.5px;
+  }
+  .comparison-table th {
+    text-align: left;
+    padding: 9px 12px;
+    border-bottom: 1px solid var(--border-strong);
+    color: var(--text-secondary);
+    font-weight: 600;
+  }
+  .comparison-table td {
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border-hairline);
+    color: var(--text-primary);
+    line-height: 1.5;
+  }
+
+  /* ================= COMPOSER CARD (Bottom Task Dispatch echoing Top Tunnel) ================= */
+  .composer-section {
+    max-width: 820px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .composer-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .composer-title {
+    font-size: 16px;
+    font-weight: 700;
+    color: var(--text-primary);
+  }
+  .composer-box {
+    border: 1px solid var(--border-strong);
+    border-radius: 12px;
+    padding: 14px 16px;
+    background: var(--bg-surface);
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    box-shadow: 0 2px 6px rgba(9, 9, 11, 0.03);
+  }
+  .composer-textarea {
+    width: 100%;
+    min-height: 62px;
+    border: none;
+    outline: none;
+    resize: none;
+    background: transparent;
+    color: var(--text-primary);
+    font-family: var(--font-sans);
+    font-size: 13px;
+    line-height: 1.55;
+  }
+  .composer-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  .composer-pills {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    position: relative;
+  }
+  .composer-pill {
+    height: 30px;
+    padding: 0 10px;
+    border-radius: 7px;
+    border: 1px solid var(--border-strong);
+    background: var(--bg-surface);
+    color: var(--text-primary);
+    font-size: 12px;
+    font-weight: 600;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    transition: border-color 0.12s ease, background 0.12s ease;
+  }
+  .composer-pill:hover {
+    background: var(--bg-subtle);
+  }
+  .composer-pill.paired {
+    border-color: rgba(22, 163, 74, 0.45);
+    background: var(--green-soft);
+  }
+  .composer-pill.mismatch {
+    border-color: rgba(217, 119, 6, 0.55);
+    background: rgba(245, 158, 11, 0.08);
+  }
+  .breathing-dot.warn {
+    background: #F59E0B;
+    box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.22);
+  }
+  .dropdown-menu {
+    position: absolute;
+    top: 36px;
+    z-index: 90;
+    min-width: 240px;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-strong);
+    border-radius: 10px;
+    box-shadow: var(--shadow-popover);
+    padding: 6px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .dropdown-group-label {
+    font-size: 10.5px;
+    font-weight: 700;
+    color: var(--text-muted);
+    padding: 6px 8px 3px 8px;
+  }
+  .dropdown-item {
+    padding: 7px 9px;
+    border-radius: 6px;
+    font-size: 12px;
+    color: var(--text-primary);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    cursor: pointer;
+  }
+  .dropdown-item:hover {
+    background: var(--bg-subtle);
+  }
+  .dropdown-item.selected {
+    background: var(--bg-active-tint);
+    color: var(--accent);
+    font-weight: 600;
+  }
+  .echo-banner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 8px 12px;
+    border-radius: 8px;
+    font-size: 12px;
+    border: 1px solid var(--border-hairline);
+    background: var(--bg-subtle);
+    color: var(--text-secondary);
+  }
+  .echo-banner.ok {
+    border-color: rgba(22, 163, 74, 0.3);
+    background: var(--green-soft);
+    color: var(--text-primary);
+  }
+  .echo-banner.warn {
+    border-color: rgba(217, 119, 6, 0.4);
+    background: rgba(245, 158, 11, 0.08);
+    color: var(--text-primary);
+  }
+</style>
+</head>
+<body data-theme="light">
+
+<div class="proto-strip">
+  <div>
+    <span class="proto-badge">Impeccable 精修原型</span>
+    <span>顶栏胶囊每加一格分栏 ➔ 下方模型下拉框自动多出一个带呼吸灯的分组 · 初始仅显示「默认 (跟随网页)」，不预填假数据</span>
+  </div>
+  <div>
+    <button class="btn" id="btnToggleSniff" onclick="toggleSniffedModels()" style="height:24px;font-size:11px;">
+      模拟网页已动态抓回模型列表：关（当前仅显示默认）
+    </button>
+  </div>
+</div>
+
+<div class="app-stage">
+  <div class="app-window">
+
+    <!-- ================= TOP TITLE BAR ================= -->
+    <header class="titlebar">
+      <div class="titlebar-left">
+        <!-- Group 1: Brand + Sidebar Toggle + Theme Toggle (Three connected together: View & Appearance) -->
+        <div class="brand-rail-group">
+          <div class="brand-mark">
+            <div class="brand-logo">R</div>
+            <span class="brand-title">RelayStudio</span>
+          </div>
+
+          <button class="icon-btn active" id="btnToggleRail" onclick="toggleRail()" data-tip="展开 / 收起左侧任务分栏">
+            <svg viewBox="0 0 24 24">
+              <rect x="3" y="4" width="18" height="16" rx="2"></rect>
+              <line x1="9" y1="4" x2="9" y2="20"></line>
+            </svg>
+          </button>
+
+          <!-- Theme Pure Icon right behind Sidebar Toggle -->
+          <button class="icon-btn" id="btnTheme" onclick="toggleTheme()" data-tip="切换浅色 / 深色外观">
+            <svg viewBox="0 0 24 24">
+              <circle cx="12" cy="12" r="4.5"></circle>
+              <line x1="12" y1="2" x2="12" y2="4"></line>
+              <line x1="12" y1="20" x2="12" y2="22"></line>
+              <line x1="4.93" y1="4.93" x2="6.34" y2="6.34"></line>
+              <line x1="17.66" y1="17.66" x2="19.07" y2="19.07"></line>
+              <line x1="2" y1="12" x2="4" y2="12"></line>
+              <line x1="20" y1="12" x2="22" y2="12"></line>
+              <line x1="4.93" y1="19.07" x2="6.34" y2="17.66"></line>
+              <line x1="17.66" y1="6.34" x2="19.07" y2="4.93"></line>
+            </svg>
+          </button>
+        </div>
+
+        <!-- Group 2: Separated by 22px breathing gap — Settings Gear + Segmented Tunnel Capsule together -->
+        <div class="utility-tunnel-group">
+          <!-- Settings Pure Icon -->
+          <button class="icon-btn" id="btnSettings" onclick="togglePanel('settings')" data-tip="通用与本地引擎设置">
+            <svg viewBox="0 0 24 24">
+              <circle cx="12" cy="12" r="3"></circle>
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+            </svg>
+          </button>
+
+          <!-- Segmented Tunnel Capsule: Breathing Dot + Active Account Name + Internal Divider + Tail [+] -->
+          <div class="tunnel-capsule" id="tunnelCapsule"></div>
+        </div>
+      </div>
+
+      <!-- Window System Controls -->
+      <div class="titlebar-right">
+        <button class="win-ctrl-btn" aria-label="最小化">
+          <svg viewBox="0 0 24 24"><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+        </button>
+        <button class="win-ctrl-btn" aria-label="最大化">
+          <svg viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="1"></rect></svg>
+        </button>
+        <button class="win-ctrl-btn close" aria-label="关闭窗口">
+          <svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+        </button>
+      </div>
+
+      <!-- Popover Anchor -->
+      <div class="popover-anchor" id="popoverAnchor"></div>
+    </header>
+
+    <!-- ================= WORKSPACE BODY ================= -->
+    <div class="app-body" onclick="closePanelOnOutside()">
+      <aside class="left-rail" id="leftRail">
+        <div class="rail-task selected">
+          <div class="rail-task-title">支付网关接口契约评审</div>
+          <div class="rail-task-sub">ChatGPT · 走 OpenAI 隧道 (yuan88964)</div>
+        </div>
+        <div class="rail-task">
+          <div class="rail-task-title">高并发锁竞争日志分析</div>
+          <div class="rail-task-sub">DeepSeek · 浏览器网页直连</div>
+        </div>
+        <div class="rail-task">
+          <div class="rail-task-title">长文档多模态结构提取</div>
+          <div class="rail-task-sub">Gemini · 浏览器网页直连</div>
+        </div>
+      </aside>
+
+      <main class="workspace-card">
+        <div class="composer-section" id="composerRoot"></div>
+
+        <section class="truth-section">
+          <h2 class="truth-heading">上下呼应机制：顶栏「胶囊分栏」 ↔ 下方「模型下拉框分组」</h2>
+          <p class="truth-lead">
+            建好隧道后，右侧浏览器载体可任意选择派发任务；<strong>真正与顶栏胶囊分栏及呼吸灯一对一呼应的是下方左一栏「模型下拉框」</strong>：
+          </p>
+        </section>
+
+        <table class="comparison-table">
+          <thead>
+            <tr>
+              <th>设计要点</th>
+              <th>具体规则（可在上方胶囊与下方左一栏实时点选验证）</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>1. 顶栏加一格分栏 ➔ 下方自动多一个分组</strong></td>
+              <td>顶栏胶囊有几个平台分栏，下方左一栏 <code>[🤖 默认 (跟随网页) ▾]</code> 点开后就有几个对应的平台分组；分组标题旁<strong>同步显示顶栏该分栏的呼吸灯状态（🟢 / ⚪）与当前配置名</strong>。</td>
+            </tr>
+            <tr>
+              <td><strong>2. 初始只显示「默认 (跟随网页)」，不预填很多东西</strong></td>
+              <td>无论是初始状态还是新添加的分栏，下方对应分组里<strong>一开始只显示一项 <code>🤖 默认 (跟随网页)</code></strong>，绝不预填一堆写死的假模型列表；只有当网页端实际连接并动态抓回模型列表后，才会挂在该分组下方（可点最上方演示栏按钮切换对比）。</td>
+            </tr>
+            <tr>
+              <td><strong>3. 浏览器载体自由选择</strong></td>
+              <td>只要隧道已建好，右一栏 <code>[💻 ChatGPT 桌面端 ▾]</code> 中任意选择不同浏览器分身都能正常派发任务，不做强制绑定或告警干扰。</td>
+            </tr>
+          </tbody>
+        </table>
+      </main>
+    </div>
+
+  </div>
+</div>
+
+<script>
+  const PRESET_PLATFORMS = [
+    {
+      id: 'openai',
+      kind: 'tunnel',
+      shortName: 'OpenAI',
+      title: 'OpenAI 隧道配置',
+      desc: '配置 ChatGPT 网页端 MCP 反向隧道 (tunnel_...) 与 OpenAI API Key，管理本地 tunnel-client 守护进程',
+      primaryLinkText: '获取或管理 API Key ↗',
+      primaryLinkUrl: 'https://platform.openai.com/api-keys',
+      secondaryLinkText: '打开 OpenAI 隧道设置 ↗',
+      secondaryLinkUrl: 'https://platform.openai.com/settings/organization/tunnels',
+      defaultAcct: '默认',
+      defaultTarget: '',
+      defaultKeyMask: '',
+      sniffedModels: [
+        'GPT-5.6 Sol (gpt-5-6)',
+        'GPT-5.6 Sol (gpt-5-6-instant)',
+        'GPT-5.6 Sol (gpt-5-6-thinking)',
+        'GPT-5.6 Pro (gpt-5-6-pro)',
+        'GPT-6 Pro (gpt-6-pro)'
+      ]
+    },
+    {
+      id: 'claude_api',
+      kind: 'apikey',
+      shortName: 'Claude',
+      title: 'Claude 密钥与连接配置',
+      desc: '配置 Anthropic API Key 与网页端 Connectors，供网页端与本地工具联动',
+      primaryLinkText: '获取 Anthropic API Key ↗',
+      primaryLinkUrl: 'https://console.anthropic.com/settings/keys',
+      secondaryLinkText: '网页端 Connectors ↗',
+      secondaryLinkUrl: 'https://claude.ai/settings/integrations',
+      defaultAcct: '默认',
+      defaultTarget: '',
+      defaultKeyMask: '',
+      sniffedModels: [
+        'Claude 4.6 Sonnet',
+        'Claude 4.6 Opus'
+      ]
+    },
+    {
+      id: 'gemini_api',
+      kind: 'apikey',
+      shortName: 'Gemini',
+      title: 'Gemini AI Studio 密钥配置',
+      desc: '配置 Google AI Studio API Key，供网页端任务派发与工具联动',
+      primaryLinkText: '获取 AI Studio API Key ↗',
+      primaryLinkUrl: 'https://aistudio.google.com/app/apikey',
+      secondaryLinkText: '打开 Google AI Studio ↗',
+      secondaryLinkUrl: 'https://aistudio.google.com/',
+      defaultAcct: '默认',
+      defaultTarget: '',
+      defaultKeyMask: '',
+      sniffedModels: [
+        'Gemini 3.1 Pro',
+        'Gemini 3.1 Flash'
+      ]
+    },
+    {
+      id: 'deepseek_api',
+      kind: 'apikey',
+      shortName: 'DeepSeek',
+      title: 'DeepSeek 密钥配置',
+      desc: '配置 DeepSeek 开放平台 API Key，供网页端任务派发与工具联动',
+      primaryLinkText: '获取 DeepSeek API Key ↗',
+      primaryLinkUrl: 'https://platform.deepseek.com/api_keys',
+      secondaryLinkText: '开放平台文档 ↗',
+      secondaryLinkUrl: 'https://api-docs.deepseek.com/',
+      defaultAcct: '默认',
+      defaultTarget: '',
+      defaultKeyMask: '',
+      sniffedModels: [
+        'DeepSeek-R1',
+        'DeepSeek-V3'
+      ]
+    },
+    {
+      id: 'opencode_gateway',
+      kind: 'apikey',
+      shortName: 'OpenCode',
+      title: 'OpenCode / 聚合网关密钥配置',
+      desc: '配置 OpenCode 或 OpenRouter 聚合 API Key 与自定义接口地址',
+      primaryLinkText: '获取 OpenRouter API Key ↗',
+      primaryLinkUrl: 'https://openrouter.ai/keys',
+      secondaryLinkText: 'OpenCode 官方文档 ↗',
+      secondaryLinkUrl: 'https://opencode.ai/docs',
+      defaultAcct: '默认',
+      defaultTarget: '',
+      defaultKeyMask: '',
+      sniffedModels: []
+    }
+  ];
+
+  const BROWSER_PROFILES = [
+    { id: 'chrome_yuan', label: 'Chrome · yuan88964', kind: 'browser' },
+    { id: 'chrome_steever', label: 'Chrome · steeverlerer8500', kind: 'browser' },
+    { id: 'chrome_jury812', label: 'Chrome · jury812220', kind: 'browser' },
+    { id: 'chrome_juryge', label: 'Chrome · jurygejibu', kind: 'browser' },
+    { id: 'edge_steever', label: 'Edge · steeverlerer8500', kind: 'browser' },
+    { id: 'chatgpt_desktop', label: 'ChatGPT 桌面端 (桌面客户端)', kind: 'desktop' }
+  ];
+
+  const EFFORT_LEVELS = ['min', 'standard', 'extended', 'max'];
+
+  const state = {
+    theme: 'light',
+    railOpen: true,
+    openPanel: null,          // null | 'settings' | 'add_cell' | 'cell_<id>'
+    openComposerMenu: 'model', // default open so user immediately sees the clean model dropdown
+    sniffedModelsLoaded: false, // false by default: only shows "默认 (跟随网页)", no pre-filled fake models!
+    editingKey: null,
+    testFeedbackMap: {},
+    selectedPlatformId: 'openai',
+    selectedModel: '默认 (跟随网页)',
+    selectedEffort: '默认 (跟随网页)',
+    selectedProfileId: 'chatgpt_desktop',
+    cells: [
+      {
+        id: 'openai',
+        kind: 'tunnel',
+        shortName: 'OpenAI',
+        title: 'OpenAI 隧道配置',
+        online: true,
+        primaryLinkText: '获取或管理 API Key ↗',
+        primaryLinkUrl: 'https://platform.openai.com/api-keys',
+        secondaryLinkText: '打开 OpenAI 隧道设置 ↗',
+        secondaryLinkUrl: 'https://platform.openai.com/settings/organization/tunnels',
+        activeAcctId: 'a1',
+        accounts: [
+          { id: 'a1', name: 'yuan88964', target: 'tunnel_0195_8f92a3c4...', keyMask: 'sk-proj-••••98a1' }
+        ]
+      }
+    ]
+  };
+
+  function getActiveAcct(cell) {
+    return cell.accounts.find(a => a.id === cell.activeAcctId) || cell.accounts[0];
+  }
+
+  function renderCapsule() {
+    const el = document.getElementById('tunnelCapsule');
+    const multi = state.cells.length > 1;
+
+    const cellsHtml = state.cells.map((c, idx) => {
+      const acct = getActiveAcct(c);
+      const isSelected = state.openPanel === `cell_${c.id}`;
+      const stateWord = c.kind === 'tunnel'
+        ? (c.online ? '隧道运行中' : '隧道已断开')
+        : (c.online ? '密钥已启用' : '密钥已停用');
+      const tip = `${c.title} · ${stateWord}（当前使用: ${acct.name}）`;
+
+      return `
+        ${idx > 0 ? '<div class="capsule-sep"></div>' : ''}
+        <button class="capsule-cell ${isSelected ? 'active' : ''}"
+                onclick="togglePanel('cell_${c.id}')"
+                data-tip="${tip}">
+          <span class="breathing-dot ${c.online ? 'online' : 'offline'}"></span>
+          ${multi ? `<span class="capsule-cell-plat">${c.shortName}:</span>` : ''}
+          <span>${acct ? acct.name : '未配置'}</span>
+        </button>
+      `;
+    }).join('');
+
+    const isPlusActive = state.openPanel === 'add_cell';
+    el.innerHTML = `
+      ${cellsHtml}
+      ${state.cells.length > 0 ? '<div class="capsule-sep"></div>' : ''}
+      <button class="capsule-plus-cell ${isPlusActive ? 'active' : ''}"
+              style="${state.cells.length === 0 ? 'border-radius:999px;padding:0 10px;' : ''}"
+              onclick="togglePanel('add_cell')"
+              data-tip="添加平台隧道或密钥">
+        <svg viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+      </button>
+    `;
+  }
+
+  function renderPopover() {
+    const anchor = document.getElementById('popoverAnchor');
+    if (!state.openPanel) {
+      anchor.innerHTML = '';
+      return;
+    }
+
+    anchor.style.left = state.openPanel === 'settings' ? '156px' : '216px';
+
+    if (state.openPanel === 'settings') {
+      anchor.innerHTML = `
+        <div class="popover-panel" style="width:360px;">
+          <div class="panel-head">
+            <div>
+              <div class="panel-title">通用与本地引擎设置</div>
+              <div class="panel-sub">本地内核运行中 (127.0.0.1:8765)</div>
+            </div>
+            <button class="btn" onclick="togglePanel(null)">收起</button>
+          </div>
+          <div>
+            <label class="field-label">已完工任务自动归档</label>
+            <select class="field-input">
+              <option>完成满 3 天自动归档 (默认)</option>
+              <option>完成后立即归档</option>
+              <option>完成满 7 天自动归档</option>
+              <option>关闭自动归档</option>
+            </select>
+          </div>
+        </div>
+      `;
+      return;
+    }
+
+    if (state.openPanel === 'add_cell') {
+      const listHtml = PRESET_PLATFORMS.map(p => {
+        const exists = state.cells.find(c => c.id === p.id);
+        return `
+          <div class="preset-option" onclick="${exists ? `togglePanel('cell_${p.id}')` : `addCellToCapsule('${p.id}')`}">
+            <div>
+              <div style="font-size:12.5px;font-weight:700;">${p.title}</div>
+              <div style="font-size:11px;color:var(--text-secondary);margin-top:2px;">${p.desc}</div>
+            </div>
+            <button class="btn ${exists ? '' : 'btn-primary'}">${exists ? '已添加' : '＋ 添加'}</button>
+          </div>
+        `;
+      }).join('');
+
+      anchor.innerHTML = `
+        <div class="popover-panel">
+          <div class="panel-head">
+            <div class="panel-title">添加平台隧道或密钥</div>
+            <button class="btn" onclick="togglePanel(null)">关闭</button>
+          </div>
+          <div class="acct-stack">${listHtml}</div>
+        </div>
+      `;
+      return;
+    }
+
+    if (state.openPanel.startsWith('cell_')) {
+      const cId = state.openPanel.replace('cell_', '');
+      const cell = state.cells.find(c => c.id === cId) || state.cells[0];
+      if (!cell) return;
+      const isTunnelType = cell.kind === 'tunnel';
+      const testedOk = state.testFeedbackMap[cell.id];
+
+      const rowsHtml = cell.accounts.map(a => {
+        const isCurrent = a.id === cell.activeAcctId;
+        const editKey = `${cell.id}:${a.id}`;
+        const isEditing = state.editingKey === editKey;
+        return `
+          <div class="acct-item ${isCurrent ? 'active' : ''}">
+            <div class="acct-item-row" onclick="selectAcct('${cell.id}', '${a.id}')">
+              <div class="acct-item-left">
+                <span class="breathing-dot ${isCurrent && cell.online ? 'online' : 'offline'}"></span>
+                <div>
+                  <div class="acct-name">${a.name}</div>
+                  <div class="acct-meta">${a.target} · ${a.keyMask}</div>
+                </div>
+              </div>
+              <div style="display:flex;align-items:center;gap:6px;">
+                ${isCurrent ? '<span class="badge-active">当前使用</span>' : ''}
+                <button class="btn" onclick="event.stopPropagation();toggleEdit('${editKey}')">
+                  ${isEditing ? '收起' : '编辑'}
+                </button>
+              </div>
+            </div>
+            ${isEditing ? (isTunnelType ? `
+              <div class="inline-form" onclick="event.stopPropagation()">
+                <div>
+                  <label class="field-label">配置名称</label>
+                  <input class="field-input" value="${a.name}" onchange="renameAcct('${cell.id}', '${a.id}', this.value)" />
+                </div>
+                <div>
+                  <label class="field-label">隧道编号 (tunnel_...)</label>
+                  <input class="field-input" value="${a.target}" />
+                </div>
+                <div>
+                  <label class="field-label">OpenAI API Key</label>
+                  <input class="field-input" value="${a.keyMask}" />
+                </div>
+              </div>
+            ` : `
+              <div class="inline-form" onclick="event.stopPropagation()">
+                <div>
+                  <label class="field-label">配置名称</label>
+                  <input class="field-input" value="${a.name}" onchange="renameAcct('${cell.id}', '${a.id}', this.value)" />
+                </div>
+                <div>
+                  <label class="field-label">API Key</label>
+                  <input class="field-input" value="${a.keyMask}" />
+                </div>
+                <div>
+                  <label class="field-label">接口地址 (可选)</label>
+                  <input class="field-input" value="${a.target}" />
+                </div>
+              </div>
+            `) : ''}
+          </div>
+        `;
+      }).join('');
+
+      const footerActionsHtml = isTunnelType
+        ? `
+          <button class="btn btn-primary" onclick="setCellOnline('${cell.id}', true)">
+            ${cell.online ? '↻ 重新连接' : '▶ 启动隧道'}
+          </button>
+          ${cell.online ? `<button class="btn" onclick="setCellOnline('${cell.id}', false)">断开</button>` : ''}
+        `
+        : `
+          <button class="btn btn-primary" onclick="testApiKeyConnection('${cell.id}')">
+            ${testedOk ? '✓ 接口连通正常' : '✓ 测试连接'}
+          </button>
+          ${cell.online
+            ? `<button class="btn" onclick="setCellOnline('${cell.id}', false)">停用</button>`
+            : `<button class="btn" onclick="setCellOnline('${cell.id}', true)">启用密钥</button>`}
+        `;
+
+      anchor.innerHTML = `
+        <div class="popover-panel">
+          <div class="panel-head">
+            <div class="panel-title">${cell.title} (${cell.accounts.length})</div>
+            <div style="display:flex;gap:6px;">
+              <button class="btn" onclick="addAcct('${cell.id}')">＋ 新增配置</button>
+              <button class="btn" onclick="removeCell('${cell.id}')">移除</button>
+            </div>
+          </div>
+
+          <div class="acct-stack">${rowsHtml}</div>
+
+          <div class="card-footer">
+            <div class="footer-links">
+              <button class="text-link" onclick="window.open('${cell.primaryLinkUrl}', '_blank')">${cell.primaryLinkText}</button>
+              <button class="text-link" onclick="window.open('${cell.secondaryLinkUrl}', '_blank')">${cell.secondaryLinkText}</button>
+            </div>
+            <div style="display:flex;gap:6px;">
+              ${footerActionsHtml}
+            </div>
+          </div>
+        </div>
+      `;
+    }
+  }
+
+  function toggleRail() {
+    state.railOpen = !state.railOpen;
+    document.getElementById('leftRail').classList.toggle('collapsed', !state.railOpen);
+    document.getElementById('btnToggleRail').classList.toggle('active', state.railOpen);
+  }
+
+  function toggleTheme() {
+    state.theme = state.theme === 'light' ? 'dark' : 'light';
+    document.body.setAttribute('data-theme', state.theme);
+  }
+
+  function togglePanel(key) {
+    state.openPanel = state.openPanel === key ? null : key;
+    renderAll();
+  }
+
+  function closePanelOnOutside() {
+    if (state.openPanel || state.openComposerMenu) {
+      state.openPanel = null;
+      state.openComposerMenu = null;
+      renderAll();
+    }
+  }
+
+  function selectAcct(cellId, acctId) {
+    const cell = state.cells.find(c => c.id === cellId);
+    if (cell) {
+      cell.activeAcctId = acctId;
+      cell.online = true;
+      state.selectedPlatformId = cell.id;
+    }
+    renderAll();
+  }
+
+  function toggleEdit(key) {
+    state.editingKey = state.editingKey === key ? null : key;
+    renderAll();
+  }
+
+  function renameAcct(cellId, acctId, val) {
+    const cell = state.cells.find(c => c.id === cellId);
+    const a = cell?.accounts.find(x => x.id === acctId);
+    if (a && val.trim()) a.name = val.trim();
+    renderAll();
+  }
+
+  function addAcct(cellId) {
+    const cell = state.cells.find(c => c.id === cellId);
+    if (!cell) return;
+    const newId = 'acct_' + Date.now();
+    cell.accounts.push({
+      id: newId,
+      name: '默认',
+      target: '',
+      keyMask: ''
+    });
+    cell.activeAcctId = newId;
+    renderAll();
+  }
+
+  function addCellToCapsule(presetId) {
+    const p = PRESET_PLATFORMS.find(x => x.id === presetId);
+    if (!p) return;
+    const acctId = p.id + '_a1';
+    state.cells.push({
+      id: p.id,
+      kind: p.kind,
+      shortName: p.shortName,
+      title: p.title,
+      online: true,
+      primaryLinkText: p.primaryLinkText,
+      primaryLinkUrl: p.primaryLinkUrl,
+      secondaryLinkText: p.secondaryLinkText,
+      secondaryLinkUrl: p.secondaryLinkUrl,
+      activeAcctId: acctId,
+      accounts: [
+        { id: acctId, name: p.defaultAcct, target: p.defaultTarget, keyMask: p.defaultKeyMask }
+      ]
+    });
+    state.selectedPlatformId = p.id;
+    state.selectedModel = '默认 (跟随网页)';
+    state.openPanel = null;
+    state.openComposerMenu = 'model';
+    renderAll();
+  }
+
+  function removeCell(cellId) {
+    state.cells = state.cells.filter(c => c.id !== cellId);
+    state.openPanel = state.cells[0] ? `cell_${state.cells[0].id}` : null;
+    if (state.selectedPlatformId === cellId && state.cells[0]) {
+      state.selectedPlatformId = state.cells[0].id;
+      state.selectedModel = '默认 (跟随网页)';
+    }
+    renderAll();
+  }
+
+  function setCellOnline(cellId, online) {
+    const cell = state.cells.find(c => c.id === cellId);
+    if (cell) cell.online = online;
+    renderAll();
+  }
+
+  function testApiKeyConnection(cellId) {
+    state.testFeedbackMap[cellId] = true;
+    const cell = state.cells.find(c => c.id === cellId);
+    if (cell) cell.online = true;
+    renderAll();
+  }
+
+  function toggleSniffedModels() {
+    state.sniffedModelsLoaded = !state.sniffedModelsLoaded;
+    const btn = document.getElementById('btnToggleSniff');
+    if (btn) {
+      btn.textContent = state.sniffedModelsLoaded
+        ? '模拟网页已动态抓回模型列表：开（已加载真实网页模型）'
+        : '模拟网页已动态抓回模型列表：关（当前仅显示默认）';
+    }
+    state.openComposerMenu = 'model';
+    renderAll();
+  }
+
+  function toggleComposerMenu(menuKey, ev) {
+    if (ev) ev.stopPropagation();
+    state.openPanel = null;
+    state.openComposerMenu = state.openComposerMenu === menuKey ? null : menuKey;
+    renderAll();
+  }
+
+  function chooseComposerModel(platformId, modelName, ev) {
+    if (ev) ev.stopPropagation();
+    state.selectedPlatformId = platformId;
+    state.selectedModel = modelName;
+    state.openComposerMenu = null;
+    renderAll();
+  }
+
+  function chooseComposerEffort(eff, ev) {
+    if (ev) ev.stopPropagation();
+    state.selectedEffort = eff;
+    state.openComposerMenu = null;
+    renderAll();
+  }
+
+  function chooseComposerProfile(profId, ev) {
+    if (ev) ev.stopPropagation();
+    state.selectedProfileId = profId;
+    state.openComposerMenu = null;
+    renderAll();
+  }
+
+  function renderComposer() {
+    const root = document.getElementById('composerRoot');
+    if (!root) return;
+
+    const activeCell = state.cells.find(c => c.id === state.selectedPlatformId) || state.cells[0];
+    const currentProf = BROWSER_PROFILES.find(b => b.id === state.selectedProfileId) || BROWSER_PROFILES[0];
+    const multiPlatforms = state.cells.length > 1;
+
+    // Build Model Menu: each segment in the top capsule maps to 1 group in the model dropdown!
+    // Initially (sniffedModelsLoaded === false), each group ONLY displays "默认 (跟随网页)" without pre-filling fake models!
+    const modelGroupsHtml = state.cells.map((c, idx) => {
+      const preset = PRESET_PLATFORMS.find(p => p.id === c.id);
+      const acct = getActiveAcct(c);
+      const defaultItem = '默认 (跟随网页)';
+      const models = state.sniffedModelsLoaded && preset && preset.sniffedModels.length > 0
+        ? [defaultItem, ...preset.sniffedModels]
+        : [defaultItem];
+
+      const itemsHtml = models.map(m => {
+        const isSel = state.selectedPlatformId === c.id && state.selectedModel === m;
+        return `
+          <div class="dropdown-item ${isSel ? 'selected' : ''}" onclick="chooseComposerModel('${c.id}', '${m}', event)">
+            <span>🤖 ${m}</span>
+            ${isSel ? '<span>✓</span>' : ''}
+          </div>
+        `;
+      }).join('');
+
+      return `
+        ${idx > 0 ? '<div style="border-top:1px solid var(--border-hairline);margin:4px 0;"></div>' : ''}
+        <div class="dropdown-group-label" style="display:flex;align-items:center;gap:6px;">
+          <span class="breathing-dot ${c.online ? 'online' : 'offline'}"></span>
+          <span>${c.shortName} · ${acct ? acct.name : '默认'}</span>
+        </div>
+        ${itemsHtml}
+      `;
+    }).join('');
+
+    const availableEfforts = state.sniffedModelsLoaded
+      ? ['默认 (跟随网页)', ...EFFORT_LEVELS]
+      : ['默认 (跟随网页)'];
+    const effortItemsHtml = availableEfforts.map(eff => {
+      const isSel = state.selectedEffort === eff;
+      return `
+        <div class="dropdown-item ${isSel ? 'selected' : ''}" onclick="chooseComposerEffort('${eff}', event)">
+          <span>🧠 ${eff}</span>
+          ${isSel ? '<span>✓</span>' : ''}
+        </div>
+      `;
+    }).join('');
+
+    const profileItemsHtml = BROWSER_PROFILES.map(prof => {
+      const isSel = state.selectedProfileId === prof.id;
+      return `
+        <div class="dropdown-item ${isSel ? 'selected' : ''}" onclick="chooseComposerProfile('${prof.id}', event)">
+          <span>${prof.kind === 'desktop' ? '💻 ' : '🌐 '}${prof.label}</span>
+          ${isSel ? '<span>✓</span>' : ''}
+        </div>
+      `;
+    }).join('');
+
+    const pillModelLabel = multiPlatforms && activeCell
+      ? `${activeCell.shortName} · ${state.selectedModel}`
+      : state.selectedModel;
+
+    root.innerHTML = `
+      <div class="composer-head">
+        <div class="composer-title">新建任务</div>
+        <button class="btn">🌐 打开宿主窗口 ↗</button>
+      </div>
+
+      <div class="composer-box">
+        <textarea class="composer-textarea" placeholder="输入新任务目标或问题（按 Enter 立项并下发，Shift+Enter 换行）..."></textarea>
+
+        <div class="composer-bar">
+          <div class="composer-pills">
+            <!-- Dropdown 1: Model Dropdown echoing Top Capsule Segments & Breathing Dots -->
+            <div style="position:relative;">
+              <button class="composer-pill" onclick="toggleComposerMenu('model', event)">
+                ${activeCell ? `<span class="breathing-dot ${activeCell.online ? 'online' : 'offline'}"></span>` : ''}
+                <span>🤖 ${pillModelLabel}</span>
+                <span style="opacity:0.6;">▾</span>
+              </button>
+              ${state.openComposerMenu === 'model' ? `
+                <div class="dropdown-menu" style="left:0;min-width:260px;" onclick="event.stopPropagation()">
+                  ${modelGroupsHtml}
+                </div>
+              ` : ''}
+            </div>
+
+            <!-- Dropdown 2: Reasoning Effort -->
+            <div style="position:relative;">
+              <button class="composer-pill" onclick="toggleComposerMenu('effort', event)">
+                <span>🧠 ${state.selectedEffort}</span>
+                <span style="opacity:0.6;">▾</span>
+              </button>
+              ${state.openComposerMenu === 'effort' ? `
+                <div class="dropdown-menu" style="left:0;min-width:150px;" onclick="event.stopPropagation()">
+                  ${effortItemsHtml}
+                </div>
+              ` : ''}
+            </div>
+
+            <!-- Dropdown 3: Clean Browser Carrier Selector (freely selectable) -->
+            <div style="position:relative;">
+              <button class="composer-pill" onclick="toggleComposerMenu('profile', event)">
+                <span>${currentProf.kind === 'desktop' ? '💻 ' : '🌐 '}${currentProf.label}</span>
+                <span style="opacity:0.6;">▾</span>
+              </button>
+              ${state.openComposerMenu === 'profile' ? `
+                <div class="dropdown-menu" style="left:0;min-width:250px;" onclick="event.stopPropagation()">
+                  ${profileItemsHtml}
+                </div>
+              ` : ''}
+            </div>
+          </div>
+
+          <button class="btn btn-primary" style="height:32px;padding:0 14px;border-radius:8px;">
+            🚀 在网页发起新任务 ↗
+          </button>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderAll() {
+    document.getElementById('btnSettings').classList.toggle('active', state.openPanel === 'settings');
+    renderCapsule();
+    renderPopover();
+    renderComposer();
+  }
+
+  renderAll();
+</script>
+</body>
+</html>

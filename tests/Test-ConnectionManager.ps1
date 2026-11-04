@@ -314,29 +314,37 @@ try {
 
     $stallPulse = Get-TunnelActivityPulse $pulseContext $true
 
-    Assert ($stallPulse.Sessions.Count -eq 1 -and $stallPulse.Sessions[0].IsStalled -eq $true -and $stallPulse.Sessions[0].StallAlertText -eq '已停顿3分钟，请检查网页端') '3-minute stall sets IsStalled=true and exact text 已停顿3分钟，请检查网页端'
+    $stalledMainSess = $stallPulse.Sessions | Where-Object { $_.SessionKey -ne 'tsk_ancient24h0001' } | Select-Object -First 1
+    Assert ($stallPulse.Sessions.Count -eq 2 -and $null -ne $stalledMainSess -and $stalledMainSess.IsStalled -eq $true -and $stalledMainSess.StallAlertText -eq '已停顿3分钟，请检查网页端') '3-minute stall sets IsStalled=true and exact text 已停顿3分钟，请检查网页端'
 
-    Assert ($stallPulse.ArchivedSessions.Count -eq 1 -and $stallPulse.ArchivedSessions[0].SessionKey -eq 'tsk_ancient24h0001' -and $stallPulse.ArchivedSessions[0].ArchiveReason -eq '超 24h 自动归档') 'task idle >24h automatically appears in ArchivedSessions'
+    Assert ($stallPulse.ArchivedSessions.Count -eq 0 -and @($stallPulse.Sessions | Where-Object { $_.SessionKey -eq 'tsk_ancient24h0001' }).Count -eq 1) 'Unfinished task idle >24h is NEVER auto-archived and stays in active Sessions'
 
 
 
-    # Verify manual archive and manual restore
+    # Verify manual archive and manual restore (plus Ledger 1 task-registry.json consistency)
 
-    Set-TaskArchiveState -Context $pulseContext -TaskId $stallPulse.Sessions[0].SessionKey -State 'archived'
+    Set-TaskArchiveState -Context $pulseContext -TaskId 'tsk_ancient24h0001' -State 'archived'
+
+    Set-TaskArchiveState -Context $pulseContext -TaskId $stalledMainSess.SessionKey -State 'archived'
 
     $manualArchPulse = Get-TunnelActivityPulse $pulseContext $true
 
-    Assert ($manualArchPulse.Sessions.Count -eq 0 -and $manualArchPulse.ArchivedSessions.Count -eq 2) 'manual archive moves active session to ArchivedSessions'
+    $regAfterArch = Get-Content -LiteralPath (Join-Path $pulseContext.DataRoot 'task-registry.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+
+    Assert ($manualArchPulse.Sessions.Count -eq 0 -and $manualArchPulse.ArchivedSessions.Count -eq 2 -and $regAfterArch.tasks.tsk_ancient24h0001.lifecycle -eq 'archived') 'manual archive moves active sessions to ArchivedSessions and syncs Ledger 1 (task-registry.json)'
 
     Set-TaskArchiveState -Context $pulseContext -TaskId 'tsk_ancient24h0001' -State 'active'
 
-    Set-TaskArchiveState -Context $pulseContext -TaskId $stallPulse.Sessions[0].SessionKey -State 'auto'
+    Set-TaskArchiveState -Context $pulseContext -TaskId $stalledMainSess.SessionKey -State 'active'
 
     $restoredPulse = Get-TunnelActivityPulse $pulseContext $true
 
-    Assert ($restoredPulse.Sessions.Count -eq 2 -and $restoredPulse.ArchivedSessions.Count -eq 0) 'manual restore moves >24h archived task back to active Sessions'
+    $regAfterRestore = Get-Content -LiteralPath (Join-Path $pulseContext.DataRoot 'task-registry.json') -Raw -Encoding UTF8 | ConvertFrom-Json
 
-    Set-TaskArchiveState -Context $pulseContext -TaskId 'tsk_ancient24h0001' -State 'auto'
+    Assert ($restoredPulse.Sessions.Count -eq 2 -and $restoredPulse.ArchivedSessions.Count -eq 0 -and $regAfterRestore.tasks.tsk_ancient24h0001.lifecycle -eq 'active') 'manual restore moves archived task back to active Sessions and updates task-registry.json'
+
+    Set-TaskArchiveState -Context $pulseContext -TaskId 'tsk_ancient24h0001' -State 'archived'
+    $stallPulse = Get-TunnelActivityPulse $pulseContext $true
 
 
 
@@ -446,7 +454,8 @@ try {
 
     Assert ($script:controls.SessionListPanel.Children.Count -eq 2 -and $script:controls.EmptySessionBox.Visibility -eq 'Collapsed') 'SessionListPanel renders active main conversation items in LeftTaskRail'
 
-    Assert ($script:controls.ArchivedListPanel.Children.Count -eq 1) 'ArchivedListPanel renders >24h archived task item in LeftTaskRail'
+    $firstCardActRow = $script:controls.SessionListPanel.Children[0].Tag.ActRow
+    Assert ($null -eq $script:controls.ArchivedListPanel -and $firstCardActRow.Children.Count -eq 2) 'LeftTaskRail removes dead ArchivedListPanel and active cards expose only Open-Web and Archive buttons (no direct Delete button)'
 
 
 
@@ -786,12 +795,57 @@ try {
     Assert ($null -ne $script:controls.RestartCoreButton -and $null -ne $script:controls.AcpProfileCodexButton -and $null -ne $script:controls.BrowserCdpToggleButton -and $null -ne $script:controls.StartupTrayButton) 'Popover exposes absorbed core restart, ACP profile selector, browser CDP toggle, and 3-tier startup mode controls'
 
     # Verify Popover Two-Line Tunnel Strip (with inline masked tunnel/key + copy) & Right-Caret Inline Accordion Edit & Always-Visible Delete & Footer Links
-    Assert ($null -ne $script:controls.AcpLimit0Button -and $script:controls.Advanced.Visibility -eq 'Collapsed' -and $script:controls.ClosePopoverButton.Visibility -eq 'Collapsed') 'Popover exposes AcpLimit0Button (0), hides Advanced expander, and removes ClosePopoverButton'
+    Assert ($null -ne $script:controls.AcpLimit0Button -and $script:controls.Advanced.Visibility -eq 'Collapsed' -and $script:controls.ClosePopoverButton.Visibility -eq 'Collapsed') 'Popover exposes AcpLimit0Button (关闭), hides Advanced expander, and removes ClosePopoverButton'
     $acpZeroRes = Set-AcpConcurrencyLimit -Context $script:context -Limit 0
     Refresh-ProfilePopoverState
-    Assert ($acpZeroRes.Limit -eq 0 -and (Get-AcpConcurrencyLimit $script:context) -eq 0 -and $script:controls.AcpConcurrencyLabel.Text -eq '本地 ACP 子代理并发上限：0 个') 'Set-AcpConcurrencyLimit supports 0 concurrency option'
+    Assert ($acpZeroRes.Limit -eq 0 -and (Get-AcpConcurrencyLimit $script:context) -eq 0 -and $script:controls.AcpConcurrencyLabel.Text -match '^CLI 智能体并发上限：' -and [string]$script:controls.AcpLimit0Button.Content -eq '关闭') 'Set-AcpConcurrencyLimit supports 0 (关闭) concurrency option with CLI 智能体并发上限 terminology'
     [void](Set-AcpConcurrencyLimit -Context $script:context -Limit 4)
     Refresh-ProfilePopoverState
+
+    # Verify Slice 2: Top-Left OpenAI Tunnel Popover vs. Top-Right ⚙ Global Settings Popover + Fast CLI Discovery + Auto-Archive Completed Timer + Default Carrier
+    Assert ($script:controls.PopoverHeaderTitle.Text -match '^OpenAI 隧道配置 \(\d+\)$') "Top-Left KeyPopoverBorder header shows OpenAI 隧道配置 (N) (actual=$($script:controls.PopoverHeaderTitle.Text))"
+    Assert ($null -ne $script:controls.GlobalSettingsButton -and $null -ne $script:controls.GlobalSettingsPopoverBorder -and $script:controls.GlobalSettingsPopoverBorder.Width -eq 460 -and [string]$script:controls.GlobalSettingsPopoverBorder.HorizontalAlignment -eq 'Right') 'Top-Right ⚙ GlobalSettingsButton and GlobalSettingsPopoverBorder (Width=460, Right-aligned) are present'
+    Toggle-GlobalSettingsPopover
+    Assert ($script:controls.GlobalSettingsPopoverBorder.Visibility -eq 'Visible' -and $script:controls.KeyPopoverBorder.Visibility -eq 'Collapsed') 'Toggle-GlobalSettingsPopover opens GlobalSettingsPopoverBorder and keeps KeyPopoverBorder closed'
+    Toggle-GlobalSettingsPopover
+    Assert ($script:controls.GlobalSettingsPopoverBorder.Visibility -eq 'Collapsed') 'Toggle-GlobalSettingsPopover closes GlobalSettingsPopoverBorder on second click'
+
+    # Fast <30ms Local CLI Agent Discovery (Get-DetectedCliAgents / Discover-LocalCliAgents) & Zero npx -y fallback
+    $coreAstText = (Get-Command Start-OfficialCoreIfNeeded).ScriptBlock.Ast.Extent.Text
+    Assert ($coreAstText -notmatch '@agentclientprotocol' -and $coreAstText -notmatch 'npx\.cmd') 'Start-OfficialCoreIfNeeded removes npx -y @agentclientprotocol fallback completely'
+    $fakeCliDir = Join-Path $testRoot 'fake-cli-bin'
+    [IO.Directory]::CreateDirectory($fakeCliDir) | Out-Null
+    foreach ($fakeBin in @('codex-acp.cmd', 'claude-agent-acp.cmd', 'codebuddy.cmd', 'agy.exe', 'my-custom-agent.cmd')) {
+        [IO.File]::WriteAllText((Join-Path $fakeCliDir $fakeBin), "@echo off`r`n", [Text.Encoding]::ASCII)
+    }
+    $cliTestSettings = Read-ConnectionSettings $script:context
+    $cliTestSettings | Add-Member -NotePropertyName 'extra_bin_dirs' -NotePropertyValue @($fakeCliDir) -Force
+    Write-AtomicConnectionText $script:context.SettingsPath ($cliTestSettings | ConvertTo-Json -Depth 6)
+    $script:settings = Read-ConnectionSettings $script:context
+    $detectedCli1 = @(Discover-LocalCliAgents -ForceRescan -Settings $script:settings -Context $script:context)
+    $swCliCache = [Diagnostics.Stopwatch]::StartNew()
+    $detectedCli2 = @(Get-DetectedCliAgents -Settings $script:settings -Context $script:context)
+    $swCliCache.Stop()
+    $detectedIds = @($detectedCli2 | ForEach-Object { [string]$_.id })
+    $wbAgent = $detectedCli2 | Where-Object { $_.id -eq 'workbuddy' } | Select-Object -First 1
+    $agyAgent = $detectedCli2 | Where-Object { $_.id -eq 'agy' } | Select-Object -First 1
+    Assert ($swCliCache.ElapsedMilliseconds -lt 30 -and ($detectedIds -contains 'codex') -and ($detectedIds -contains 'claude') -and ($detectedIds -contains 'workbuddy') -and ($detectedIds -contains 'agy') -and ($wbAgent.args -contains '--acp') -and ($wbAgent.kind -eq 'custom') -and ($agyAgent.kind -eq 'custom')) "Get-DetectedCliAgents / Discover-LocalCliAgents detects codex, claude, workbuddy (--acp), agy in <30ms (actual=$($swCliCache.ElapsedMilliseconds)ms)"
+
+    $script:CustomCliPathOverride = Join-Path $fakeCliDir 'my-custom-agent.cmd'
+    $script:controls.AddCustomCliAgentButton.RaiseEvent((New-Object Windows.RoutedEventArgs([Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+    $script:CustomCliPathOverride = $null
+    $detectedAfterAdd = @(Get-DetectedCliAgents -Settings $script:settings -Context $script:context | ForEach-Object { [string]$_.id })
+    Assert ($detectedAfterAdd -contains 'my-custom-agent') 'AddCustomCliAgentButton adds custom CLI executable to custom_cli_agents and refreshes detected CLI buttons'
+
+    # Auto-Archive Completed Timer (immediate, 1d, 3d, 7d, off)
+    Assert ($null -ne $script:controls.AutoArchiveImmediateButton -and $null -ne $script:controls.AutoArchive1dButton -and $null -ne $script:controls.AutoArchive3dButton -and $null -ne $script:controls.AutoArchive7dButton -and $null -ne $script:controls.AutoArchiveOffButton) 'GlobalSettingsPopoverBorder exposes 5 completed-task auto-archive timer buttons'
+    $script:controls.AutoArchive1dButton.RaiseEvent((New-Object Windows.RoutedEventArgs([Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+    $cfgAfter1d = Get-CoreEngineConfig $script:context
+    Assert ($cfgAfter1d.AutoArchiveCompletedMode -eq '1d') "Clicking AutoArchive1dButton persists auto_archive_completed_mode=1d (actual=$($cfgAfter1d.AutoArchiveCompletedMode))"
+    $script:controls.AutoArchive3dButton.RaiseEvent((New-Object Windows.RoutedEventArgs([Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+    Assert ((Get-CoreEngineConfig $script:context).AutoArchiveCompletedMode -eq '3d') 'Clicking AutoArchive3dButton restores default 3d auto-archive mode'
+    Assert ($null -ne $script:controls.DefaultCarrierCombo -and $script:controls.DefaultCarrierCombo.Items.Count -ge 1) 'GlobalSettingsPopoverBorder exposes DefaultCarrierCombo populated from Get-AvailableBrowserProfiles'
+    Assert ([string]$script:controls.BrowserCdpToggleButton.Content -match '^(● 已开启|○ 已关闭)$') "BrowserCdpToggleButton uses [● 已开启] / [○ 已关闭] copy (actual=$($script:controls.BrowserCdpToggleButton.Content))"
 
     $script:popoverOpen = $false
     Toggle-KeyPopover
@@ -810,15 +864,15 @@ try {
 
 
 
-    $clearRes = Clear-AllArchivedSessions -Context $pulseContext -ArchivedSessions @('tsk_arch_1', 'tsk_arch_2')
+    $clearRes = Invoke-PurgeAllArchivedSessions -Context $pulseContext -ArchivedSessions @('tsk_arch_1', 'tsk_arch_2')
 
-    Assert ($clearRes.ClearedCount -ge 2) 'Clear-AllArchivedSessions marks all archived items as deleted'
+    Assert ($clearRes.ClearedCount -ge 2) 'Invoke-PurgeAllArchivedSessions purges all archived items without soft deleted state'
 
 
 
     # Verify Architecture Redesign Slice 3:
 
-    # 1. Two-stage Archive with archived_at & Automatic Revival when new activity arrives (M4)
+    # 1. Manual Archive stays archived without timestamp-based auto-revive when updated_at > archived_at
 
     $reviveTaskId = 'tsk_revive_test01'
 
@@ -826,7 +880,7 @@ try {
 
     [IO.File]::WriteAllText((Join-Path $pulseContext.TasksRoot "$reviveTaskId.json"), (@{
 
-        schema_version = 1; id = $reviveTaskId; title = '归档自动复活验证任务'; status = 'active'
+        schema_version = 1; id = $reviveTaskId; title = '归档不自动复活验证任务'; status = 'active'
 
         created_at = $reviveOldIso; updated_at = $reviveOldIso
 
@@ -848,27 +902,56 @@ try {
 
     [IO.File]::WriteAllText((Join-Path $pulseContext.TasksRoot "$reviveTaskId.json"), (@{
 
-        schema_version = 1; id = $reviveTaskId; title = '归档自动复活验证任务'; status = 'active'
+        schema_version = 1; id = $reviveTaskId; title = '归档不自动复活验证任务'; status = 'active'
 
         created_at = $reviveOldIso; updated_at = $reviveNewIso
 
         steps = @(@{ id = '1'; title = '步骤一'; status = 'in_progress'; updated_at = $reviveNewIso })
 
-        summary = '收到新进展自动复活'
+        summary = '收到新进展不自动复活'
 
     } | ConvertTo-Json -Depth 5), (New-Object Text.UTF8Encoding($false)))
 
     $revivedPulse = Get-TunnelActivityPulse $pulseContext $true
 
-    Assert (@($revivedPulse.Sessions | Where-Object { $_.SessionKey -eq $reviveTaskId }).Count -eq 1) 'Archived task automatically revives to active Sessions when updated_at > archived_at'
+    Assert (@($revivedPulse.ArchivedSessions | Where-Object { $_.SessionKey -eq $reviveTaskId }).Count -eq 1 -and @($revivedPulse.Sessions | Where-Object { $_.SessionKey -eq $reviveTaskId }).Count -eq 0) 'Archived task stays in ArchivedSessions without timestamp-based auto-revive when updated_at > archived_at'
 
 
 
-    # 2. Physical Purge (Remove-ArchivedTaskSession) deletes tsk_*.json from disk and cleans state (M4)
+    # 2. Physical Purge (Invoke-PurgeArchivedSession / Remove-ArchivedTaskSession) deletes tsk_*.json, updates task-registry.json, enqueues cloud delete, and Confirm-PurgeArchivedDialog guards UI deletion without UndoDeleteBorder
 
-    $purgeRes = Remove-ArchivedTaskSession -Context $pulseContext -SessionKey $reviveTaskId
+    [void](Set-SessionBridgeBinding -Context $pulseContext -SessionKey $reviveTaskId -ConvUuid 'dddd4444-4444-4444-8444-444444444444' -BrowserProfile 'Chrome:Profile 1')
 
-    Assert ($purgeRes.PurgedTaskFile -eq $true -and -not (Test-Path -LiteralPath (Join-Path $pulseContext.TasksRoot "$reviveTaskId.json"))) 'Remove-ArchivedTaskSession physically deletes tsk_*.json ledger file'
+    $purgeRes = Invoke-PurgeArchivedSession -Context $pulseContext -SessionKey $reviveTaskId
+
+    $wbAfterPurge = Get-WebBridgeState $pulseContext
+
+    $cloudDelAct = @($wbAfterPurge.retire_actions | Where-Object { $_.conv_uuid -eq 'dddd4444-4444-4444-8444-444444444444' -and $_.operation -eq 'delete' }) | Select-Object -Last 1
+
+    $regAfterPurge = Get-Content -LiteralPath (Join-Path $pulseContext.DataRoot 'task-registry.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+
+    $archStateAfterPurge = Get-TaskArchiveOverrides $pulseContext
+
+    Assert ($purgeRes.PurgedTaskFile -eq $true -and -not (Test-Path -LiteralPath (Join-Path $pulseContext.TasksRoot "$reviveTaskId.json")) -and ($null -eq $regAfterPurge.tasks.PSObject.Properties[$reviveTaskId]) -and (-not $archStateAfterPurge.ContainsKey($reviveTaskId)) -and $null -ne $cloudDelAct) 'Invoke-PurgeArchivedSession physically deletes tsk_*.json, removes from task-registry.json and task-archives.json (zero soft deleted state), and enqueues cloud delete'
+
+    Assert ($xaml.OuterXml -match '展示手动归档与已完工自动归档的任务（还原将同步恢复主会话，彻底删除将同时清除本机账本与云端对话）') 'ArchiveDrawerOverlay displays updated subtitle/footer text for manual and completed-auto archive and cloud+local purge'
+
+    $uiArchTaskId = 'tsk_ui_purge_confirm_01'
+    $script:context.TasksRoot = Join-Path $script:context.DataRoot 'tasks'
+    [IO.Directory]::CreateDirectory($script:context.TasksRoot) | Out-Null
+    [IO.File]::WriteAllText((Join-Path $script:context.TasksRoot "$uiArchTaskId.json"), (@{
+        schema_version = 1; id = $uiArchTaskId; title = 'UI确认弹窗删除测试'; status = 'active'
+        created_at = $reviveOldIso; updated_at = $reviveOldIso; steps = @(); summary = ''
+    } | ConvertTo-Json -Depth 5), (New-Object Text.UTF8Encoding($false)))
+    Invoke-ArchiveSession $uiArchTaskId
+    Assert ($script:controls.UndoDeleteBorder.Visibility -eq 'Collapsed' -and $script:controls.QuickToastText.Text -match '已归档.*并同步归档云端会话') 'Invoke-ArchiveSession keeps UndoDeleteBorder collapsed and shows clean archive toast'
+    $script:PurgeConfirmOverride = { param($t, $b, $c) return $false }
+    [void](Invoke-DeleteSession $uiArchTaskId 'UI确认弹窗删除测试' -PhysicalPurge)
+    Assert ((Test-Path -LiteralPath (Join-Path $script:context.TasksRoot "$uiArchTaskId.json"))) 'Cancelling Confirm-PurgeArchivedDialog preserves tsk_*.json file'
+    $script:PurgeConfirmOverride = { param($t, $b, $c) return $true }
+    [void](Invoke-DeleteSession $uiArchTaskId 'UI确认弹窗删除测试' -PhysicalPurge)
+    $script:PurgeConfirmOverride = $null
+    Assert ((-not (Test-Path -LiteralPath (Join-Path $script:context.TasksRoot "$uiArchTaskId.json"))) -and $script:controls.UndoDeleteBorder.Visibility -eq 'Collapsed') 'Confirming Confirm-PurgeArchivedDialog physically deletes tsk_*.json without showing UndoDeleteBorder'
 
 
 
@@ -1293,13 +1376,16 @@ try {
     Assert ($uiSrcRaw -notmatch 'DoubleAnimation\(0\.65') 'Startup ContentRendered no longer dims WindowChrome with 0.65 opacity dark veil'
     Assert ($uiSrcRaw -match '\[powershell\]::Create\(\)') 'Startup OfficialCore and Tunnel auto-boot runs asynchronously in background Runspace'
 
-    $availProfsInit = @(Get-AvailableBrowserProfiles -ForceRefresh)
-    $defaultInit = $availProfsInit | Where-Object { $_.IsDefault } | Select-Object -First 1
-    Assert ($null -ne $defaultInit -and $defaultInit.Id -eq 'Desktop:ChatGPT') 'Out-of-the-box default browser profile is Desktop:ChatGPT before manual user selection'
+    [void](Set-CoreEngineConfig -Context $script:context -DefaultBrowserProfile 'Edge:Default')
+    $script:settings = Read-ConnectionSettings $script:context
+    $availProfsConfigured = @(Get-AvailableBrowserProfiles -ForceRefresh -Context $script:context)
+    $defaultConfigured = $availProfsConfigured | Where-Object { $_.IsDefault } | Select-Object -First 1
+    Assert ($null -ne $defaultConfigured -and $defaultConfigured.Id -eq 'Edge:Default' -and (Resolve-RelayBrowserProfile '' $script:context) -eq 'Edge:Default') 'Get-AvailableBrowserProfiles and Resolve-RelayBrowserProfile honor default_browser_profile in settings.json without hardcoding Desktop:ChatGPT'
 
     $script:composerPodCache.Clear()
     $selBeforeLock = Resolve-LaunchpadSelectedBrowserProfile
-    Assert ($selBeforeLock.Id -eq 'Desktop:ChatGPT') "Launchpad resolves Desktop:ChatGPT out of the box before user locks a choice (actual=$($selBeforeLock.Id))"
+    Assert ($selBeforeLock.Id -eq 'Edge:Default') "Launchpad resolves configured default_browser_profile (Edge:Default) before user locks a per-task choice (actual=$($selBeforeLock.Id))"
+    $availProfsInit = $availProfsConfigured
 
     $nonDesktopProf = [string](($availProfsInit | Where-Object { $_.Id -match '^Chrome:' } | Select-Object -First 1).Id)
     if (-not $nonDesktopProf) { $nonDesktopProf = 'Chrome:Default' }

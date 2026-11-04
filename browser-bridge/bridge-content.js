@@ -1170,6 +1170,7 @@
       }
       if (msg.type === "RELAY_ARCHIVE_CONVERSATION" && msg.conv_uuid) {
         const targetUuid = String(msg.conv_uuid).trim();
+        const operation = String(msg.operation || "archive").trim().toLowerCase();
         let responded = false;
         const finishArchive = (okVal) => {
           if (responded) return;
@@ -1177,22 +1178,22 @@
           try {
             window.removeEventListener("relaystudio:archive-conversation-done", onDone);
           } catch (_) {}
-          sendResponse({ ok: Boolean(okVal), conv_uuid: targetUuid });
+          sendResponse({ ok: Boolean(okVal), conv_uuid: targetUuid, operation });
         };
         const onDone = (ev) => {
           const det = (ev && ev.detail) || {};
           if (!det.conv_uuid || String(det.conv_uuid) === targetUuid) {
-            finishArchive(det.ok !== false);
+            finishArchive(Boolean(det.ok === true));
           }
         };
         try {
           window.addEventListener("relaystudio:archive-conversation-done", onDone);
           window.dispatchEvent(
             new CustomEvent("relaystudio:archive-conversation", {
-              detail: { conv_uuid: targetUuid },
+              detail: { conv_uuid: targetUuid, operation },
             })
           );
-          setTimeout(() => finishArchive(true), 2500);
+          setTimeout(() => finishArchive(false), 2500);
         } catch (_) {
           finishArchive(false);
         }

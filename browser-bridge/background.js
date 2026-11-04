@@ -412,11 +412,9 @@ async function handleShuttleRetireActions(retireActions) {
     if (!r || typeof r !== "object") continue;
     const retireId = String(r.id || "");
     const convUuid = String(r.conv_uuid || "").trim();
+    const op = String(r.operation || "archive").trim().toLowerCase();
     if (!convUuid || (retireId && completedRetireIds.has(retireId))) {
       continue;
-    }
-    if (retireId) {
-      completedRetireIds.add(retireId);
     }
 
     const matchedTab = openTabs.find((t) => {
@@ -430,8 +428,16 @@ async function handleShuttleRetireActions(retireActions) {
       return false;
     });
     const carrierTab = openTabs.find((t) => t !== matchedTab) || matchedTab || openTabs[0];
+    if (!carrierTab || typeof carrierTab.id !== "number") {
+      continue;
+    }
 
-    if (r.stop_before_archive === true && matchedTab && typeof matchedTab.id === "number") {
+    if (
+      (r.stop_before_action === true || r.stop_before_archive === true) &&
+      op !== "unarchive" &&
+      matchedTab &&
+      typeof matchedTab.id === "number"
+    ) {
       try {
         await ensureTabScriptsInjected(matchedTab.id);
         await new Promise((resolve) => {
@@ -444,20 +450,33 @@ async function handleShuttleRetireActions(retireActions) {
       } catch (_) {}
     }
 
-    if (r.archive_conversation !== false && carrierTab && typeof carrierTab.id === "number") {
+    let cloudOk = false;
+    if (r.archive_conversation === false && op === "archive") {
+      cloudOk = true;
+    } else {
       try {
         await ensureTabScriptsInjected(carrierTab.id);
-        await new Promise((resolve) => {
+        const archResp = await new Promise((resolve) => {
           chrome.tabs.sendMessage(
             carrierTab.id,
-            { type: "RELAY_ARCHIVE_CONVERSATION", conv_uuid: convUuid },
-            () => resolve()
+            { type: "RELAY_ARCHIVE_CONVERSATION", conv_uuid: convUuid, operation: op },
+            (resp) => {
+              const hasErr = Boolean(chrome.runtime && chrome.runtime.lastError);
+              resolve(hasErr ? null : resp);
+            }
           );
         });
-      } catch (_) {}
+        cloudOk = Boolean(archResp && archResp.ok === true);
+      } catch (_) {
+        cloudOk = false;
+      }
     }
 
-    if (r.close_tab !== false && matchedTab && typeof matchedTab.id === "number") {
+    if (!cloudOk) {
+      continue;
+    }
+
+    if (r.close_tab !== false && op !== "unarchive" && matchedTab && typeof matchedTab.id === "number") {
       try {
         const winTabs = matchedTab.windowId
           ? await chrome.tabs.query({ windowId: matchedTab.windowId })
@@ -466,8 +485,13 @@ async function handleShuttleRetireActions(retireActions) {
           await chrome.tabs.update(matchedTab.id, { url: "https://chatgpt.com/" });
         } else if (typeof chrome.tabs.remove === "function") {
           await chrome.tabs.remove(matchedTab.id);
+          openTabs = openTabs.filter((t) => t.id !== matchedTab.id);
         }
       } catch (_) {}
+    }
+
+    if (retireId) {
+      completedRetireIds.add(retireId);
     }
 
     try {
@@ -477,6 +501,8 @@ async function handleShuttleRetireActions(retireActions) {
         body: JSON.stringify({
           retire_id: retireId,
           conv_uuid: convUuid,
+          operation: op,
+          ok: true,
         }),
       });
     } catch (_) {}

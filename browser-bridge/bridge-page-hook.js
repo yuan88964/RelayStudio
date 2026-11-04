@@ -849,6 +849,7 @@
   window.addEventListener("relaystudio:archive-conversation", async (ev) => {
     const detail = (ev && ev.detail) || {};
     const convUuid = String(detail.conv_uuid || "").trim();
+    const operation = String(detail.operation || "archive").trim().toLowerCase();
     let patchOk = false;
     try {
       if (!convUuid || typeof origFetch !== "function") {
@@ -866,6 +867,12 @@
       if (!token) {
         return;
       }
+      const patchBody =
+        operation === "unarchive"
+          ? { is_archived: false }
+          : operation === "delete"
+            ? { is_visible: false }
+            : { is_archived: true };
       const patchResp = await origFetch(`/backend-api/conversation/${convUuid}`, {
         method: "PATCH",
         credentials: "include",
@@ -873,19 +880,20 @@
           "Content-Type": "application/json",
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ is_archived: true }),
+        body: JSON.stringify(patchBody),
       });
       patchOk = Boolean(patchResp && patchResp.ok);
     } catch {
       // ignore archive errors
     } finally {
-      if (convUuid && document.documentElement && document.documentElement.dataset) {
+      if (patchOk && convUuid && document.documentElement && document.documentElement.dataset) {
         document.documentElement.dataset.relayLastArchivedUuid = convUuid;
+        document.documentElement.dataset.relayLastRetireOp = operation;
       }
       try {
         window.dispatchEvent(
           new CustomEvent("relaystudio:archive-conversation-done", {
-            detail: { conv_uuid: convUuid, ok: patchOk },
+            detail: { conv_uuid: convUuid, operation, ok: patchOk },
           })
         );
       } catch {}

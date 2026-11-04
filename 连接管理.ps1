@@ -379,7 +379,7 @@ $script:PANE_SNAP_HIDE_PX = 140.0
       <TextBlock Text="R" FontSize="11" FontWeight="Bold" Foreground="#FEFEFF" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,-0.5,0,0"/>
      </Border>
      <TextBlock Text="RelayStudio" FontSize="13" FontWeight="Bold" Foreground="#18181B" VerticalAlignment="Center" Margin="0,0,8,0"/>
-     <Button x:Name="ConnIconBadgeButton" Padding="8,2" MinHeight="24" Background="#FFFFFF" BorderBrush="#E4E4E7" BorderThickness="1" Margin="0,0,6,0" ToolTip="点击打开「隧道与内核配置中心」切换隧道、API Key、子代理引擎与开机启动方式">
+     <Button x:Name="ConnIconBadgeButton" Padding="8,2" MinHeight="24" Background="#FFFFFF" BorderBrush="#E4E4E7" BorderThickness="1" Margin="0,0,6,0" ToolTip="点击打开「OpenAI 隧道配置」切换隧道或管理 API Key">
       <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
        <Ellipse x:Name="TopStatusDot" Width="7" Height="7" Fill="#16A34A" VerticalAlignment="Center" Margin="0,0,6,0"/>
        <Border x:Name="ConnProfileMiniTagBorder" Background="Transparent" CornerRadius="4" Padding="0" VerticalAlignment="Center">
@@ -399,6 +399,13 @@ $script:PANE_SNAP_HIDE_PX = 140.0
       <Viewbox Width="13" Height="13">
        <Canvas Width="24" Height="24">
         <Path x:Name="ThemeToggleIconPath" Data="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" Stroke="#52525B" StrokeThickness="1.8" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"/>
+       </Canvas>
+      </Viewbox>
+     </Button>
+     <Button x:Name="GlobalSettingsButton" Style="{StaticResource IconButton}" Width="28" Height="26" Margin="0,0,2,0" ToolTip="通用设置（本地内核、自动归档、默认载体、CLI 智能体与外观）">
+      <Viewbox Width="13.5" Height="13.5">
+       <Canvas Width="24" Height="24">
+        <Path Data="M12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6z M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" Stroke="#52525B" StrokeThickness="1.8" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"/>
        </Canvas>
       </Viewbox>
      </Button>
@@ -495,20 +502,6 @@ $script:PANE_SNAP_HIDE_PX = 140.0
          <Button x:Name="GoConfigButton" Content="点击左上角连接徽标配置密钥 →" Style="{StaticResource LinkButton}" FontSize="11.5" FontWeight="SemiBold"/>
         </StackPanel>
        </Border>
-
-       <!-- Archived Tasks Section (Hidden from Left Rail per Q2=方式2; moved to Independent Archive Drawer) -->
-       <Border BorderBrush="#F1F1F4" BorderThickness="0,1,0,0" Margin="0,12,0,0" Padding="0,8,0,0" Visibility="Collapsed">
-        <StackPanel>
-         <Button x:Name="ToggleArchivedButton" Background="Transparent" BorderThickness="0" Padding="4,2" MinHeight="22" HorizontalContentAlignment="Stretch">
-          <Grid>
-           <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-           <TextBlock x:Name="ArchivedQueueHeaderText" Text="已归档 (0) · 含超24h自动归档" FontSize="11.5" FontWeight="SemiBold" Foreground="#71717A"/>
-           <TextBlock x:Name="ArchivedQueueArrowText" Grid.Column="1" Text="▴" FontSize="11.5" Foreground="#71717A" Margin="6,0,0,0"/>
-          </Grid>
-         </Button>
-         <StackPanel x:Name="ArchivedListPanel" Margin="0,4,0,0"/>
-        </StackPanel>
-       </Border>
       </StackPanel>
      </ScrollViewer>
 
@@ -602,14 +595,14 @@ $script:PANE_SNAP_HIDE_PX = 140.0
   </Grid>
 
   <!-- Floating Left-Anchored Multi-Profile Tunnel & API Key Popover (Variant A) -->
-  <Border x:Name="KeyPopoverBorder" Grid.RowSpan="2" Width="480" HorizontalAlignment="Left" VerticalAlignment="Top" Margin="14,38,0,0" Background="#FFFFFF" BorderBrush="#E4E4E7" BorderThickness="1" CornerRadius="12" Padding="18,16" Visibility="Collapsed">
+  <Border x:Name="KeyPopoverBorder" Grid.RowSpan="2" Width="460" HorizontalAlignment="Left" VerticalAlignment="Top" Margin="14,38,0,0" Background="#FFFFFF" BorderBrush="#E4E4E7" BorderThickness="1" CornerRadius="12" Padding="18,16" Visibility="Collapsed">
    <Border.Effect>
     <DropShadowEffect BlurRadius="28" ShadowDepth="8" Opacity="0.11" Color="#09090B"/>
    </Border.Effect>
    <StackPanel>
     <Grid Margin="0,0,0,8">
      <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-     <TextBlock x:Name="PopoverHeaderTitle" Text="隧道配置 (1)" FontSize="13.5" FontWeight="Bold" Foreground="#18181B" VerticalAlignment="Center"/>
+     <TextBlock x:Name="PopoverHeaderTitle" Text="OpenAI 隧道配置 (1)" FontSize="13.5" FontWeight="Bold" Foreground="#18181B" VerticalAlignment="Center"/>
      <Button x:Name="AddProfileButton" Grid.Column="1" Content="+ 新增配置" Padding="9,3" MinHeight="25" FontSize="11.5" FontWeight="SemiBold" Background="#FFFFFF" BorderBrush="#E4E4E7"/>
      <Button x:Name="TogglePopoverEditButton" Grid.Column="2" Content="✎ 编辑当前" Style="{StaticResource LinkButton}" FontSize="12" FontWeight="SemiBold" Visibility="Collapsed"/>
     </Grid>
@@ -672,63 +665,6 @@ $script:PANE_SNAP_HIDE_PX = 140.0
      </Border>
     </ScrollViewer>
 
-    <!-- Bottom Zone: Unified Large Rectangular Box for Local Machine Configuration -->
-    <StackPanel x:Name="PopoverViewPanel" Visibility="Visible">
-     <Border Background="#FAFAFA" BorderBrush="#D4D4D8" BorderThickness="1" CornerRadius="10" Padding="13,11" Margin="0,2,0,10">
-      <StackPanel>
-       <Grid Margin="0,0,0,9">
-        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-         <Ellipse x:Name="CoreInlineDot" Width="7" Height="7" Fill="#16A34A" VerticalAlignment="Center" Margin="0,0,6,0"/>
-         <TextBlock x:Name="CoreInlineStatusText" Text="本地内核：运行中 (127.0.0.1:8765)" FontSize="12" FontWeight="Bold" Foreground="#18181B" VerticalAlignment="Center"/>
-        </StackPanel>
-        <Button x:Name="RestartCoreButton" Grid.Column="1" Content="↻ 重启内核" Padding="8,2" MinHeight="22" FontSize="11" ToolTip="一键重启本地 RelayStudio 内核进程"/>
-       </Grid>
-
-       <Grid Margin="0,0,0,8">
-        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-        <TextBlock x:Name="AcpConcurrencyLabel" Text="本地 ACP 子代理并发上限：4 个" FontSize="11.5" Foreground="#52525B" VerticalAlignment="Center"/>
-        <StackPanel Grid.Column="1" Orientation="Horizontal">
-         <Button x:Name="AcpLimit0Button" Content="0" Padding="7,2" MinHeight="22" FontSize="11" Margin="0,0,4,0"/>
-         <Button x:Name="AcpLimit2Button" Content="2" Padding="7,2" MinHeight="22" FontSize="11" Margin="0,0,4,0"/>
-         <Button x:Name="AcpLimit4Button" Content="4 (推荐)" Padding="7,2" MinHeight="22" FontSize="11" Margin="0,0,4,0" Background="#EFF6FF" BorderBrush="#BFDBFE" Foreground="#1D4ED8" FontWeight="SemiBold"/>
-         <Button x:Name="AcpLimit6Button" Content="6" Padding="7,2" MinHeight="22" FontSize="11"/>
-        </StackPanel>
-       </Grid>
-
-       <Grid Margin="0,0,0,8">
-        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-        <TextBlock Text="默认子代理与浏览器自动化 (CDP)：" FontSize="11.5" Foreground="#52525B" VerticalAlignment="Center"/>
-        <StackPanel Grid.Column="1" Orientation="Horizontal">
-         <Button x:Name="AcpProfileCodexButton" Content="Codex" Padding="7,2" MinHeight="22" FontSize="11" Margin="0,0,4,0" Background="#EFF6FF" BorderBrush="#BFDBFE" Foreground="#1D4ED8" FontWeight="SemiBold"/>
-         <Button x:Name="AcpProfileClaudeButton" Content="Claude" Padding="7,2" MinHeight="22" FontSize="11" Margin="0,0,8,0"/>
-         <Button x:Name="BrowserCdpToggleButton" Content="CDP 已开启" Padding="7,2" MinHeight="22" FontSize="11" Background="#F0FDF4" BorderBrush="#BBF7D0" Foreground="#15803D" FontWeight="SemiBold"/>
-        </StackPanel>
-       </Grid>
-
-       <Grid Margin="0,0,0,8">
-        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-        <TextBlock Text="开机自动启动方式：" FontSize="11.5" Foreground="#52525B" VerticalAlignment="Center"/>
-        <StackPanel Grid.Column="1" Orientation="Horizontal">
-         <Button x:Name="StartupPopupButton" Content="开机弹窗" Padding="7,2" MinHeight="22" FontSize="11" Margin="0,0,4,0"/>
-         <Button x:Name="StartupTrayButton" Content="静默托盘" Padding="7,2" MinHeight="22" FontSize="11" Margin="0,0,4,0" Background="#EFF6FF" BorderBrush="#BFDBFE" Foreground="#1D4ED8" FontWeight="SemiBold"/>
-         <Button x:Name="StartupOffButton" Content="不自启" Padding="7,2" MinHeight="22" FontSize="11"/>
-        </StackPanel>
-       </Grid>
-
-       <Grid>
-        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-        <TextBlock Text="界面外观主题 (Ctrl+Shift+D)：" FontSize="11.5" Foreground="#52525B" VerticalAlignment="Center"/>
-        <StackPanel Grid.Column="1" Orientation="Horizontal">
-         <Button x:Name="ThemeSystemButton" Content="跟随系统" Padding="7,2" MinHeight="22" FontSize="11" Margin="0,0,4,0"/>
-         <Button x:Name="ThemeLightButton" Content="☀ 浅色" Padding="7,2" MinHeight="22" FontSize="11" Margin="0,0,4,0"/>
-         <Button x:Name="ThemeDarkButton" Content="🌙 深色" Padding="7,2" MinHeight="22" FontSize="11"/>
-        </StackPanel>
-       </Grid>
-      </StackPanel>
-     </Border>
-    </StackPanel>
-
     <!-- Popover Footer: Left OpenAI Links (Small Font) + Right Start/Disconnect Buttons (No Close Button) -->
     <Border BorderBrush="#F1F1F4" BorderThickness="0,1,0,0" Padding="0,10,0,0">
      <Grid>
@@ -742,6 +678,103 @@ $script:PANE_SNAP_HIDE_PX = 140.0
       <Button x:Name="DisconnectButton" Grid.Column="2" Content="断开隧道" Padding="9,4" MinHeight="27" FontSize="11.5"/>
       <Button x:Name="ClosePopoverButton" Grid.Column="3" Content="收起" Padding="10,4" MinHeight="27" FontSize="11.5" Visibility="Collapsed"/>
      </Grid>
+    </Border>
+   </StackPanel>
+  </Border>
+
+  <!-- Floating Right-Anchored Global & Local Engine Settings Popover (⚙) -->
+  <Border x:Name="GlobalSettingsPopoverBorder" Grid.RowSpan="2" Width="460" HorizontalAlignment="Right" VerticalAlignment="Top" Margin="0,38,14,0" Background="#FFFFFF" BorderBrush="#E4E4E7" BorderThickness="1" CornerRadius="12" Padding="18,16" Visibility="Collapsed">
+   <Border.Effect>
+    <DropShadowEffect BlurRadius="28" ShadowDepth="8" Opacity="0.11" Color="#09090B"/>
+   </Border.Effect>
+   <StackPanel x:Name="PopoverViewPanel" Visibility="Visible">
+    <Grid Margin="0,0,0,10">
+     <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+     <TextBlock Text="⚙ 通用与本地引擎设置" FontSize="13.5" FontWeight="Bold" Foreground="#18181B" VerticalAlignment="Center"/>
+     <Button x:Name="CloseGlobalSettingsButton" Grid.Column="1" Content="×" Style="{StaticResource LinkButton}" FontSize="14" FontWeight="Bold" Foreground="#71717A" ToolTip="收起通用设置"/>
+    </Grid>
+
+    <Border Background="#FAFAFA" BorderBrush="#D4D4D8" BorderThickness="1" CornerRadius="10" Padding="13,11">
+     <StackPanel>
+      <Grid Margin="0,0,0,9">
+       <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+       <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+        <Ellipse x:Name="CoreInlineDot" Width="7" Height="7" Fill="#16A34A" VerticalAlignment="Center" Margin="0,0,6,0"/>
+        <TextBlock x:Name="CoreInlineStatusText" Text="本地内核：运行中 (127.0.0.1:8765)" FontSize="12" FontWeight="Bold" Foreground="#18181B" VerticalAlignment="Center"/>
+       </StackPanel>
+       <Button x:Name="RestartCoreButton" Grid.Column="1" Content="↻ 重启内核" Padding="8,2" MinHeight="22" FontSize="11" ToolTip="一键重启本地 RelayStudio 内核进程"/>
+      </Grid>
+
+      <Grid Margin="0,0,0,8">
+       <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+       <TextBlock Text="已完工任务自动归档：" FontSize="11.5" Foreground="#52525B" VerticalAlignment="Center"/>
+       <StackPanel Grid.Column="1" Orientation="Horizontal">
+        <Button x:Name="AutoArchiveImmediateButton" Content="立即" Padding="6,2" MinHeight="22" FontSize="11" Margin="0,0,4,0"/>
+        <Button x:Name="AutoArchive1dButton" Content="1 天" Padding="6,2" MinHeight="22" FontSize="11" Margin="0,0,4,0"/>
+        <Button x:Name="AutoArchive3dButton" Content="3 天 (默认)" Padding="6,2" MinHeight="22" FontSize="11" Margin="0,0,4,0" Background="#EFF6FF" BorderBrush="#BFDBFE" Foreground="#1D4ED8" FontWeight="SemiBold"/>
+        <Button x:Name="AutoArchive7dButton" Content="7 天" Padding="6,2" MinHeight="22" FontSize="11" Margin="0,0,4,0"/>
+        <Button x:Name="AutoArchiveOffButton" Content="关闭" Padding="6,2" MinHeight="22" FontSize="11"/>
+       </StackPanel>
+      </Grid>
+
+      <Grid Margin="0,0,0,8">
+       <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+       <TextBlock Text="新建任务默认载体：" FontSize="11.5" Foreground="#52525B" VerticalAlignment="Center"/>
+       <ComboBox x:Name="DefaultCarrierCombo" Grid.Column="1" MinWidth="175" MaxWidth="220" FontSize="11.5"/>
+      </Grid>
+
+      <Grid Margin="0,0,0,8">
+       <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+       <TextBlock x:Name="AcpConcurrencyLabel" Text="CLI 智能体并发上限：4 个" FontSize="11.5" Foreground="#52525B" VerticalAlignment="Center"/>
+       <StackPanel Grid.Column="1" Orientation="Horizontal">
+        <Button x:Name="AcpLimit0Button" Content="关闭" Padding="7,2" MinHeight="22" FontSize="11" Margin="0,0,4,0"/>
+        <Button x:Name="AcpLimit2Button" Content="2" Padding="7,2" MinHeight="22" FontSize="11" Margin="0,0,4,0"/>
+        <Button x:Name="AcpLimit4Button" Content="4 (推荐)" Padding="7,2" MinHeight="22" FontSize="11" Margin="0,0,4,0" Background="#EFF6FF" BorderBrush="#BFDBFE" Foreground="#1D4ED8" FontWeight="SemiBold"/>
+        <Button x:Name="AcpLimit6Button" Content="6" Padding="7,2" MinHeight="22" FontSize="11"/>
+       </StackPanel>
+      </Grid>
+
+      <StackPanel Margin="0,0,0,8">
+       <Grid Margin="0,0,0,5">
+        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+        <TextBlock Text="默认 CLI 智能体：" FontSize="11.5" Foreground="#52525B" VerticalAlignment="Center"/>
+        <StackPanel Grid.Column="1" Orientation="Horizontal">
+         <Button x:Name="AddCustomCliAgentButton" Content="+ 添加..." Padding="6,2" MinHeight="21" FontSize="10.5" Margin="0,0,4,0" ToolTip="手动选择本机自定义 CLI 智能体可执行文件 (.cmd / .exe)"/>
+         <Button x:Name="RescanCliAgentsButton" Content="↻ 重新检测" Padding="6,2" MinHeight="21" FontSize="10.5" ToolTip="重新扫描本机已安装的 CLI 智能体"/>
+        </StackPanel>
+       </Grid>
+       <WrapPanel x:Name="CliAgentsButtonPanel" Orientation="Horizontal">
+        <Button x:Name="AcpProfileCodexButton" Content="Codex" Padding="7,2" MinHeight="22" FontSize="11" Margin="0,0,4,4" Background="#EFF6FF" BorderBrush="#BFDBFE" Foreground="#1D4ED8" FontWeight="SemiBold"/>
+        <Button x:Name="AcpProfileClaudeButton" Content="Claude" Padding="7,2" MinHeight="22" FontSize="11" Margin="0,0,4,4"/>
+       </WrapPanel>
+      </StackPanel>
+
+      <Grid Margin="0,0,0,8">
+       <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+       <TextBlock Text="浏览器自动化 (CDP)：" FontSize="11.5" Foreground="#52525B" VerticalAlignment="Center"/>
+       <Button x:Name="BrowserCdpToggleButton" Grid.Column="1" Content="● 已开启" Padding="8,2" MinHeight="22" FontSize="11" Background="#F0FDF4" BorderBrush="#BBF7D0" Foreground="#15803D" FontWeight="SemiBold"/>
+      </Grid>
+
+      <Grid Margin="0,0,0,8">
+       <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+       <TextBlock Text="开机自动启动方式：" FontSize="11.5" Foreground="#52525B" VerticalAlignment="Center"/>
+       <StackPanel Grid.Column="1" Orientation="Horizontal">
+        <Button x:Name="StartupPopupButton" Content="开机弹窗" Padding="7,2" MinHeight="22" FontSize="11" Margin="0,0,4,0"/>
+        <Button x:Name="StartupTrayButton" Content="静默托盘" Padding="7,2" MinHeight="22" FontSize="11" Margin="0,0,4,0" Background="#EFF6FF" BorderBrush="#BFDBFE" Foreground="#1D4ED8" FontWeight="SemiBold"/>
+        <Button x:Name="StartupOffButton" Content="不自启" Padding="7,2" MinHeight="22" FontSize="11"/>
+       </StackPanel>
+      </Grid>
+
+      <Grid>
+       <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+       <TextBlock Text="界面外观主题 (Ctrl+Shift+D)：" FontSize="11.5" Foreground="#52525B" VerticalAlignment="Center"/>
+       <StackPanel Grid.Column="1" Orientation="Horizontal">
+        <Button x:Name="ThemeSystemButton" Content="跟随系统" Padding="7,2" MinHeight="22" FontSize="11" Margin="0,0,4,0"/>
+        <Button x:Name="ThemeLightButton" Content="☀ 浅色" Padding="7,2" MinHeight="22" FontSize="11" Margin="0,0,4,0"/>
+        <Button x:Name="ThemeDarkButton" Content="🌙 深色" Padding="7,2" MinHeight="22" FontSize="11"/>
+       </StackPanel>
+      </Grid>
+     </StackPanel>
     </Border>
    </StackPanel>
   </Border>
@@ -760,7 +793,7 @@ $script:PANE_SNAP_HIDE_PX = 140.0
        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
        <StackPanel VerticalAlignment="Center">
         <TextBlock x:Name="ArchiveDrawerTitle" Text="📦 已归档会话管理 (0)" FontSize="14.5" FontWeight="SemiBold" Foreground="#18181B"/>
-        <TextBlock Text="含手动归档与超 24 小时无动静自动归档记录（删除仅清理本机面板，不影响网页端原对话）" FontSize="11.5" Foreground="#71717A" Margin="0,2,0,0"/>
+        <TextBlock Text="展示手动归档与已完工自动归档的任务（还原将同步恢复主会话，彻底删除将同时清除本机账本与云端对话）" FontSize="11.5" Foreground="#71717A" Margin="0,2,0,0"/>
        </StackPanel>
        <Button x:Name="ClearAllArchivedButton" Grid.Column="1" Content="🗑 一键清空全部归档" Background="#FEF2F2" BorderBrush="#FECACA" Foreground="#DC2626" FontWeight="SemiBold" Padding="10,4" MinHeight="28" FontSize="12" BorderThickness="1" Margin="10,0,8,0"/>
        <Button x:Name="CloseArchiveDrawerButton" Grid.Column="2" Content="× 关闭" Padding="10,4" MinHeight="28" FontSize="12" BorderThickness="1"/>
@@ -770,7 +803,7 @@ $script:PANE_SNAP_HIDE_PX = 140.0
       <StackPanel x:Name="ArchiveDrawerListPanel"/>
      </ScrollViewer>
      <Border Grid.Row="2" Background="#F8FAFC" BorderBrush="#E2E8F0" BorderThickness="0,1,0,0" Padding="18,8">
-      <TextBlock Text="提示：点击「↺ 还原」可将对话放回进行中列表；点击「🗑 删除」或「一键清空」后可在左栏底部一键撤销。" Foreground="#71717A" FontSize="11"/>
+      <TextBlock Text="展示手动归档与已完工自动归档的任务（还原将同步恢复主会话，彻底删除将同时清除本机账本与云端对话）" Foreground="#71717A" FontSize="11"/>
      </Border>
     </Grid>
    </Border>
@@ -1419,6 +1452,8 @@ function Reset-DefaultWindowLayout {
 }
 
 $script:popoverExpandedProfileId = ''
+$script:globalSettingsOpen = $false
+$script:suppressDefaultCarrierComboEvent = $false
 
 function Select-WindowTab([string]$TabName) {
     $script:activeTab = if ($TabName -eq 'Config') { 'Config' } else { 'Live' }
@@ -1437,6 +1472,8 @@ function Select-WindowTab([string]$TabName) {
         $script:controls.TabConfigButton.BorderBrush = ConvertTo-Brush 'Transparent'
         $script:controls.TabConfigButton.Foreground = ConvertTo-Brush '#71717A'
     } else {
+        $script:globalSettingsOpen = $false
+        if ($script:controls.GlobalSettingsPopoverBorder) { $script:controls.GlobalSettingsPopoverBorder.Visibility = 'Collapsed' }
         $script:popoverOpen = $true
         $script:popoverEditMode = $true
         if (-not $script:popoverExpandedProfileId) {
@@ -1459,6 +1496,8 @@ function Select-WindowTab([string]$TabName) {
 function Toggle-KeyPopover {
     $script:popoverOpen = -not $script:popoverOpen
     if ($script:popoverOpen) {
+        $script:globalSettingsOpen = $false
+        if ($script:controls.GlobalSettingsPopoverBorder) { $script:controls.GlobalSettingsPopoverBorder.Visibility = 'Collapsed' }
         $script:popoverEditMode = $false
         $script:popoverExpandedProfileId = ''
         $script:controls.LiveTabPanel.Visibility = 'Visible'
@@ -1476,6 +1515,67 @@ function Toggle-KeyPopover {
             Select-WindowTab 'Live'
         }
     }
+}
+
+function Toggle-GlobalSettingsPopover {
+    $script:globalSettingsOpen = -not $script:globalSettingsOpen
+    if ($script:globalSettingsOpen) {
+        $script:popoverOpen = $false
+        $script:popoverExpandedProfileId = ''
+        $script:popoverEditMode = $false
+        if ($script:controls.KeyPopoverBorder) { $script:controls.KeyPopoverBorder.Visibility = 'Collapsed' }
+        if ($script:controls.GlobalSettingsPopoverBorder) {
+            $script:controls.GlobalSettingsPopoverBorder.Visibility = 'Visible'
+            Start-SmoothEnterAnimation $script:controls.GlobalSettingsPopoverBorder -FromY -6 -DurationMs 160
+        }
+        Refresh-ProfilePopoverState
+    } else {
+        if ($script:controls.GlobalSettingsPopoverBorder) {
+            $script:controls.GlobalSettingsPopoverBorder.Visibility = 'Collapsed'
+        }
+    }
+}
+
+function Select-DefaultCliAgent([string]$AgentId, [string]$DisplayName = '') {
+    if (-not $AgentId) { return }
+    $cfg = Get-CoreEngineConfig $script:context
+    $script:settings = (Set-CoreEngineConfig -Context $script:context -AcpDefaultProfile $AgentId -BrowserEnabled ([bool]$cfg.BrowserEnabled) -StartupMode ([string]$cfg.StartupMode) -ApplyStartup:(-not $script:context.Isolated)).Settings
+    if (-not $script:context.Isolated) { [void](Restart-LocalCoreEngine $script:context $script:settings) }
+    Refresh-FormState
+    $label = if ($DisplayName) { $DisplayName } else { $AgentId }
+    Show-QuickToast "已将默认 CLI 智能体切换为 $label"
+}
+
+function Invoke-AddCustomCliAgentDialog {
+    $chosenPath = ''
+    $ovVar = Get-Variable -Name 'CustomCliPathOverride' -Scope Script -ErrorAction SilentlyContinue
+    if ($ovVar -and $ovVar.Value) {
+        $chosenPath = [string]$ovVar.Value
+    } else {
+        $noShowVar = Get-Variable -Name 'NoShow' -ErrorAction SilentlyContinue
+        if ($noShowVar -and [bool]$noShowVar.Value) { return }
+        $dlg = New-Object Microsoft.Win32.OpenFileDialog
+        $dlg.Title = '选择本机 CLI 智能体可执行文件 (.cmd / .exe)'
+        $dlg.Filter = 'CLI 可执行文件 (*.cmd;*.exe;*.bat)|*.cmd;*.exe;*.bat|所有文件 (*.*)|*.*'
+        if ($dlg.ShowDialog() -eq $true) {
+            $chosenPath = [string]$dlg.FileName
+        }
+    }
+    if (-not $chosenPath) { return }
+    try {
+        $res = Add-CustomCliAgent -Context $script:context -CommandPath $chosenPath
+        $script:settings = $res.Settings
+        Refresh-ProfilePopoverState
+        Show-QuickToast "✓ 已添加 CLI 智能体「$($res.AddedAgent.display_name)」"
+    } catch {
+        Show-QuickToast $_.Exception.Message
+    }
+}
+
+function Invoke-RescanCliAgents {
+    $agents = @(Get-DetectedCliAgents -ForceRescan -Settings $script:settings -Context $script:context)
+    Refresh-ProfilePopoverState
+    Show-QuickToast "✓ 已重新检测本机 CLI 智能体（共发现 $($agents.Count) 个）"
 }
 
 function Refresh-ProfilePopoverState {
@@ -1500,7 +1600,7 @@ function Refresh-ProfilePopoverState {
     $script:controls.ConnProfileMiniTagText.Text = "$activeShortName ▾"
 
     if ($script:controls.PopoverHeaderTitle) {
-        $script:controls.PopoverHeaderTitle.Text = "隧道配置 ($($allProfs.Count))"
+        $script:controls.PopoverHeaderTitle.Text = "OpenAI 隧道配置 ($($allProfs.Count))"
     }
 
     if ($script:controls.ProfilesListScroll) {
@@ -1777,7 +1877,7 @@ function Refresh-ProfilePopoverState {
     }
 
     $acpLim = Get-AcpConcurrencyLimit $script:context
-    $script:controls.AcpConcurrencyLabel.Text = if ($acpLim -eq 0) { "本地 ACP 子代理并发上限：0 个" } else { "本地 ACP 子代理并发上限：$acpLim 个" }
+    $script:controls.AcpConcurrencyLabel.Text = if ($acpLim -eq 0) { "CLI 智能体并发上限：已关闭" } else { "CLI 智能体并发上限：$acpLim 个" }
     Update-OptionButtonGroupState @(
         @{ Btn = $script:controls.AcpLimit0Button; Val = 0 },
         @{ Btn = $script:controls.AcpLimit2Button; Val = 2 },
@@ -1799,18 +1899,101 @@ function Refresh-ProfilePopoverState {
         }
     }
     Update-OptionButtonGroupState @(
-        @{ Btn = $script:controls.AcpProfileCodexButton; Val = 'codex' },
-        @{ Btn = $script:controls.AcpProfileClaudeButton; Val = 'claude' }
-    ) $coreCfg.AcpDefaultProfile
+        @{ Btn = $script:controls.AutoArchiveImmediateButton; Val = 'immediate' },
+        @{ Btn = $script:controls.AutoArchive1dButton;        Val = '1d' },
+        @{ Btn = $script:controls.AutoArchive3dButton;        Val = '3d' },
+        @{ Btn = $script:controls.AutoArchive7dButton;        Val = '7d' },
+        @{ Btn = $script:controls.AutoArchiveOffButton;       Val = 'off' }
+    ) $coreCfg.AutoArchiveCompletedMode
+
+    if ($script:controls.DefaultCarrierCombo -and (-not $script:controls.DefaultCarrierCombo.IsDropDownOpen)) {
+        $script:suppressDefaultCarrierComboEvent = $true
+        try {
+            $availCarriers = @(Get-AvailableBrowserProfiles -Context $script:context)
+            $script:controls.DefaultCarrierCombo.Items.Clear()
+            $selCarrierIdx = 0
+            for ($ci = 0; $ci -lt $availCarriers.Count; $ci++) {
+                $cp = $availCarriers[$ci]
+                $cItem = New-Object Windows.Controls.ComboBoxItem
+                $rawCLbl = ([string]$cp.Label -replace '\s*\(Web[^)]*\)', '').Trim()
+                $cItem.Content = if ($rawCLbl -match '^(💻|🌐)') { $rawCLbl } else { "🌐 $rawCLbl" }
+                $cItem.Tag = [string]$cp.Id
+                [void]$script:controls.DefaultCarrierCombo.Items.Add($cItem)
+                if ([string]$cp.Id -eq [string]$coreCfg.DefaultBrowserProfile) {
+                    $selCarrierIdx = $ci
+                }
+            }
+            if ($script:controls.DefaultCarrierCombo.Items.Count -gt 0) {
+                $script:controls.DefaultCarrierCombo.SelectedIndex = $selCarrierIdx
+            }
+        } finally {
+            $script:suppressDefaultCarrierComboEvent = $false
+        }
+    }
+
+    if ($script:controls.CliAgentsButtonPanel) {
+        $detectedCliAgents = @(Get-DetectedCliAgents -Settings $script:settings -Context $script:context)
+        $script:controls.CliAgentsButtonPanel.Children.Clear()
+        $cliBtnPairs = New-Object 'System.Collections.Generic.List[object]'
+        if ($detectedCliAgents.Count -eq 0) {
+            foreach ($fallbackPair in @(
+                @{ Btn = $script:controls.AcpProfileCodexButton; Val = 'codex' },
+                @{ Btn = $script:controls.AcpProfileClaudeButton; Val = 'claude' }
+            )) {
+                if ($fallbackPair.Btn) {
+                    [void]$script:controls.CliAgentsButtonPanel.Children.Add($fallbackPair.Btn)
+                    [void]$cliBtnPairs.Add($fallbackPair)
+                }
+            }
+        } else {
+            foreach ($ag in $detectedCliAgents) {
+                $agId = [string]$ag.id
+                $agDisp = [string]$ag.display_name
+                $btnElem = if ($agId -eq 'codex' -and $script:controls.AcpProfileCodexButton) {
+                    $script:controls.AcpProfileCodexButton
+                } elseif ($agId -eq 'claude' -and $script:controls.AcpProfileClaudeButton) {
+                    $script:controls.AcpProfileClaudeButton
+                } else {
+                    $dynBtn = New-Object Windows.Controls.Button
+                    $dynBtn.Content = $agDisp
+                    $dynBtn.Padding = [Windows.Thickness]::new(7, 2, 7, 2)
+                    $dynBtn.MinHeight = 22
+                    $dynBtn.FontSize = 11
+                    $dynBtn.Margin = [Windows.Thickness]::new(0, 0, 4, 4)
+                    $dynBtn.ToolTip = [string]$ag.command
+                    $dynBtn.Tag = [pscustomobject]@{ Id = $agId; Name = $agDisp }
+                    $dynBtn.Add_Click({
+                        param($s, $e)
+                        if ($s.Tag) { Select-DefaultCliAgent ([string]$s.Tag.Id) ([string]$s.Tag.Name) }
+                    })
+                    $dynBtn
+                }
+                if ($btnElem) {
+                    if ($btnElem.Parent -is [Windows.Controls.Panel]) {
+                        [void]$btnElem.Parent.Children.Remove($btnElem)
+                    }
+                    [void]$script:controls.CliAgentsButtonPanel.Children.Add($btnElem)
+                    [void]$cliBtnPairs.Add(@{ Btn = $btnElem; Val = $agId })
+                }
+            }
+        }
+        Update-OptionButtonGroupState ($cliBtnPairs.ToArray()) $coreCfg.AcpDefaultProfile
+    } else {
+        Update-OptionButtonGroupState @(
+            @{ Btn = $script:controls.AcpProfileCodexButton; Val = 'codex' },
+            @{ Btn = $script:controls.AcpProfileClaudeButton; Val = 'claude' }
+        ) $coreCfg.AcpDefaultProfile
+    }
+
     if ($script:controls.BrowserCdpToggleButton) {
         if ($coreCfg.BrowserEnabled) {
-            $script:controls.BrowserCdpToggleButton.Content = 'CDP 已开启'
+            $script:controls.BrowserCdpToggleButton.Content = '● 已开启'
             $script:controls.BrowserCdpToggleButton.Background = ConvertTo-Brush '#F0FDF4'
             $script:controls.BrowserCdpToggleButton.BorderBrush = ConvertTo-Brush '#BBF7D0'
             $script:controls.BrowserCdpToggleButton.Foreground = ConvertTo-Brush '#15803D'
             $script:controls.BrowserCdpToggleButton.FontWeight = 'SemiBold'
         } else {
-            $script:controls.BrowserCdpToggleButton.Content = 'CDP 已关闭'
+            $script:controls.BrowserCdpToggleButton.Content = '○ 已关闭'
             $script:controls.BrowserCdpToggleButton.Background = ConvertTo-Brush '#FFFFFF'
             $script:controls.BrowserCdpToggleButton.BorderBrush = ConvertTo-Brush '#E4E4E7'
             $script:controls.BrowserCdpToggleButton.Foreground = ConvertTo-Brush '#71717A'
@@ -2229,7 +2412,7 @@ function Resolve-LaunchpadSelectedBrowserProfile([int]$PaneId = 0) {
             }
         }
     }
-    $profs = @(Get-AvailableBrowserProfiles)
+    $profs = @(Get-AvailableBrowserProfiles -Context $script:context)
     if (-not $chosenId) {
         $def = $profs | Where-Object { $_.IsDefault } | Select-Object -First 1
         $chosenId = if ($def -and $def.Id) { [string]$def.Id } else { 'Desktop:ChatGPT' }
@@ -2256,12 +2439,29 @@ function Invoke-OpenChatGptHome([int]$PaneId = 0) {
     }
 }
 
+function Show-UndoDeleteBanner {
+    if ($script:controls.UndoDeleteBorder) {
+        $script:controls.UndoDeleteBorder.Visibility = 'Collapsed'
+    }
+}
+
+function Confirm-PurgeArchivedDialog([string]$TargetTitle = '', [switch]$IsBatch, [int]$BatchCount = 0) {
+    $ovVar = Get-Variable -Name 'PurgeConfirmOverride' -Scope Script -ErrorAction SilentlyContinue
+    if ($ovVar -and $ovVar.Value -is [scriptblock]) {
+        return [bool](& $ovVar.Value $TargetTitle ([bool]$IsBatch) $BatchCount)
+    }
+    $noShowVar = Get-Variable -Name 'NoShow' -ErrorAction SilentlyContinue
+    if ($noShowVar -and [bool]$noShowVar.Value) {
+        return $true
+    }
+    $label = if ($IsBatch) { "全部 $BatchCount 条已归档任务" } elseif ($TargetTitle) { "「$TargetTitle」" } else { '该归档任务' }
+    $msg = "确定要彻底删除 $label 吗？`r`n`r`n将从本软件及对应网页端永久删除此任务关联的全部会话（含本机任务账本 tsk_*.json 与云端对话），不可恢复。"
+    $ans = [Windows.MessageBox]::Show($msg, 'RelayStudio · 彻底删除确认', [Windows.MessageBoxButton]::OKCancel, [Windows.MessageBoxImage]::Warning)
+    return ($ans -eq [Windows.MessageBoxResult]::OK)
+}
+
 function Invoke-ArchiveSession([string]$SessionKey) {
     if (-not $SessionKey) { return }
-    # Spec v4.3 Q5: a panel archive is undoable. The hub keeps the running web conversation untouched (and its room number)
-    # for a short grace window; the left-rail undo bar returns to the very same conversation.
-    $prevOverrides = Get-TaskArchiveOverrides $script:context
-    $prevState = if ($prevOverrides.ContainsKey($SessionKey)) { [string]$prevOverrides[$SessionKey] } else { 'auto' }
     $cleanName = $SessionKey
     try {
         $hitSess = @($script:display.Sessions | Where-Object { $_ -and [string]$_.SessionKey -eq $SessionKey } | Select-Object -First 1)
@@ -2274,15 +2474,16 @@ function Invoke-ArchiveSession([string]$SessionKey) {
     foreach ($p in @($script:layout.Panes)) {
         if ($p.session_key -eq $SessionKey) { $p.session_key = '' }
     }
-    $script:lastDeletedTask = [pscustomobject]@{ IsBatch = $false; Key = $SessionKey; PrevState = $prevState; Title = $cleanName }
-    $script:controls.UndoDeleteText.Text = "已归档「$cleanName」"
-    $script:controls.UndoDeleteBorder.Visibility = 'Visible'
+    $script:lastDeletedTask = $null
+    if ($script:controls.UndoDeleteBorder) {
+        $script:controls.UndoDeleteBorder.Visibility = 'Collapsed'
+    }
     Sync-LayoutMemory
     Refresh-FormState
     if ($script:controls.ArchiveDrawerOverlay -and $script:controls.ArchiveDrawerOverlay.Visibility -eq 'Visible') {
         Update-ArchiveDrawerModal
     }
-    Show-QuickToast '已将该对话归档（5 秒内点左栏底部「撤销」可无损恢复，原网页对话不会被中断；之后也可在「📦 归档管理」还原）'
+    Show-QuickToast "📦 已归档「$cleanName」并同步归档云端会话"
 }
 
 function Invoke-RestoreSession([string]$SessionKey, [int]$TargetPaneId = 0) {
@@ -2304,54 +2505,48 @@ function Invoke-RestoreSession([string]$SessionKey, [int]$TargetPaneId = 0) {
 }
 
 function Invoke-DeleteSession([string]$SessionKey, [string]$Title = '', [switch]$PhysicalPurge) {
-    if (-not $SessionKey) { return }
-    $prevOverrides = Get-TaskArchiveOverrides $script:context
-    $prevState = if ($prevOverrides.ContainsKey($SessionKey)) { [string]$prevOverrides[$SessionKey] } else { 'auto' }
-    if ($PhysicalPurge) {
-        [void](Remove-ArchivedTaskSession -Context $script:context -SessionKey $SessionKey -Settings $script:settings)
-    } else {
-        Set-TaskArchiveState -Context $script:context -TaskId $SessionKey -State 'deleted'
+    if (-not $SessionKey) { return $false }
+    $cleanName = if ($Title) { $Title } else { $SessionKey }
+    if (-not (Confirm-PurgeArchivedDialog -TargetTitle $cleanName)) {
+        return $false
     }
+    [void](Invoke-PurgeArchivedSession -Context $script:context -SessionKey $SessionKey -PhysicalPurge -Settings $script:settings)
     foreach ($p in @($script:layout.Panes)) {
         if ($p.session_key -eq $SessionKey) { $p.session_key = '' }
     }
-    $cleanName = if ($Title) { $Title } else { $SessionKey }
-    if (-not $PhysicalPurge) {
-        $script:lastDeletedTask = [pscustomobject]@{ IsBatch = $false; Key = $SessionKey; PrevState = $prevState; Title = $cleanName }
-        $script:controls.UndoDeleteText.Text = "已删除「$cleanName」"
-        $script:controls.UndoDeleteBorder.Visibility = 'Visible'
+    $script:lastDeletedTask = $null
+    if ($script:controls.UndoDeleteBorder) {
+        $script:controls.UndoDeleteBorder.Visibility = 'Collapsed'
     }
     Sync-LayoutMemory
     Refresh-FormState
     if ($script:controls.ArchiveDrawerOverlay -and $script:controls.ArchiveDrawerOverlay.Visibility -eq 'Visible') {
         Update-ArchiveDrawerModal
     }
-    if ($PhysicalPurge) {
-        Show-QuickToast "✓ 已彻底粉碎归档会话「$cleanName」及本机任务文件"
-    } else {
-        Show-QuickToast "已删除本地会话「$cleanName」（左栏底部可一键撤销）"
-    }
+    Show-QuickToast "✓ 已彻底粉碎归档会话「$cleanName」及本机任务文件"
+    return $true
 }
 
 function Invoke-ClearAllArchivedSessions {
     $archivedSessions = @(if ($script:display -and $script:display.PSObject.Properties.Name -contains 'ArchivedSessions' -and $script:display.ArchivedSessions) { $script:display.ArchivedSessions })
     if ($archivedSessions.Count -eq 0) {
         Show-QuickToast '当前没有已归档的会话记录'
-        return
+        return $false
     }
-    $res = Clear-AllArchivedSessions -Context $script:context -ArchivedSessions $archivedSessions -PhysicalPurge -Settings $script:settings
-    $script:lastDeletedTask = [pscustomobject]@{
-        IsBatch = $true
-        PreviousStates = $res.PreviousStates
-        Title = "全部 $($res.ClearedCount) 条归档"
+    if (-not (Confirm-PurgeArchivedDialog -TargetTitle "全部 $($archivedSessions.Count) 条归档" -IsBatch -BatchCount $archivedSessions.Count)) {
+        return $false
     }
-    $script:controls.UndoDeleteText.Text = "已清空全部 $($res.ClearedCount) 条归档"
-    $script:controls.UndoDeleteBorder.Visibility = 'Visible'
+    $res = Invoke-PurgeAllArchivedSessions -Context $script:context -ArchivedSessions $archivedSessions -PhysicalPurge -Settings $script:settings
+    $script:lastDeletedTask = $null
+    if ($script:controls.UndoDeleteBorder) {
+        $script:controls.UndoDeleteBorder.Visibility = 'Collapsed'
+    }
     Refresh-FormState
     if ($script:controls.ArchiveDrawerOverlay -and $script:controls.ArchiveDrawerOverlay.Visibility -eq 'Visible') {
         Update-ArchiveDrawerModal
     }
-    Show-QuickToast "✓ 已一键清空全部 $($res.ClearedCount) 条归档（左栏底部可撤销）"
+    Show-QuickToast "✓ 已一键清空全部 $($res.ClearedCount) 条归档及本机账本"
+    return $true
 }
 
 function Dismiss-UndoDeleteBanner {
@@ -3964,15 +4159,6 @@ function Build-PaneStreamContent($PaneObj, $SessionObj, [bool]$IsNarrow = $false
         [void]$titleActionsStack.Children.Add($archBtn)
     }
 
-    $delBtn = New-QuietIconButton -Kind 'trash' -TooltipText '删除本地会话记录（可在左栏底部一键撤销）' -BoxSize 26 -IconSize 13.5 -IsDanger $true
-    $delBtn.Tag = [pscustomobject]@{ Key = $SessionObj.SessionKey; Title = $(if ($SessionObj.ShortTitle) { $SessionObj.ShortTitle } else { $SessionObj.Title }) }
-    $delBtn.Add_Click({
-        param($sender, $e)
-        $info = $sender.Tag
-        if ($info) { Invoke-DeleteSession $info.Key $info.Title }
-    })
-    [void]$titleActionsStack.Children.Add($delBtn)
-
     [Windows.Controls.Grid]::SetColumn($titleActionsStack, 1)
     [void]$titleRowGrid.Children.Add($titleActionsStack)
     [void]$stack.Children.Add($titleRowGrid)
@@ -4329,7 +4515,7 @@ function Sync-ComposerModelAndEffortCombos($StateInfo, $AvailModels, [string]$Cu
 
     $modelCombo = $StateInfo.ModelCombo
     $effortCombo = $StateInfo.EffortCombo
-    $webModelDisplay = if ($WebModel) { $WebModel } else { '跟随当前' }
+    $webModelDisplay = if ($WebModel) { $WebModel } else { '跟随网页' }
     if ($StateInfo.LastCatalogSig -eq $catalogSig -and $modelCombo.Items.Count -gt 0 -and $effortCombo.Items.Count -gt 0 -and -not $modelCombo.IsDropDownOpen -and -not $effortCombo.IsDropDownOpen) {
         $modelCombo.Items[0].Content = $(if ($IsNarrow) { '🤖 默认' } else { "🤖 默认 ($webModelDisplay)" })
         $curEffItem0 = [string]$effortCombo.Items[0].Content
@@ -4626,7 +4812,7 @@ function Build-PlanBComposerPod($SessionObj = $null, [bool]$IsNarrow = $false, [
         $script:display.AvailableModels
     })
 
-    $availProfsForDefault = @(Get-AvailableBrowserProfiles)
+    $availProfsForDefault = @(Get-AvailableBrowserProfiles -Context $script:context)
     $defaultProfObj = $availProfsForDefault | Where-Object { $_.IsDefault } | Select-Object -First 1
     $defaultProfId = if ($defaultProfObj -and $defaultProfObj.Id) { [string]$defaultProfObj.Id } else { Resolve-RelayBrowserProfile '' $script:context }
     $curBrowserProf = if ($SessionObj -and $SessionObj.PSObject.Properties['BrowserProfile'] -and $SessionObj.BrowserProfile) { [string]$SessionObj.BrowserProfile }
@@ -4861,7 +5047,7 @@ function Build-PlanBComposerPod($SessionObj = $null, [bool]$IsNarrow = $false, [
     $profCombo.Margin = [Windows.Thickness]::new(0, 2, 6, 2)
     $profCombo.MaxWidth = if ($IsNarrow) { 142 } else { 165 }
     $profCombo.ToolTip = '按任务独立绑定目标浏览器（切换浏览器后，下次发送将自动携带进度账本在新浏览器中交接续跑）'
-    $availProfs = @(Get-AvailableBrowserProfiles)
+    $availProfs = @(Get-AvailableBrowserProfiles -Context $script:context)
     $profSelIdx = 0
     for ($pi = 0; $pi -lt $availProfs.Count; $pi++) {
         $bp = $availProfs[$pi]
@@ -5784,12 +5970,9 @@ function Update-SessionCards {
 
     $script:controls.TabLiveButton.Content = if ($count -gt 0) { "实时网页主对话 ($count)" } else { '实时网页主对话' }
     $script:controls.ActiveQueueHeaderText.Text = "进行中任务 ($count)"
-    $script:controls.ArchivedQueueHeaderText.Text = "已归档 ($archCount) · 含超24h自动归档"
     if ($script:controls.ArchiveDrawerBtnText) {
         $script:controls.ArchiveDrawerBtnText.Text = "📦 归档管理 ($archCount)"
     }
-    $script:controls.ArchivedQueueArrowText.Text = if ($script:layout.ShowArchived) { '▴' } else { '▾' }
-    $script:controls.ArchivedListPanel.Visibility = if ($script:layout.ShowArchived) { 'Visible' } else { 'Collapsed' }
 
     $hiddenCount = if ($script:display -and $script:display.PSObject.Properties.Name -contains 'HiddenIdleCount') { [int]$script:display.HiddenIdleCount } else { 0 }
     $subCount = if ($script:display -and $script:display.PSObject.Properties.Name -contains 'SubagentCallCount') { [int]$script:display.SubagentCallCount } else { 0 }
@@ -5915,15 +6098,6 @@ function Update-SessionCards {
             })
             [void]$actRow.Children.Add($archMiniBtn)
 
-            $delMiniBtn = New-QuietIconButton -Kind 'trash' -ToolTip '删除此任务记录' -BoxSize 21 -IconSize 12.5 -IsDanger $true -Tag $s.SessionKey
-            $delMiniBtn.Margin = [Windows.Thickness]::new(1, 0, 0, 0)
-            $delMiniBtn.Add_Click({
-                param($sender, $e)
-                $e.Handled = $true
-                if ($sender.Tag) { Invoke-DeleteSession ([string]$sender.Tag) }
-            })
-            [void]$actRow.Children.Add($delMiniBtn)
-
             [Windows.Controls.Grid]::SetColumn($actRow, 1)
             [void]$topGrid.Children.Add($actRow)
             [void]$stack.Children.Add($topGrid)
@@ -6020,96 +6194,6 @@ function Update-SessionCards {
             $rowBorder.Child = $stack
             [void]$script:controls.SessionListPanel.Children.Add($rowBorder)
         }
-    }
-
-    # Populate Left Rail Archived Tasks (default max 3 visible, expandable)
-    $script:controls.ArchivedListPanel.Children.Clear()
-    $visibleArchLimit = if ($script:expandedArchivedList) { $archivedSessions.Count } else { [Math]::Min(3, $archivedSessions.Count) }
-    for ($ai = 0; $ai -lt $visibleArchLimit; $ai++) {
-        $ar = $archivedSessions[$ai]
-        $arRow = New-Object Windows.Controls.Border
-        $arRow.CornerRadius = [Windows.CornerRadius]::new(6)
-        $arRow.Padding = [Windows.Thickness]::new(8, 5, 8, 5)
-        $arRow.Margin = [Windows.Thickness]::new(0, 0, 0, 3)
-
-        $arGrid = New-Object Windows.Controls.Grid
-        $ac0 = New-Object Windows.Controls.ColumnDefinition; $ac0.Width = [Windows.GridLength]::new(1, [Windows.GridUnitType]::Star)
-        $ac1 = New-Object Windows.Controls.ColumnDefinition; $ac1.Width = [Windows.GridLength]::Auto
-        [void]$arGrid.ColumnDefinitions.Add($ac0); [void]$arGrid.ColumnDefinitions.Add($ac1)
-
-        $arLeft = New-Object Windows.Controls.StackPanel
-        $arTop = New-Object Windows.Controls.StackPanel
-        $arTop.Orientation = 'Horizontal'
-        $arDot = New-Object Windows.Shapes.Ellipse
-        $arDot.Width = 6; $arDot.Height = 6
-        $arDot.Fill = ConvertTo-Brush '#A1A1AA'
-        $arDot.VerticalAlignment = 'Center'
-        $arDot.Margin = [Windows.Thickness]::new(0, 0, 6, 0)
-        [void]$arTop.Children.Add($arDot)
-
-        $arTitle = New-Object Windows.Controls.TextBlock
-        $arTitle.Text = $(if ($ar.ShortTitle) { $ar.ShortTitle } else { $ar.Title })
-        $arTitle.FontSize = 12
-        $arTitle.Foreground = ConvertTo-Brush '#52525B'
-        $arTitle.TextTrimming = 'CharacterEllipsis'
-        $arTitle.TextWrapping = 'NoWrap'
-        [void]$arTop.Children.Add($arTitle)
-        [void]$arLeft.Children.Add($arTop)
-
-        $arMeta = New-Object Windows.Controls.TextBlock
-        $arMeta.Text = $ar.ArchiveReason
-        $arMeta.FontSize = 10.5
-        $arMeta.Foreground = ConvertTo-Brush '#A1A1AA'
-        $arMeta.Margin = [Windows.Thickness]::new(12, 1, 0, 0)
-        [void]$arLeft.Children.Add($arMeta)
-        [Windows.Controls.Grid]::SetColumn($arLeft, 0)
-        [void]$arGrid.Children.Add($arLeft)
-
-        $arActRow = New-Object Windows.Controls.StackPanel
-        $arActRow.Orientation = 'Horizontal'
-        $arActRow.VerticalAlignment = 'Center'
-        $arActRow.Margin = [Windows.Thickness]::new(4, 0, 0, 0)
-
-        $restMiniBtn = New-QuietIconButton -Kind 'restore' -ToolTip '还原到进行中任务' -BoxSize 22 -IconSize 13 -Tag $ar.SessionKey
-        $restMiniBtn.Add_Click({
-            param($sender, $e)
-            $e.Handled = $true
-            if ($sender.Tag) { Invoke-RestoreSession ([string]$sender.Tag) }
-        })
-        [void]$arActRow.Children.Add($restMiniBtn)
-
-        $arDelBtn = New-QuietIconButton -Kind 'trash' -ToolTip '删除此归档记录' -BoxSize 22 -IconSize 13 -IsDanger $true -Tag $ar.SessionKey
-        $arDelBtn.Margin = [Windows.Thickness]::new(1, 0, 0, 0)
-        $arDelBtn.Add_Click({
-            param($sender, $e)
-            $e.Handled = $true
-            if ($sender.Tag) { Invoke-DeleteSession ([string]$sender.Tag) }
-        })
-        [void]$arActRow.Children.Add($arDelBtn)
-
-        [Windows.Controls.Grid]::SetColumn($arActRow, 1)
-        [void]$arGrid.Children.Add($arActRow)
-
-        $arRow.Child = $arGrid
-        [void]$script:controls.ArchivedListPanel.Children.Add($arRow)
-    }
-
-    if ($archivedSessions.Count -gt 3) {
-        $extraCount = $archivedSessions.Count - 3
-        $moreArchBtn = New-Object Windows.Controls.Button
-        $moreArchBtn.Background = ConvertTo-Brush 'Transparent'
-        $moreArchBtn.BorderThickness = [Windows.Thickness]::new(0)
-        $moreArchBtn.Foreground = ConvertTo-Brush '#71717A'
-        $moreArchBtn.FontSize = 11
-        $moreArchBtn.HorizontalAlignment = 'Left'
-        $moreArchBtn.Padding = [Windows.Thickness]::new(8, 3, 8, 3)
-        $moreArchBtn.Content = $(if ($script:expandedArchivedList) { '收起更多归档 ▴' } else { "展开其余 $extraCount 条归档 ▾" })
-        $moreArchBtn.Add_Click({
-            $script:expandedArchivedList = -not [bool]$script:expandedArchivedList
-            $script:lastCardsSig = ''
-            Update-SessionCards
-        })
-        [void]$script:controls.ArchivedListPanel.Children.Add($moreArchBtn)
     }
 
     if (-not ($isTypingInComposer -and $prevPaneSig -eq $curPaneSig -and $script:controls.PanesHostGrid.Children.Count -gt 0)) {
@@ -6376,11 +6460,13 @@ if ($script:controls.CloseSentHistoryButton) {
 if ($script:controls.ClearAllArchivedButton) {
     $script:controls.ClearAllArchivedButton.Add_Click({ Invoke-ClearAllArchivedSessions })
 }
-$script:controls.ToggleArchivedButton.Add_Click({
-    $script:layout.ShowArchived = -not [bool]$script:layout.ShowArchived
-    Sync-LayoutMemory
-    Update-SessionCards
-})
+if ($script:controls.ToggleArchivedButton) {
+    $script:controls.ToggleArchivedButton.Add_Click({
+        $script:layout.ShowArchived = -not [bool]$script:layout.ShowArchived
+        Sync-LayoutMemory
+        Update-SessionCards
+    })
+}
 
 $script:controls.RailResizerBar.Add_MouseLeftButtonDown({
     param($sender, $e)
@@ -6450,6 +6536,17 @@ if ($script:controls.ProfileNameInput) {
     $script:controls.ProfileNameInput.Add_TextChanged({ if (-not $script:initializing) { $script:dirty = $true } })
 }
 $script:controls.ConnIconBadgeButton.Add_Click({ Toggle-KeyPopover })
+if ($script:controls.GlobalSettingsButton) {
+    $script:controls.GlobalSettingsButton.Add_Click({ Toggle-GlobalSettingsPopover })
+}
+if ($script:controls.CloseGlobalSettingsButton) {
+    $script:controls.CloseGlobalSettingsButton.Add_Click({
+        $script:globalSettingsOpen = $false
+        if ($script:controls.GlobalSettingsPopoverBorder) {
+            $script:controls.GlobalSettingsPopoverBorder.Visibility = 'Collapsed'
+        }
+    })
+}
 $script:controls.ClosePopoverButton.Add_Click({
     $script:popoverOpen = $false
     $script:controls.KeyPopoverBorder.Visibility = 'Collapsed'
@@ -6523,17 +6620,51 @@ $script:controls.CopyTunnelIdButton.Add_Click({
     }
 })
 if ($script:controls.AcpLimit0Button) {
-    $script:controls.AcpLimit0Button.Add_Click({ Set-AcpConcurrencyLimit -Context $script:context -Limit 0 | Out-Null; Refresh-ProfilePopoverState; Show-QuickToast '已将 ACP 子代理并发上限设为 0 个' })
+    $script:controls.AcpLimit0Button.Add_Click({ Set-AcpConcurrencyLimit -Context $script:context -Limit 0 | Out-Null; Refresh-ProfilePopoverState; Show-QuickToast '已关闭 CLI 智能体并发（上限设为 0）' })
 }
-$script:controls.AcpLimit2Button.Add_Click({ Set-AcpConcurrencyLimit -Context $script:context -Limit 2 | Out-Null; Refresh-ProfilePopoverState; Show-QuickToast '已将 ACP 子代理并发上限设为 2 个' })
-$script:controls.AcpLimit4Button.Add_Click({ Set-AcpConcurrencyLimit -Context $script:context -Limit 4 | Out-Null; Refresh-ProfilePopoverState; Show-QuickToast '已将 ACP 子代理并发上限设为 4 个' })
-$script:controls.AcpLimit6Button.Add_Click({ Set-AcpConcurrencyLimit -Context $script:context -Limit 6 | Out-Null; Refresh-ProfilePopoverState; Show-QuickToast '已将 ACP 子代理并发上限设为 6 个' })
+$script:controls.AcpLimit2Button.Add_Click({ Set-AcpConcurrencyLimit -Context $script:context -Limit 2 | Out-Null; Refresh-ProfilePopoverState; Show-QuickToast '已将 CLI 智能体并发上限设为 2 个' })
+$script:controls.AcpLimit4Button.Add_Click({ Set-AcpConcurrencyLimit -Context $script:context -Limit 4 | Out-Null; Refresh-ProfilePopoverState; Show-QuickToast '已将 CLI 智能体并发上限设为 4 个' })
+$script:controls.AcpLimit6Button.Add_Click({ Set-AcpConcurrencyLimit -Context $script:context -Limit 6 | Out-Null; Refresh-ProfilePopoverState; Show-QuickToast '已将 CLI 智能体并发上限设为 6 个' })
+
+foreach ($archBtnSpec in @(
+    @{ Btn = $script:controls.AutoArchiveImmediateButton; Mode = 'immediate'; Label = '立即' },
+    @{ Btn = $script:controls.AutoArchive1dButton;        Mode = '1d';        Label = '1 天' },
+    @{ Btn = $script:controls.AutoArchive3dButton;        Mode = '3d';        Label = '3 天 (默认)' },
+    @{ Btn = $script:controls.AutoArchive7dButton;        Mode = '7d';        Label = '7 天' },
+    @{ Btn = $script:controls.AutoArchiveOffButton;       Mode = 'off';       Label = '关闭' }
+)) {
+    if ($archBtnSpec.Btn) {
+        $archBtnSpec.Btn.Tag = [pscustomobject]@{ Mode = $archBtnSpec.Mode; Label = $archBtnSpec.Label }
+        $archBtnSpec.Btn.Add_Click({
+            param($s, $e)
+            if (-not $s.Tag) { return }
+            $cfg = Get-CoreEngineConfig $script:context
+            $script:settings = (Set-CoreEngineConfig -Context $script:context -AcpDefaultProfile ([string]$cfg.AcpDefaultProfile) -BrowserEnabled ([bool]$cfg.BrowserEnabled) -StartupMode ([string]$cfg.StartupMode) -AutoArchiveCompletedMode ([string]$s.Tag.Mode) -ApplyStartup:$false).Settings
+            Refresh-ProfilePopoverState
+            Show-QuickToast "已将完工任务自动归档设为「$($s.Tag.Label)」"
+        })
+    }
+}
+
+if ($script:controls.DefaultCarrierCombo) {
+    $script:controls.DefaultCarrierCombo.Add_SelectionChanged({
+        param($s, $e)
+        if ($script:suppressDefaultCarrierComboEvent) { return }
+        $selItem = $s.SelectedItem
+        if (-not $selItem -or -not $selItem.Tag) { return }
+        $chosenProf = [string]$selItem.Tag
+        $cfg = Get-CoreEngineConfig $script:context
+        $script:settings = (Set-CoreEngineConfig -Context $script:context -AcpDefaultProfile ([string]$cfg.AcpDefaultProfile) -BrowserEnabled ([bool]$cfg.BrowserEnabled) -StartupMode ([string]$cfg.StartupMode) -DefaultBrowserProfile $chosenProf -ApplyStartup:$false).Settings
+        Refresh-ProfilePopoverState
+        Show-QuickToast "已将新建任务默认载体设为「$([string]$selItem.Content)」"
+    })
+}
 
 if ($script:controls.RestartCoreButton) {
     $script:controls.RestartCoreButton.Add_Click({
         $ok = Restart-LocalCoreEngine $script:context $script:settings
         Refresh-FormState
-        if ($ok) {
+        if ($ok -and $ok.Restarted) {
             Show-QuickToast '✓ 本地 RelayStudio 内核已重启并就绪'
         } else {
             Show-QuickToast '本地内核正在后台启动，请稍候刷新查看'
@@ -6542,20 +6673,22 @@ if ($script:controls.RestartCoreButton) {
 }
 if ($script:controls.AcpProfileCodexButton) {
     $script:controls.AcpProfileCodexButton.Add_Click({
-        $cfg = Get-CoreEngineConfig $script:context
-        $script:settings = (Set-CoreEngineConfig -Context $script:context -AcpDefaultProfile 'codex' -BrowserEnabled ([bool]$cfg.BrowserEnabled) -StartupMode ([string]$cfg.StartupMode) -ApplyStartup:(-not $script:context.Isolated)).Settings
-        if (-not $script:context.Isolated) { [void](Restart-LocalCoreEngine $script:context $script:settings) }
-        Refresh-FormState
-        Show-QuickToast '已将默认子代理切换为 Codex'
+        Select-DefaultCliAgent 'codex' 'Codex'
     })
 }
 if ($script:controls.AcpProfileClaudeButton) {
     $script:controls.AcpProfileClaudeButton.Add_Click({
-        $cfg = Get-CoreEngineConfig $script:context
-        $script:settings = (Set-CoreEngineConfig -Context $script:context -AcpDefaultProfile 'claude' -BrowserEnabled ([bool]$cfg.BrowserEnabled) -StartupMode ([string]$cfg.StartupMode) -ApplyStartup:(-not $script:context.Isolated)).Settings
-        if (-not $script:context.Isolated) { [void](Restart-LocalCoreEngine $script:context $script:settings) }
-        Refresh-FormState
-        Show-QuickToast '已将默认子代理切换为 Claude'
+        Select-DefaultCliAgent 'claude' 'Claude'
+    })
+}
+if ($script:controls.AddCustomCliAgentButton) {
+    $script:controls.AddCustomCliAgentButton.Add_Click({
+        Invoke-AddCustomCliAgentDialog
+    })
+}
+if ($script:controls.RescanCliAgentsButton) {
+    $script:controls.RescanCliAgentsButton.Add_Click({
+        Invoke-RescanCliAgents
     })
 }
 if ($script:controls.BrowserCdpToggleButton) {

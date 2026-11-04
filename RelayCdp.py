@@ -1022,20 +1022,25 @@ def script_stop() -> str:
     )
 
 
-def script_archive(conv_uuid: str) -> str:
+def script_archive(conv_uuid: str, operation: str = "archive") -> str:
+    op = str(operation or "archive").strip().lower()
+    if op not in ("archive", "unarchive", "delete"):
+        op = "archive"
     return (
         "/*relay:archive*/(async()=>{try{" + _NATIVE_FIBER_JS +
-        "const u=" + _js(conv_uuid) + ";"
+        "const u=" + _js(conv_uuid) + ";const op=" + _js(op) + ";"
+        "if(op==='archive'){"
         "const rows=Array.from(document.querySelectorAll('[data-sidebar-chatgpt-conversation-key=\"chatgpt:conversation:'+u+'\"]')||[]);"
         "for(const row of rows){let f=getFiber(row),steps=0;"
         "while(f&&steps<40){steps++;const p=f.memoizedProps;"
-        "if(p&&typeof p.onArchive==='function'){await p.onArchive();return {ok:true,via:'fiber'};}"
-        "f=f.return;}}"
-        "if(location.protocol==='app:')return {ok:false,error:'sidebar_row_not_found'};"
-        "const sr=await fetch('/api/auth/session',{credentials:'include'});"
-        "if(!sr.ok)return {ok:false};const s=await sr.json();const t=s&&s.accessToken?String(s.accessToken).trim():'';if(!t)return {ok:false};"
-        "const r=await fetch('/backend-api/conversation/'+u,{method:'PATCH',credentials:'include',headers:{'Content-Type':'application/json',Authorization:'Bearer '+t},body:JSON.stringify({is_archived:true})});"
-        "return {ok:!!r.ok};}catch(e){return {ok:false,error:String(e)};}})()"
+        "if(p&&typeof p.onArchive==='function'){await p.onArchive();return {ok:true,operation:op,via:'fiber'};}"
+        "f=f.return;}}}"
+        "let t='';try{const sr=await fetch('/api/auth/session',{credentials:'include'});"
+        "if(sr&&sr.ok){const s=await sr.json();t=s&&s.accessToken?String(s.accessToken).trim():'';}}catch(_){}"
+        "const hdrs={'Content-Type':'application/json'};if(t)hdrs.Authorization='Bearer '+t;"
+        "const body=op==='unarchive'?{is_archived:false}:(op==='delete'?{is_visible:false}:{is_archived:true});"
+        "const r=await fetch('/backend-api/conversation/'+u,{method:'PATCH',credentials:'include',headers:hdrs,body:JSON.stringify(body)});"
+        "return {ok:!!(r&&r.ok),operation:op,via:'fetch'};}catch(e){return {ok:false,operation:" + _js(op) + ",error:String(e)};}})()"
     )
 
 
@@ -1124,11 +1129,28 @@ class ChatGptDesktopSession:
         except Exception:
             return False
 
-    def archive(self, conv_uuids: list[str]) -> list[str]:
+    def archive(self, conv_uuids: list[str], operation: str = "archive") -> list[str]:
         done = []
         for u in conv_uuids:
             try:
-                res = self._eval(script_archive(u))
+                res = self._eval(script_archive(u, operation))
+                if isinstance(res, dict) and res.get("ok"):
+                    done.append(u)
+            except Exception:
+                continue
+        return done
+
+    def execute_retire_actions(self, retire_items: list[dict]) -> list[str]:
+        done = []
+        for r in retire_items or []:
+            if not isinstance(r, dict):
+                continue
+            u = str(r.get("conv_uuid") or "").strip()
+            if not u:
+                continue
+            op = str(r.get("operation") or "archive").strip().lower()
+            try:
+                res = self._eval(script_archive(u, op))
                 if isinstance(res, dict) and res.get("ok"):
                     done.append(u)
             except Exception:

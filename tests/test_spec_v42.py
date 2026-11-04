@@ -1921,37 +1921,26 @@ class T24ZeroLagBindingSteeringArchiveTests(V42Base):
         self.assertTrue(b["auto_resend_enabled"])
 
     def test_t24d_panel_archive_is_undoable_for_a_grace_window_before_the_web_conversation_is_touched(self):
-        self._write_task("tsk_24d", "面板归档可撤销")
+        self._write_task("tsk_24d", "面板归档与抽屉还原闭环")
         self._bind("tsk_24d", profile="Chrome:Profile 1", conv=CONV_A)
         self._poll()
-        t0 = time.time()
+        self.assertEqual(shield.ARCHIVE_UNDO_GRACE_SEC, 0.0)
         self._post_json("/studio/action", {"action": "archive", "session_key": "tsk_24d"})
         wb = self._wb()
-        ret = [r for r in wb["retire_actions"] if r["conv_uuid"] == CONV_A]
+        ret = [r for r in wb["retire_actions"] if r["conv_uuid"] == CONV_A and r["status"] == "pending"]
         self.assertEqual(len(ret), 1)
-        self.assertGreaterEqual(float(ret[0]["not_before_epoch"]), t0 + shield.ARCHIVE_UNDO_GRACE_SEC - 1.0)
-        self.assertEqual(wb["session_bindings"]["tsk_24d"]["conv_uuid"], CONV_A, "room number kept during the grace window")
-        self.assertEqual(self._poll()["retire_actions"], [], "nothing is stopped / archived / closed inside the grace window")
+        self.assertEqual(ret[0]["operation"], "archive")
+        self.assertEqual(wb["session_bindings"]["tsk_24d"]["conv_uuid"], CONV_A, "room number kept intact on archive")
+        due = self._poll()["retire_actions"]
+        self.assertEqual([r["conv_uuid"] for r in due], [CONV_A], "archive action is released immediately with 0s grace")
 
         self._post_json("/studio/action", {"action": "restore", "session_key": "tsk_24d"})
         wb = self._wb()
-        self.assertEqual([r["status"] for r in wb["retire_actions"] if r["conv_uuid"] == CONV_A], ["cancelled"])
-        self.assertEqual(wb["session_bindings"]["tsk_24d"]["conv_uuid"], CONV_A, "undo returns to the very same running conversation")
-
-        self._post_json("/studio/action", {"action": "archive", "session_key": "tsk_24d"})
-        with shield._WEB_BRIDGE_LOCK:
-            wb = shield._load_web_bridge_state(self.wb_state_path)
-            for r in wb["retire_actions"]:
-                if r["status"] == "pending":
-                    r["not_before_epoch"] = 1.0
-            shield._save_web_bridge_state(self.wb_state_path, wb)
-        due = self._poll()["retire_actions"]
-        self.assertEqual([r["conv_uuid"] for r in due], [CONV_A], "after the grace window the real archive is released to the host")
-
-        self._post_json("/studio/action", {"action": "restore", "session_key": "tsk_24d"})
-        b = self._wb()["session_bindings"]["tsk_24d"]
-        self.assertEqual(b["conv_uuid"], "", "restored after the old chat was archived: next send opens a fresh handover")
-        self.assertIn(CONV_A, b["retired_uuids"])
+        self.assertEqual(wb["session_bindings"]["tsk_24d"]["conv_uuid"], CONV_A, "restore preserves primary conv_uuid")
+        unarch = [r for r in wb["retire_actions"] if r["conv_uuid"] == CONV_A and r["status"] == "pending"]
+        self.assertEqual(len(unarch), 1)
+        self.assertEqual(unarch[0]["operation"], "unarchive")
+        self.assertFalse(unarch[0]["close_tab"])
 
     # ----------------------------------------------------------------------------------------- never-bound / host adoption
     def test_t24e_never_bound_auto_wakeup_stays_in_follow_window_but_manual_send_eventually_hands_over(self):
@@ -2046,14 +2035,15 @@ class T24ZeroLagBindingSteeringArchiveTests(V42Base):
             self.assertNotIn("open-current-main-window", script)
 
     def test_t24j_panel_undo_bar_uses_auto_state_and_cancels_the_pending_retire(self):
-        self._write_task("tsk_24j", "撤销条使用 auto 状态")
+        self._write_task("tsk_24j", "还原使用 auto 状态并入队 unarchive")
         self._bind("tsk_24j", profile="Chrome:Profile 1", conv=CONV_A)
         self._poll()
         self._post_json("/studio/action", {"action": "set_archive_state", "session_key": "tsk_24j", "state": "archived"})
-        self.assertEqual([r["status"] for r in self._wb()["retire_actions"] if r["conv_uuid"] == CONV_A], ["pending"])
+        self.assertEqual([r["status"] for r in self._wb()["retire_actions"] if r["conv_uuid"] == CONV_A and r["operation"] == "archive"], ["pending"])
         self._post_json("/studio/action", {"action": "set_archive_state", "session_key": "tsk_24j", "state": "auto"})
         wb = self._wb()
-        self.assertEqual([r["status"] for r in wb["retire_actions"] if r["conv_uuid"] == CONV_A], ["cancelled"])
+        self.assertEqual([r["status"] for r in wb["retire_actions"] if r["conv_uuid"] == CONV_A and r["operation"] == "archive"], ["cancelled"])
+        self.assertEqual([r["status"] for r in wb["retire_actions"] if r["conv_uuid"] == CONV_A and r["operation"] == "unarchive"], ["pending"])
         self.assertEqual(wb["session_bindings"]["tsk_24j"]["conv_uuid"], CONV_A)
 
     def test_t24k_opening_a_pending_handover_page_marks_it_opened_so_no_duplicate_tab_appears(self):

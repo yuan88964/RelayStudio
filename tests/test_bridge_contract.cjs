@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const root = require('node:path').join(__dirname, '..', 'browser-bridge');
 const hookSource = fs.readFileSync(root + '\\bridge-page-hook.js', 'utf8');
 const contentSource = fs.readFileSync(root + '\\bridge-content.js', 'utf8');
+const bgSource = fs.readFileSync(root + '\\background.js', 'utf8');
 const convId = '12345678-1234-4123-8123-123456789abc';
 const url = 'https://chatgpt.com/c/' + convId;
 const baseCatalog = [
@@ -28,10 +29,11 @@ function makeStreamResponse(chunks) {
   }}}}, clone(){return mk()}}; };
   return mk();
 }
-function makeEnv({simulateClickFetch=false,rejectPost=false,streamChunks=null,mainText='synthetic'}={}) {
+function makeEnv({simulateClickFetch=false,rejectPost=false,rejectPatch=false,hangPatch=false,streamChunks=null,mainText='synthetic'}={}) {
   const store = new Map();
   const sent = [];
   const dataset = {};
+  const winListeners = new Map();
   const textarea = {
     tagName: 'TEXTAREA',offsetParent:{}, value:'',isContentEditable:false,
     getAttribute(){return null}, focus(){}, dispatchEvent(){return true}
@@ -71,7 +73,13 @@ function makeEnv({simulateClickFetch=false,rejectPost=false,streamChunks=null,ma
     const method = String(init?.method||input?.method||'GET').toUpperCase();
     const body = init?.body??(input instanceof Request ? await input.clone().text() : input?.body);
     sent.push({path,method,body:typeof body==='string'?body:null});
+    if(path.includes('/api/auth/session')) return mockResponse({accessToken:'tok-test-123'});
     if(path.includes('/backend-api/models')) return mockResponse({models:baseCatalog});
+    if(method==='PATCH' && path.includes('/backend-api/conversation/')) {
+      if(hangPatch) return new Promise(()=>{});
+      if(rejectPatch) return mockResponse({error:'simulated 500'},false);
+      return mockResponse({success:true},true);
+    }
     if(method==='POST' && streamChunks && /\/backend-api\/(?:f\/)?conversation(?:\?|$)/.test(path)) return makeStreamResponse(streamChunks);
     if(method==='POST' && rejectPost) return mockResponse({error:'simulated 400'},false);
     if(method==='GET'&&path.includes('/backend-api/conversation/')) return mockResponse({
@@ -84,16 +92,31 @@ function makeEnv({simulateClickFetch=false,rejectPost=false,streamChunks=null,ma
     getItem(k){return store.has(k)?store.get(k):null},
     setItem(k,v){store.set(k,v)},
   };
-  class FakeEvent {constructor(){}}
+  class FakeEvent {constructor(type,init){this.type=type;this.detail=init&&init.detail;}}
+  const winObj={
+    fetch:origFetch,Request,location:loc,history:{replaceState(){}},HTMLTextAreaElement:function(){},
+    HTMLInputElement:function(){},CustomEvent:FakeEvent,
+    addEventListener(type,fn){
+      if(!winListeners.has(type))winListeners.set(type,new Set());
+      winListeners.get(type).add(fn);
+    },
+    removeEventListener(type,fn){
+      if(winListeners.has(type))winListeners.get(type).delete(fn);
+    },
+    dispatchEvent(ev){
+      const set=winListeners.get(ev&&ev.type);
+      if(set){for(const fn of Array.from(set))fn(ev);}
+      return true;
+    },
+  };
   ctx={
-    window:{fetch:origFetch,Request,addEventListener(){},location:loc,history:{replaceState(){}},HTMLTextAreaElement:function(){},
-      HTMLInputElement:function(){}},
+    window:winObj,
     document:doc,localStorage:fakeStorage,URL,URLSearchParams,Request,TextDecoder,TextEncoder,
     navigator:{userAgent:'Chrome test fixture'},
     chrome:{runtime:{onMessage:{addListener(fn){listener=fn}},sendMessage(_msg, cb){if(cb)cb({shuttle_active:true})},lastError:null}},
-    InputEvent:FakeEvent,Event:FakeEvent,KeyboardEvent:FakeEvent,
+    InputEvent:FakeEvent,Event:FakeEvent,KeyboardEvent:FakeEvent,CustomEvent:FakeEvent,
     clearTimeout(){},
-    setTimeout(cb,delay){if(delay===700||delay===800||delay===1200||delay===3200)return 0;queueMicrotask(cb);return 0},
+    setTimeout(cb,delay){if(delay===700||delay===800||delay===1200||delay===3200)return 0;if(delay===2500){setImmediate(cb);return 0;}queueMicrotask(cb);return 0},
     setInterval(){return 0},console,Math,Date,
   };
   vm.createContext(ctx);
@@ -219,6 +242,210 @@ async function main(){
   });
   check(archivedRes.ok===false&&archivedRes.retry_safe===true&&archivedRes.reason==='conv_archived'&&sd.clicks===0,
     'Archived conversation is judged on arrival (0 s): conv_archived, nothing typed');
+
+  // ---- Spec True Receipt Gate: archive / unarchive / delete & HTTP 200 verification -----------------------------------
+  const r1=makeEnv();
+  const archOk=await new Promise((resolve,reject)=>{
+    const accepted=r1.getListener()({type:'RELAY_ARCHIVE_CONVERSATION',conv_uuid:convId,operation:'archive'},{},resolve);
+    if(!accepted)reject(Error('archive listener declined'));
+  });
+  const patch1=r1.sent.find(x=>x.method==='PATCH');
+  check(archOk.ok===true&&archOk.operation==='archive'&&patch1&&JSON.parse(patch1.body).is_archived===true&&r1.dataset.relayLastArchivedUuid===convId&&r1.dataset.relayLastRetireOp==='archive',
+    'Archive sends PATCH {is_archived: true} and resolves ok:true on HTTP 200');
+
+  const r2=makeEnv();
+  const unarchOk=await new Promise((resolve,reject)=>{
+    const accepted=r2.getListener()({type:'RELAY_ARCHIVE_CONVERSATION',conv_uuid:convId,operation:'unarchive'},{},resolve);
+    if(!accepted)reject(Error('unarchive listener declined'));
+  });
+  const patch2=r2.sent.find(x=>x.method==='PATCH');
+  check(unarchOk.ok===true&&unarchOk.operation==='unarchive'&&patch2&&JSON.parse(patch2.body).is_archived===false&&r2.dataset.relayLastRetireOp==='unarchive',
+    'Unarchive sends PATCH {is_archived: false} and resolves ok:true on HTTP 200');
+
+  const r3=makeEnv();
+  const delOk=await new Promise((resolve,reject)=>{
+    const accepted=r3.getListener()({type:'RELAY_ARCHIVE_CONVERSATION',conv_uuid:convId,operation:'delete'},{},resolve);
+    if(!accepted)reject(Error('delete listener declined'));
+  });
+  const patch3=r3.sent.find(x=>x.method==='PATCH');
+  check(delOk.ok===true&&delOk.operation==='delete'&&patch3&&JSON.parse(patch3.body).is_visible===false&&r3.dataset.relayLastRetireOp==='delete',
+    'Delete sends PATCH {is_visible: false} and resolves ok:true on HTTP 200');
+
+  const rFail=makeEnv({rejectPatch:true});
+  const archFail=await new Promise((resolve,reject)=>{
+    const accepted=rFail.getListener()({type:'RELAY_ARCHIVE_CONVERSATION',conv_uuid:convId,operation:'archive'},{},resolve);
+    if(!accepted)reject(Error('archive fail listener declined'));
+  });
+  check(archFail.ok===false&&!rFail.dataset.relayLastArchivedUuid,
+    'True Receipt Gate: HTTP 500 on PATCH resolves ok:false and does NOT set relayLastArchivedUuid');
+
+  const rTimeout=makeEnv({hangPatch:true});
+  const archTimeout=await new Promise((resolve,reject)=>{
+    const accepted=rTimeout.getListener()({type:'RELAY_ARCHIVE_CONVERSATION',conv_uuid:convId,operation:'archive'},{},resolve);
+    if(!accepted)reject(Error('archive timeout listener declined'));
+  });
+  check(archTimeout.ok===false&&!rTimeout.dataset.relayLastArchivedUuid,
+    'True Receipt Gate: 2500ms timeout resolves ok:false (never defaults to true)');
+
+  // ---- Background shuttle retire_actions True Receipt Gate ------------------------------------------------------------
+  function makeBgEnv({openTabs=[],archiveOk=true}={}) {
+    const ackCalls=[];
+    const removedTabs=[];
+    const updatedTabs=[];
+    const tabMessages=[];
+    let currentArchiveOk=archiveOk;
+    let currentTabs=openTabs;
+    const bgCtx={
+      navigator:{userAgent:'Mozilla/5.0 Chrome/125.0'},
+      URL,console,Math,Date,
+      setInterval(){return 0},
+      setTimeout(){return 0},
+      clearTimeout(){},
+      fetch:async (u,init)=>{
+        if(String(u).includes('/web-bridge/ack-retire')){
+          ackCalls.push(JSON.parse(init.body));
+        }
+        return mockResponse({ok:true});
+      },
+      chrome:{
+        sidePanel:{},
+        storage:{local:{get(_k,cb){if(cb)cb({});},set(){}}},
+        runtime:{onMessage:{addListener(){}},lastError:null},
+        alarms:{create(){},onAlarm:{addListener(){}}},
+        scripting:{async executeScript(){}},
+        tabs:{
+          onRemoved:{addListener(){}},
+          async query(){return currentTabs;},
+          async remove(id){removedTabs.push(id);},
+          async update(id,props){updatedTabs.push({id,props});},
+          sendMessage(tabId,msg,cb){
+            tabMessages.push({tabId,msg});
+            if(msg.type==='RELAY_STOP_GENERATION'){
+              if(cb)cb({ok:true,stopped:true});
+              return;
+            }
+            if(msg.type==='RELAY_ARCHIVE_CONVERSATION'){
+              if(cb)cb({ok:currentArchiveOk,conv_uuid:msg.conv_uuid,operation:msg.operation});
+              return;
+            }
+            if(cb)cb({ok:true});
+          },
+        },
+      },
+    };
+    vm.createContext(bgCtx);
+    vm.runInContext(bgSource,bgCtx,{filename:'background.js'});
+    return {
+      bgCtx,ackCalls,removedTabs,updatedTabs,tabMessages,
+      setArchiveOk(v){currentArchiveOk=v;},
+      setTabs(t){currentTabs=t;},
+    };
+  }
+
+  const bgNoTabs=makeBgEnv({openTabs:[]});
+  await bgNoTabs.bgCtx.handleShuttleRetireActions([{id:'ret_1',conv_uuid:convId,operation:'archive',close_tab:true}]);
+  check(bgNoTabs.ackCalls.length===0&&bgNoTabs.removedTabs.length===0,
+    'Background shuttle with 0 open tabs leaves retire action pending without ack-retire');
+
+  const bgGate=makeBgEnv({
+    openTabs:[
+      {id:101,windowId:1,url:'https://chatgpt.com/c/'+convId},
+      {id:102,windowId:1,url:'https://chatgpt.com/'},
+    ],
+    archiveOk:false,
+  });
+  await bgGate.bgCtx.handleShuttleRetireActions([{id:'ret_2',conv_uuid:convId,operation:'delete',stop_before_action:true,close_tab:true}]);
+  check(bgGate.ackCalls.length===0&&bgGate.removedTabs.length===0,
+    'Background shuttle does NOT close tab or ack-retire when cloud PATCH returns ok:false');
+
+  bgGate.setArchiveOk(true);
+  await bgGate.bgCtx.handleShuttleRetireActions([{id:'ret_2',conv_uuid:convId,operation:'delete',stop_before_action:true,close_tab:true}]);
+  check(bgGate.ackCalls.length===1&&bgGate.ackCalls[0].retire_id==='ret_2'&&bgGate.ackCalls[0].operation==='delete'&&bgGate.ackCalls[0].ok===true&&bgGate.removedTabs.includes(101),
+    'Background shuttle retries failed retire_id on next tick, closes tab and acks once cloud PATCH returns ok:true');
+
+  const bgUnarch=makeBgEnv({
+    openTabs:[
+      {id:201,windowId:1,url:'https://chatgpt.com/c/'+convId},
+      {id:202,windowId:1,url:'https://chatgpt.com/'},
+    ],
+    archiveOk:true,
+  });
+  await bgUnarch.bgCtx.handleShuttleRetireActions([{id:'ret_3',conv_uuid:convId,operation:'unarchive',close_tab:false}]);
+  check(bgUnarch.ackCalls.length===1&&bgUnarch.ackCalls[0].operation==='unarchive'&&bgUnarch.removedTabs.length===0,
+    'Background shuttle unarchive acks without closing tab');
+
+  // ---- RelayCdp script_archive (app: protocol virtualized sidebar fallback) & FakeChatGptPage seam --------------------
+  const { execFileSync } = require('node:child_process');
+  const pyOut = execFileSync('python', ['-c', `
+import json, sys
+sys.path.insert(0, r'd:\\tool\\RelayStudio')
+import RelayCdp
+from tests.fake_chatgpt_page import FakeChatGptPage
+
+scripts = {
+    op: RelayCdp.script_archive('${convId}', op)
+    for op in ('archive', 'unarchive', 'delete')
+}
+
+page = FakeChatGptPage(archive_fail_uuids={'fail-uuid-999'})
+sess = RelayCdp.ChatGptDesktopSession(page.evaluate)
+done = sess.execute_retire_actions([
+    {'conv_uuid': 'uuid-arch-1', 'operation': 'archive'},
+    {'conv_uuid': 'uuid-unarch-2', 'operation': 'unarchive'},
+    {'conv_uuid': 'uuid-del-3', 'operation': 'delete'},
+    {'conv_uuid': 'fail-uuid-999', 'operation': 'archive'},
+])
+print(json.dumps({
+    'scripts': scripts,
+    'done': done,
+    'archived': page.archived_conversations,
+    'unarchived': page.unarchived_conversations,
+    'deleted': page.deleted_conversations,
+}))
+`], { encoding: 'utf8' });
+  const pyData = JSON.parse(pyOut.trim());
+  check(
+    pyData.done.length === 3 &&
+      pyData.archived.includes('uuid-arch-1') &&
+      !pyData.archived.includes('fail-uuid-999') &&
+      pyData.unarchived.includes('uuid-unarch-2') &&
+      pyData.deleted.includes('uuid-del-3'),
+    'ChatGptDesktopSession.execute_retire_actions & FakeChatGptPage support archive/unarchive/delete and True Receipt Gate'
+  );
+
+  async function evalCdpArchiveScript(scriptSrc, { ok = true } = {}) {
+    const patchCalls = [];
+    const cdpCtx = {
+      location: { protocol: 'app:', href: 'app://-/index.html' },
+      document: { querySelectorAll() { return []; } },
+      fetch: async (u, init) => {
+        if (String(u).includes('/api/auth/session')) {
+          return mockResponse({ accessToken: 'cdp-tok' }, true);
+        }
+        patchCalls.push({ url: u, method: init.method, body: JSON.parse(init.body) });
+        return mockResponse({ success: ok }, ok);
+      },
+    };
+    vm.createContext(cdpCtx);
+    const res = await vm.runInContext(scriptSrc, cdpCtx);
+    return { res, patchCalls };
+  }
+
+  const cdpArch = await evalCdpArchiveScript(pyData.scripts.archive, { ok: true });
+  check(cdpArch.res.ok === true && cdpArch.patchCalls.length === 1 && cdpArch.patchCalls[0].body.is_archived === true,
+    'RelayCdp.script_archive(archive) falls back to PATCH {is_archived: true} even on app: protocol when sidebar row is virtualized');
+
+  const cdpUnarch = await evalCdpArchiveScript(pyData.scripts.unarchive, { ok: true });
+  check(cdpUnarch.res.ok === true && cdpUnarch.patchCalls.length === 1 && cdpUnarch.patchCalls[0].body.is_archived === false,
+    'RelayCdp.script_archive(unarchive) sends PATCH {is_archived: false}');
+
+  const cdpDel = await evalCdpArchiveScript(pyData.scripts.delete, { ok: true });
+  check(cdpDel.res.ok === true && cdpDel.patchCalls.length === 1 && cdpDel.patchCalls[0].body.is_visible === false,
+    'RelayCdp.script_archive(delete) sends PATCH {is_visible: false}');
+
+  const cdpFail = await evalCdpArchiveScript(pyData.scripts.archive, { ok: false });
+  check(cdpFail.res.ok === false,
+    'RelayCdp.script_archive returns ok:false when PATCH fails (HTTP 500)');
 
   console.log(JSON.stringify({assertions,network:'OFFLINE_FAKE_ONLY',result:'PASS'}));
 }

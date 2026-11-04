@@ -432,7 +432,7 @@ class ShieldHubSeamTests(unittest.TestCase):
         self.assertEqual([s["SessionKey"] for s in snap_arch["sessions"]], [])
         self.assertIn("tsk_arch_revive", [s["SessionKey"] for s in snap_arch["archived_sessions"]])
 
-        # Simulate new activity arriving AFTER archived_at -> automatic revival to active rail!
+        # Simulate new activity arriving AFTER archived_at -> Spec Decision 3.1: archived tasks stay archived until explicit restore!
         time.sleep(0.05)
         now_iso = shield._utc_now_iso()
         self._write_task("tsk_arch_revive", "测试归档复活与物理粉碎", updated_at=now_iso)
@@ -445,6 +445,14 @@ class ShieldHubSeamTests(unittest.TestCase):
                 "rpc_request_id": "rpc-arch-2",
             }) + "\n")
 
+        snap_still_archived = self._get_json("/studio/snapshot")
+        self.assertIn("tsk_arch_revive", [s["SessionKey"] for s in snap_still_archived["archived_sessions"]])
+
+        # Explicit restore ('↺ 还原') revives to active rail
+        self._post_json("/studio/action", {
+            "action": "restore",
+            "session_key": "tsk_arch_revive",
+        })
         snap_revived = self._get_json("/studio/snapshot")
         self.assertIn("tsk_arch_revive", [s["SessionKey"] for s in snap_revived["sessions"]])
 
