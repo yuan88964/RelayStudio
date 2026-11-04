@@ -214,7 +214,11 @@
 
 ## Accepted Amendments & Internal Adaptations
 
-- *(初始为空，仅在实施期间按只追加方式登记经批准的修订或内部适配)*
+- **2026-11-05 用户走查修订（弹窗锚点跟随、动效与统一关闭机制）**：
+  1. **点击 `＋` 弹出纯「添加平台隧道或密钥」面板**：点击胶囊末尾 `＋` 时，弹窗头部标题切换为 `添加平台隧道或密钥`，隐藏 `+ 新增配置`、隐藏账号列表（`ProfilesListScroll`）、隐藏内联编辑表单（`FormScroll`）以及底部操作栏（`PopoverFooterGrid`），仅展示带平台标题、平台用途说明小字与右侧 `＋ 添加 / 已添加` 按钮的预设平台卡片列表。
+  2. **弹窗坐标动态对齐所点击的顶栏图标 + `/impeccable` 入场与平滑位移动效**：`GlobalSettingsPopoverBorder`（`⚙` 设置弹窗）与 `KeyPopoverBorder`（各平台分栏卡片及 `＋` 添加面板）均采用 `HorizontalAlignment="Left"`，在打开或切换分栏时通过 `TranslatePoint` 动态计算当前点击按钮的水平坐标并对齐在其正下方（受窗口左右安全边距钳制），同时执行 `180ms QuarticEase (EaseOut)` 透明度、微缩放与水平/垂直平滑过渡动效。
+  3. **所有弹窗统一具备三类关闭机制**：（a）再次点击当前已激活的顶栏图标/胶囊分栏/`＋` 按钮即收起弹窗；（b）弹窗右上角统一提供 `×` 关闭按钮；（c）点击下方工作区或左栏空白处自动收起已打开的弹窗。
+  4. **`ModelCombo` 多平台分组首项契约兼容**：为兼容 `Test-ReasoningEffort.ps1` 既有宿主契约（`ModelCombo.Items[0]` 恒为主默认可选项 `Tag = 'inherit'`），当 `EnabledPlatforms.Count -gt 1` 时，`Items[0]` 保持为主默认可选项，紧随其后插入首个平台分组标题（`🟢/⚪ OpenAI · <当前配置名>`）与网页模型列表，随后依次渲染其余已启用平台的分组标题及各自平台下的 `🤖 默认 (跟随网页)`（`Tag = 'inherit'`）。
 
 ---
 

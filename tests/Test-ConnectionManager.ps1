@@ -436,8 +436,9 @@ try {
     Assert ($addCodexRes.AddedAgent.id -eq 'custom-codex' -and $addCodexRes.AddedAgent.kind -eq 'custom') 'Hazard 1: Add-CustomCliAgent prefixes reserved codex id to custom-codex with kind=custom'
     Assert ($addClaudeRes.AddedAgent.id -eq 'custom-claude' -and $addClaudeRes.AddedAgent.kind -eq 'custom') 'Hazard 1: Add-CustomCliAgent prefixes reserved claude id to custom-claude with kind=custom'
 
-    $coreGuardAst = (Get-Command Start-OfficialCoreIfNeeded).ScriptBlock.Ast.Extent.Text
-    Assert ($coreGuardAst -match '\[Math\]::Min\(8,\s*\[Math\]::Max\(1,' -and $coreGuardAst -match 'LastCoreStartError') 'Hazard 1 & 2: Start-OfficialCoreIfNeeded clamps ACP concurrency to 1..8 and captures core.err.log into LastCoreStartError'
+    $safeAcpCfg = Resolve-SafeAcpCoreConfig -DetectedAgents $addClaudeRes.Agents -Settings ([pscustomobject]@{ acp_default_profile = 'nonexistent-agent'; acp_max_concurrent_prompts = 99 })
+    $safeAcpZero = Resolve-SafeAcpCoreConfig -DetectedAgents $addClaudeRes.Agents -Settings ([pscustomobject]@{ acp_default_profile = 'codex'; acp_max_concurrent_prompts = 0 })
+    Assert ($safeAcpCfg.AcpMaxConcurrentPrompts -eq 8 -and $safeAcpCfg.AcpDefaultProfile -eq $addClaudeRes.Agents[0].id -and $safeAcpCfg.AcpEnabled -eq 'true' -and $safeAcpZero.AcpEnabled -eq 'false') 'Hazard 1 & 2: Resolve-SafeAcpCoreConfig behaviorally clamps ACP concurrency to 1..8, falls back invalid default profile, and disables ACP when limit is 0'
 
     # Hazard 4: Non-destructive merge in Save-ConnectionSettings
     $diskPreMerge = [IO.File]::ReadAllText($context.SettingsPath, [Text.Encoding]::UTF8) | ConvertFrom-Json
@@ -855,7 +856,7 @@ try {
 
     # Verify Slice 2: Top-Left OpenAI Tunnel Popover vs. Top-Right ⚙ Global Settings Popover + Fast CLI Discovery + Auto-Archive Completed Timer + Default Carrier
     Assert ($script:controls.PopoverHeaderTitle.Text -match '^OpenAI 隧道配置 \(\d+\)$') "Top-Left KeyPopoverBorder header shows OpenAI 隧道配置 (N) (actual=$($script:controls.PopoverHeaderTitle.Text))"
-    Assert ($null -ne $script:controls.GlobalSettingsButton -and $null -ne $script:controls.GlobalSettingsPopoverBorder -and $script:controls.GlobalSettingsPopoverBorder.Width -eq 460 -and [string]$script:controls.GlobalSettingsPopoverBorder.HorizontalAlignment -eq 'Right') 'Top-Right ⚙ GlobalSettingsButton and GlobalSettingsPopoverBorder (Width=460, Right-aligned) are present'
+    Assert ($null -ne $script:controls.GlobalSettingsButton -and $null -ne $script:controls.GlobalSettingsPopoverBorder -and $script:controls.GlobalSettingsPopoverBorder.Width -eq 460 -and [string]$script:controls.GlobalSettingsPopoverBorder.HorizontalAlignment -eq 'Left') 'Top-Left ⚙ GlobalSettingsButton and GlobalSettingsPopoverBorder (Width=460, Left-anchored beneath clicked icon) are present'
     Toggle-GlobalSettingsPopover
     Assert ($script:controls.GlobalSettingsPopoverBorder.Visibility -eq 'Visible' -and $script:controls.KeyPopoverBorder.Visibility -eq 'Collapsed') 'Toggle-GlobalSettingsPopover opens GlobalSettingsPopoverBorder and keeps KeyPopoverBorder closed'
     Toggle-GlobalSettingsPopover
@@ -919,13 +920,19 @@ try {
     $footerLinksStack = $script:controls.ApiKeysButton.Parent
     Assert ($footerLinksStack.Children.IndexOf($script:controls.ApiKeysButton) -eq 0 -and $footerLinksStack.Children.IndexOf($script:controls.PlatformButton) -eq 1) 'KeyPopoverBorder footer places ApiKeysButton on the left and PlatformButton on the right'
     $script:controls.AddPlatformCellButton.RaiseEvent((New-Object Windows.RoutedEventArgs([Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
-    Assert ($script:controls.KeyPopoverBorder.Visibility -eq 'Visible' -and $script:controls.AddPlatformPanelBorder.Visibility -eq 'Visible' -and $script:controls.AddPlatformListPanel.Children.Count -eq 5) 'Clicking AddPlatformCellButton (+) opens AddPlatformPanelBorder with 5 preset platforms'
+    Assert ($script:controls.KeyPopoverBorder.Visibility -eq 'Visible' -and $script:controls.AddPlatformPanelBorder.Visibility -eq 'Visible' -and $script:controls.AddPlatformListPanel.Children.Count -eq 5 -and $script:controls.PopoverHeaderTitle.Text -eq '添加平台隧道或密钥' -and $script:controls.ProfilesListScroll.Visibility -eq 'Collapsed' -and $script:controls.PopoverFooterBorder.Visibility -eq 'Collapsed' -and $script:controls.AddProfileButton.Visibility -eq 'Collapsed') 'Clicking AddPlatformCellButton (+) opens standalone 添加平台隧道或密钥 panel and hides OpenAI profile list, + 新增配置, and footer bar'
     Invoke-SelectOrAddCapsulePlatform 'claude'
-    Assert ($script:activeCapsulePlatform -eq 'claude' -and $script:controls.PopoverHeaderTitle.Text -match '^Claude 接入配置' -and [string]$script:controls.PlatformButton.Content -eq '网页端 Connectors ↗' -and $script:controls.CapsuleExtraSegmentsPanel.Children.Count -ge 2) 'Selecting Claude from + panel grows capsule segment and switches KeyPopoverBorder to Claude config'
+    Assert ($script:activeCapsulePlatform -eq 'claude' -and $script:controls.PopoverHeaderTitle.Text -match '^Claude 接入配置' -and [string]$script:controls.PlatformButton.Content -eq '网页端 Connectors ↗' -and [string]$script:controls.QuickConnectButton.Content -eq '✓ 测试连接' -and [string]$script:controls.DisconnectButton.Content -in @('启用', '停用') -and $script:controls.CapsuleExtraSegmentsPanel.Children.Count -ge 2) 'Selecting Claude from + panel grows capsule segment and switches KeyPopoverBorder to Claude apikey config with ✓ 测试连接 and 启用/停用'
+    $script:controls.DismissKeyPopoverButton.RaiseEvent((New-Object Windows.RoutedEventArgs([Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+    Assert ($script:controls.KeyPopoverBorder.Visibility -eq 'Collapsed' -and (-not $script:popoverOpen)) 'Clicking top-right × DismissKeyPopoverButton closes non-OpenAI popover'
+    Select-CapsulePlatform 'claude'
+    Assert ($script:controls.KeyPopoverBorder.Visibility -eq 'Visible') 'Clicking Claude segment opens Claude popover'
+    Select-CapsulePlatform 'claude'
+    Assert ($script:controls.KeyPopoverBorder.Visibility -eq 'Collapsed' -and (-not $script:popoverOpen)) 'Clicking active Claude segment a second time toggles popover closed'
+    Select-CapsulePlatform 'claude'
     Invoke-RemoveCurrentCapsulePlatform
     Assert ($script:activeCapsulePlatform -eq 'openai' -and $script:controls.PopoverHeaderTitle.Text -match '^OpenAI 隧道配置 \(\d+\)$' -and [string]$script:controls.PlatformButton.Content -eq '打开 OpenAI 隧道设置 ↗') 'Removing non-OpenAI capsule platform restores OpenAI tunnel config card'
-    $script:popoverOpen = $false
-    $script:controls.KeyPopoverBorder.Visibility = 'Collapsed'
+    Close-AllTopPopovers
 
 
 

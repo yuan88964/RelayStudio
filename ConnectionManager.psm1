@@ -447,6 +447,70 @@ mcp:
 "@
 }
 
+function Normalize-SafeCliAgentId {
+    param(
+        [string]$RawId,
+        [switch]$AllowBuiltin
+    )
+    $cleanId = ([regex]::Replace(([string]$RawId).Trim().ToLowerInvariant(), '[^a-z0-9._-]+', '-')).Trim('-', '.', '_')
+    if (-not $cleanId) { return '' }
+    if ($cleanId.Length -gt 64) { $cleanId = $cleanId.Substring(0, 64).TrimEnd('-', '.', '_') }
+    if (-not $AllowBuiltin -and $cleanId -in @('codex', 'claude')) {
+        return "custom-$cleanId"
+    }
+    return $cleanId
+}
+
+function Resolve-SafeAcpCoreConfig {
+    param(
+        $DetectedAgents = @(),
+        $Settings = $null
+    )
+    $acpDef = if ($Settings -and $Settings.PSObject.Properties['acp_default_profile'] -and $Settings.acp_default_profile) { [string]$Settings.acp_default_profile } else { 'codex' }
+    $acpLim = if ($Settings -and $Settings.PSObject.Properties['acp_max_concurrent_prompts'] -and $null -ne $Settings.acp_max_concurrent_prompts -and [int]$Settings.acp_max_concurrent_prompts -ge 0) { [int]$Settings.acp_max_concurrent_prompts } else { 4 }
+    $acpList = @(foreach ($ag in @($DetectedAgents)) {
+        if (-not $ag) { continue }
+        $rawKind = if ($ag.PSObject.Properties['kind'] -and $ag.kind) { ([string]$ag.kind).Trim().ToLowerInvariant() } else { 'custom' }
+        $isCustomEntry = ($ag.PSObject.Properties['is_custom'] -and [bool]$ag.is_custom)
+        $cleanBuiltin = Normalize-SafeCliAgentId -RawId ([string]$ag.id) -AllowBuiltin
+        if (-not $cleanBuiltin) { continue }
+        if ($cleanBuiltin -eq 'codex' -and $rawKind -eq 'codex' -and -not $isCustomEntry) {
+            $safeId = 'codex'
+            $safeKind = 'codex'
+        } elseif ($cleanBuiltin -eq 'claude' -and $rawKind -eq 'claude' -and -not $isCustomEntry) {
+            $safeId = 'claude'
+            $safeKind = 'claude'
+        } else {
+            $safeId = Normalize-SafeCliAgentId -RawId $cleanBuiltin
+            $safeKind = 'custom'
+        }
+        @{
+            id = $safeId
+            display_name = $(if ($ag.PSObject.Properties['display_name'] -and [string]$ag.display_name) { ([string]$ag.display_name).Trim() } else { $safeId })
+            kind = $safeKind
+            command = $(if ($ag.PSObject.Properties['command'] -and [string]$ag.command) { ([string]$ag.command).Trim() } else { '' })
+            args = @(if ($ag.PSObject.Properties['args'] -and $ag.args) { $ag.args | ForEach-Object { [string]$_ } })
+            enabled = $true
+        }
+    })
+    $acpIds = @($acpList | ForEach-Object { [string]$_.id })
+    if ($acpList.Count -gt 0 -and $acpDef -notin $acpIds) {
+        $acpDef = [string]$acpList[0].id
+    }
+    $clampedAcpLim = [Math]::Min(8, [Math]::Max(1, [int]$(if ($acpLim -gt 0) { $acpLim } else { 1 })))
+    $acpProfilesJson = if ($acpList.Count -gt 0) { ConvertTo-Json -InputObject @($acpList) -Depth 4 -Compress } else { '[]' }
+    if ($acpList.Count -eq 1 -and -not $acpProfilesJson.StartsWith('[')) {
+        $acpProfilesJson = '[' + $acpProfilesJson + ']'
+    }
+    return [pscustomobject]@{
+        AcpEnabled = $(if ($acpList.Count -gt 0 -and $acpLim -gt 0) { 'true' } else { 'false' })
+        AcpDefaultProfile = $acpDef
+        AcpMaxConcurrentPrompts = $clampedAcpLim
+        AcpProfiles = $acpList
+        AcpProfilesJson = $acpProfilesJson
+    }
+}
+
 function Start-OfficialCoreIfNeeded {
     param($Context, $Settings = $null)
     if ($null -eq $Settings -and $null -ne $Context -and $Context.PSObject.Properties['runtime_root']) {
@@ -481,8 +545,6 @@ function Start-OfficialCoreIfNeeded {
             [IO.Directory]::CreateDirectory($wsDir) | Out-Null
             [IO.Directory]::CreateDirectory($logsDir) | Out-Null
             $port = if ($Settings.PSObject.Properties['core_port'] -and [int]$Settings.core_port -gt 0) { [int]$Settings.core_port } else { 8765 }
-            $acpDef = if ($Settings.PSObject.Properties['acp_default_profile'] -and $Settings.acp_default_profile) { [string]$Settings.acp_default_profile } else { 'codex' }
-            $acpLim = if ($Settings.PSObject.Properties['acp_max_concurrent_prompts'] -and $null -ne $Settings.acp_max_concurrent_prompts -and [int]$Settings.acp_max_concurrent_prompts -ge 0) { [int]$Settings.acp_max_concurrent_prompts } else { 4 }
             $skillsDir = Join-Path $engineHome 'skills'
             if ($Settings.PSObject.Properties['skills_junction_target'] -and $Settings.skills_junction_target) {
                 $junctionTarget = [string]$Settings.skills_junction_target
@@ -514,60 +576,23 @@ function Start-OfficialCoreIfNeeded {
             }
             $browserEn = if ($Settings.PSObject.Properties['browser_enabled']) { [bool]$Settings.browser_enabled } else { $true }
             $detectedAgents = @(Get-DetectedCliAgents -ForceRescan -Settings $Settings -Context $Context)
-            $acpList = @(foreach ($ag in $detectedAgents) {
-                $rawId = ([string]$ag.id).Trim().ToLowerInvariant()
-                $cleanId = ([regex]::Replace($rawId, '[^a-z0-9._-]+', '-')).Trim('-', '.', '_')
-                if (-not $cleanId) { continue }
-                if ($cleanId.Length -gt 64) { $cleanId = $cleanId.Substring(0, 64).TrimEnd('-', '.', '_') }
-                $rawKind = ([string]$ag.kind).Trim().ToLowerInvariant()
-                $isCustomEntry = ($ag.PSObject.Properties['is_custom'] -and [bool]$ag.is_custom)
-                if ($cleanId -eq 'codex' -and $rawKind -eq 'codex' -and -not $isCustomEntry) {
-                    $safeId = 'codex'
-                    $safeKind = 'codex'
-                } elseif ($cleanId -eq 'claude' -and $rawKind -eq 'claude' -and -not $isCustomEntry) {
-                    $safeId = 'claude'
-                    $safeKind = 'claude'
-                } else {
-                    $safeId = if ($cleanId -in @('codex', 'claude')) { "custom-$cleanId" } else { $cleanId }
-                    $safeKind = 'custom'
-                }
-                @{
-                    id = $safeId
-                    display_name = $(if ([string]$ag.display_name) { ([string]$ag.display_name).Trim() } else { $safeId })
-                    kind = $safeKind
-                    command = ([string]$ag.command).Trim()
-                    args = @($ag.args | ForEach-Object { [string]$_ })
-                    enabled = $true
-                }
-            })
-            $acpIds = @($acpList | ForEach-Object { [string]$_.id })
-            if ($acpList.Count -gt 0 -and $acpDef -notin $acpIds) {
-                $acpDef = [string]$acpList[0].id
-            }
-            $clampedAcpLim = [Math]::Min(8, [Math]::Max(1, [int]$(if ($acpLim -gt 0) { $acpLim } else { 1 })))
-            $mcpAppsMode = if ($Settings.PSObject.Properties['mcp_apps_mode'] -and ([string]$Settings.mcp_apps_mode).Trim().ToLowerInvariant() -in @('full', 'compact', 'off')) {
-                ([string]$Settings.mcp_apps_mode).Trim().ToLowerInvariant()
-            } else { 'off' }
-            $acpProfilesJson = if ($acpList.Count -gt 0) { ConvertTo-Json -InputObject @($acpList) -Depth 4 -Compress } else { '[]' }
-            if ($acpList.Count -eq 1 -and -not $acpProfilesJson.StartsWith('[')) {
-                $acpProfilesJson = '[' + $acpProfilesJson + ']'
-            }
+            $safeAcp = Resolve-SafeAcpCoreConfig -DetectedAgents $detectedAgents -Settings $Settings
             $environment = [Environment]::GetEnvironmentVariables()
             $environment['GODEBUG'] = 'winsymlink=0'
             $environment['RELAYCORE_HOME'] = $engineHome
             $environment['RELAYCORE_DEFAULT_DIR'] = $wsDir
             $environment['RELAYCORE_PORT'] = "$port"
-            $environment['RELAYCORE_MCP_APPS_MODE'] = $mcpAppsMode
+            $environment['RELAYCORE_MCP_APPS_MODE'] = 'off'
             $environment['RELAYCORE_BROWSER_ENABLED'] = $(if ($browserEn) { 'true' } else { 'false' })
             $environment['RELAYCORE_BROWSER_REUSE_EXISTING_CDP'] = 'true'
-            $environment['RELAYCORE_ACP_ENABLED'] = $(if ($acpList.Count -gt 0 -and $acpLim -gt 0) { 'true' } else { 'false' })
-            $environment['RELAYCORE_ACP_DEFAULT_PROFILE'] = $acpDef
-            $environment['RELAYCORE_ACP_MAX_CONCURRENT_PROMPTS'] = "$clampedAcpLim"
-            $environment['RELAYCORE_ACP_PROFILES_JSON'] = $acpProfilesJson
+            $environment['RELAYCORE_ACP_ENABLED'] = [string]$safeAcp.AcpEnabled
+            $environment['RELAYCORE_ACP_DEFAULT_PROFILE'] = [string]$safeAcp.AcpDefaultProfile
+            $environment['RELAYCORE_ACP_MAX_CONCURRENT_PROMPTS'] = "$($safeAcp.AcpMaxConcurrentPrompts)"
+            $environment['RELAYCORE_ACP_PROFILES_JSON'] = [string]$safeAcp.AcpProfilesJson
             $list = @($environment.Keys | ForEach-Object { "$_=$($environment[$_])" })
             $outLog = Join-Path $logsDir 'core.out.log'
             $errLog = Join-Path $logsDir 'core.err.log'
-            $cmdLine = 'cmd.exe /d /s /c ""' + $standaloneCore + '" -host 127.0.0.1 -port ' + $port + ' -mcp-apps-mode ' + $mcpAppsMode + ' 1>>"' + $outLog + '" 2>>"' + $errLog + '""'
+            $cmdLine = 'cmd.exe /d /s /c ""' + $standaloneCore + '" -host 127.0.0.1 -port ' + $port + ' -mcp-apps-mode off 1>>"' + $outLog + '" 2>>"' + $errLog + '""'
             [void](Start-InteractiveHiddenCmd -CommandLine $cmdLine -WorkingDirectory $rootDir -EnvironmentOverrides $environment)
         } catch {}
     }
@@ -865,6 +890,48 @@ function Get-ConnectionProfiles {
     }
 }
 
+function ConvertTo-SerializedProfileEntry {
+    param(
+        $ProfileObj,
+        [Nullable[bool]]$EnabledOverride = $null
+    )
+    $enVal = if ($null -ne $EnabledOverride) { [bool]$EnabledOverride } elseif ($ProfileObj.PSObject.Properties['Enabled']) { [bool]$ProfileObj.Enabled } elseif ($ProfileObj.PSObject.Properties['enabled']) { [bool]$ProfileObj.enabled } else { $true }
+    return [pscustomobject]@{
+        id = $(if ($ProfileObj.PSObject.Properties['Id']) { $ProfileObj.Id } else { $ProfileObj.id })
+        name = $(if ($ProfileObj.PSObject.Properties['Name']) { $ProfileObj.Name } else { $ProfileObj.name })
+        platform = $(if ($ProfileObj.PSObject.Properties['Platform']) { $ProfileObj.Platform } else { $ProfileObj.platform })
+        kind = $(if ($ProfileObj.PSObject.Properties['Kind']) { $ProfileObj.Kind } else { $ProfileObj.kind })
+        tunnel_id = $(if ($ProfileObj.PSObject.Properties['TunnelId']) { $ProfileObj.TunnelId } else { $ProfileObj.tunnel_id })
+        base_url = $(if ($ProfileObj.PSObject.Properties['BaseUrl']) { $ProfileObj.BaseUrl } else { $ProfileObj.base_url })
+        api_base_url = $(if ($ProfileObj.PSObject.Properties['ApiBaseUrl']) { $ProfileObj.ApiBaseUrl } else { $ProfileObj.api_base_url })
+        key_file = $(if ($ProfileObj.PSObject.Properties['KeyFile']) { $ProfileObj.KeyFile } else { $ProfileObj.key_file })
+        enabled = $enVal
+    }
+}
+
+function Write-ConnectionProfilesStorePayload {
+    param(
+        $Context,
+        [string]$ActiveProfileId,
+        $EnabledPlatforms,
+        $ActiveProfileByPlatform,
+        $SerializedProfiles
+    )
+    $storePath = if ($Context.PSObject.Properties.Name -contains 'ProfilesStorePath' -and $Context.ProfilesStorePath) {
+        $Context.ProfilesStorePath
+    } else {
+        Join-Path $Context.DataRoot 'credential-profiles.json'
+    }
+    $storePayload = [pscustomobject]@{
+        schema_version = 1
+        active_profile_id = $ActiveProfileId
+        enabled_platforms = @($EnabledPlatforms)
+        active_profile_by_platform = $ActiveProfileByPlatform
+        profiles = @($SerializedProfiles)
+    } | ConvertTo-Json -Depth 6
+    Write-AtomicConnectionText $storePath $storePayload
+}
+
 function Save-ConnectionProfile {
     param(
         $Context,
@@ -950,17 +1017,7 @@ function Save-ConnectionProfile {
                 enabled = $newEnabled
             })
         } else {
-            $updatedList.Add([pscustomobject]@{
-                id = $p.Id
-                name = $p.Name
-                platform = $p.Platform
-                kind = $p.Kind
-                tunnel_id = $p.TunnelId
-                base_url = $p.BaseUrl
-                api_base_url = $p.ApiBaseUrl
-                key_file = $p.KeyFile
-                enabled = [bool]$p.Enabled
-            })
+            $updatedList.Add((ConvertTo-SerializedProfileEntry $p))
         }
     }
     if (-not $found) {
@@ -987,14 +1044,7 @@ function Save-ConnectionProfile {
     if ($enabledPlats -notcontains $effPlatform) {
         $enabledPlats = @($enabledPlats) + @($effPlatform)
     }
-    $storePayload = [pscustomobject]@{
-        schema_version = 1
-        active_profile_id = $activeId
-        enabled_platforms = @($enabledPlats)
-        active_profile_by_platform = $activeByPlat
-        profiles = $updatedList.ToArray()
-    } | ConvertTo-Json -Depth 6
-    Write-AtomicConnectionText $storePath $storePayload
+    Write-ConnectionProfilesStorePayload -Context $Context -ActiveProfileId $activeId -EnabledPlatforms $enabledPlats -ActiveProfileByPlatform $activeByPlat -SerializedProfiles ($updatedList.ToArray())
 
     if ($effPlatform -eq 'openai' -and $effKind -eq 'tunnel' -and $activeId -eq $ProfileId -and $cleanTun) {
         $Settings.tunnel_id = $cleanTun
@@ -1050,32 +1100,8 @@ function Remove-ConnectionProfile {
             $activeByPlat[$targetPlat] = [string]$platRem[0].Id
         }
     }
-    $storePath = if ($Context.PSObject.Properties.Name -contains 'ProfilesStorePath' -and $Context.ProfilesStorePath) {
-        $Context.ProfilesStorePath
-    } else {
-        Join-Path $Context.DataRoot 'credential-profiles.json'
-    }
-    $rawProfiles = @(foreach ($p in $remaining) {
-        [pscustomobject]@{
-            id = $p.Id
-            name = $p.Name
-            platform = $p.Platform
-            kind = $p.Kind
-            tunnel_id = $p.TunnelId
-            base_url = $p.BaseUrl
-            api_base_url = $p.ApiBaseUrl
-            key_file = $p.KeyFile
-            enabled = [bool]$p.Enabled
-        }
-    })
-    $storePayload = [pscustomobject]@{
-        schema_version = 1
-        active_profile_id = $newActiveId
-        enabled_platforms = @($state.EnabledPlatforms)
-        active_profile_by_platform = $activeByPlat
-        profiles = $rawProfiles
-    } | ConvertTo-Json -Depth 6
-    Write-AtomicConnectionText $storePath $storePayload
+    $rawProfiles = @(foreach ($p in $remaining) { ConvertTo-SerializedProfileEntry $p })
+    Write-ConnectionProfilesStorePayload -Context $Context -ActiveProfileId $newActiveId -EnabledPlatforms $state.EnabledPlatforms -ActiveProfileByPlatform $activeByPlat -SerializedProfiles $rawProfiles
     return (Get-ConnectionProfiles $Context $Settings)
 }
 
@@ -1100,33 +1126,16 @@ function Select-ConnectionProfile {
         }
     }
 
-    if ($targetKind -eq 'apikey') {
+    if (-not ($targetPlat -eq 'openai' -and $targetKind -eq 'tunnel')) {
         if (-not $target.HasKey) {
             throw "配置「$($target.Name)」尚未填写 API Key，请先点击修改并粘贴凭据。"
         }
         $activeByPlat[$targetPlat] = $ProfileId
         $rawProfiles = @(foreach ($p in $state.Profiles) {
-            $isTarget = ($p.Id -eq $ProfileId)
-            [pscustomobject]@{
-                id = $p.Id
-                name = $p.Name
-                platform = $p.Platform
-                kind = $p.Kind
-                tunnel_id = $p.TunnelId
-                base_url = $p.BaseUrl
-                api_base_url = $p.ApiBaseUrl
-                key_file = $p.KeyFile
-                enabled = $(if ($isTarget) { $true } else { [bool]$p.Enabled })
-            }
+            $enOverride = if ($p.Id -eq $ProfileId) { $true } else { [bool]$p.Enabled }
+            ConvertTo-SerializedProfileEntry -ProfileObj $p -EnabledOverride $enOverride
         })
-        $storePayload = [pscustomobject]@{
-            schema_version = 1
-            active_profile_id = $state.ActiveProfileId
-            enabled_platforms = @($state.EnabledPlatforms)
-            active_profile_by_platform = $activeByPlat
-            profiles = $rawProfiles
-        } | ConvertTo-Json -Depth 6
-        Write-AtomicConnectionText $storePath $storePayload
+        Write-ConnectionProfilesStorePayload -Context $Context -ActiveProfileId $state.ActiveProfileId -EnabledPlatforms $state.EnabledPlatforms -ActiveProfileByPlatform $activeByPlat -SerializedProfiles $rawProfiles
         $updatedState = Get-ConnectionProfiles $Context $Settings
         $updatedTarget = $updatedState.Profiles | Where-Object { $_.Id -eq $ProfileId } | Select-Object -First 1
         return [pscustomobject]@{
@@ -1142,26 +1151,10 @@ function Select-ConnectionProfile {
     }
     $activeByPlat['openai'] = $ProfileId
     $rawProfiles = @(foreach ($p in $state.Profiles) {
-        [pscustomobject]@{
-            id = $p.Id
-            name = $p.Name
-            platform = $p.Platform
-            kind = $p.Kind
-            tunnel_id = $p.TunnelId
-            base_url = $p.BaseUrl
-            api_base_url = $p.ApiBaseUrl
-            key_file = $p.KeyFile
-            enabled = $(if ($p.Id -eq $ProfileId) { $true } else { [bool]$p.Enabled })
-        }
+        $enOverride = if ($p.Id -eq $ProfileId) { $true } else { [bool]$p.Enabled }
+        ConvertTo-SerializedProfileEntry -ProfileObj $p -EnabledOverride $enOverride
     })
-    $storePayload = [pscustomobject]@{
-        schema_version = 1
-        active_profile_id = $ProfileId
-        enabled_platforms = @($state.EnabledPlatforms)
-        active_profile_by_platform = $activeByPlat
-        profiles = $rawProfiles
-    } | ConvertTo-Json -Depth 6
-    Write-AtomicConnectionText $storePath $storePayload
+    Write-ConnectionProfilesStorePayload -Context $Context -ActiveProfileId $ProfileId -EnabledPlatforms $state.EnabledPlatforms -ActiveProfileByPlatform $activeByPlat -SerializedProfiles $rawProfiles
 
     $Settings.tunnel_id = $target.TunnelId
     Save-ConnectionSettings -Context $Context -Settings $Settings -ApiKey $target.PlainKey
@@ -1211,17 +1204,7 @@ function Add-CapsulePlatform {
     $platProfiles = @($state.Profiles | Where-Object { ([string]$_.Platform).ToLowerInvariant() -eq $plat })
     $rawProfiles = New-Object 'System.Collections.Generic.List[object]'
     foreach ($p in $state.Profiles) {
-        $rawProfiles.Add([pscustomobject]@{
-            id = $p.Id
-            name = $p.Name
-            platform = $p.Platform
-            kind = $p.Kind
-            tunnel_id = $p.TunnelId
-            base_url = $p.BaseUrl
-            api_base_url = $p.ApiBaseUrl
-            key_file = $p.KeyFile
-            enabled = [bool]$p.Enabled
-        })
+        $rawProfiles.Add((ConvertTo-SerializedProfileEntry $p))
     }
     if ($platProfiles.Count -eq 0) {
         $newId = "prof_${plat}_default"
@@ -1243,20 +1226,57 @@ function Add-CapsulePlatform {
     } elseif (-not $activeByPlat.Contains($plat) -or -not $activeByPlat[$plat]) {
         $activeByPlat[$plat] = [string]$platProfiles[0].Id
     }
-    $storePath = if ($Context.PSObject.Properties.Name -contains 'ProfilesStorePath' -and $Context.ProfilesStorePath) {
-        $Context.ProfilesStorePath
-    } else {
-        Join-Path $Context.DataRoot 'credential-profiles.json'
-    }
-    $storePayload = [pscustomobject]@{
-        schema_version = 1
-        active_profile_id = $state.ActiveProfileId
-        enabled_platforms = $enabled.ToArray()
-        active_profile_by_platform = $activeByPlat
-        profiles = $rawProfiles.ToArray()
-    } | ConvertTo-Json -Depth 6
-    Write-AtomicConnectionText $storePath $storePayload
+    Write-ConnectionProfilesStorePayload -Context $Context -ActiveProfileId $state.ActiveProfileId -EnabledPlatforms ($enabled.ToArray()) -ActiveProfileByPlatform $activeByPlat -SerializedProfiles ($rawProfiles.ToArray())
     return (Get-ConnectionProfiles $Context $Settings)
+}
+
+function Set-ConnectionProfileEnabled {
+    param(
+        $Context,
+        $Settings = $null,
+        [string]$ProfileId,
+        [bool]$Enabled = $false
+    )
+    if (-not $Settings) { $Settings = Read-ConnectionSettings $Context }
+    $state = Get-ConnectionProfiles $Context $Settings
+    $activeByPlat = [ordered]@{}
+    if ($state.PSObject.Properties['ActiveProfileByPlatform'] -and $state.ActiveProfileByPlatform) {
+        foreach ($k in $state.ActiveProfileByPlatform.Keys) {
+            $activeByPlat[[string]$k] = [string]$state.ActiveProfileByPlatform[$k]
+        }
+    }
+    $rawProfiles = @(foreach ($p in $state.Profiles) {
+        $enOverride = if ($p.Id -eq $ProfileId) { [bool]$Enabled } else { [bool]$p.Enabled }
+        ConvertTo-SerializedProfileEntry -ProfileObj $p -EnabledOverride $enOverride
+    })
+    Write-ConnectionProfilesStorePayload -Context $Context -ActiveProfileId $state.ActiveProfileId -EnabledPlatforms $state.EnabledPlatforms -ActiveProfileByPlatform $activeByPlat -SerializedProfiles $rawProfiles
+    return (Get-ConnectionProfiles $Context $Settings)
+}
+
+function Test-PlatformConnectionProfile {
+    param(
+        $Context,
+        $Settings = $null,
+        [string]$ProfileId
+    )
+    if (-not $Settings) { $Settings = Read-ConnectionSettings $Context }
+    $state = Get-ConnectionProfiles $Context $Settings
+    $target = $state.Profiles | Where-Object { $_.Id -eq $ProfileId } | Select-Object -First 1
+    if (-not $target) { throw "找不到指定的平台配置 ($ProfileId)。" }
+    if (-not $target.HasKey) {
+        throw "配置「$($target.Name)」尚未填写 API Key，请先点击右侧箭头展开并粘贴密钥。"
+    }
+    $effUrl = if ($target.BaseUrl -and $target.BaseUrl.Trim()) { $target.BaseUrl.Trim() } else { Get-DefaultPlatformBaseUrl $target.Platform $Settings }
+    if ($effUrl -notmatch '^https?://') {
+        throw "接入点地址 ($effUrl) 格式不正确，请填写以 https:// 开头的接口地址。"
+    }
+    return [pscustomobject]@{
+        Ok = $true
+        ProfileId = $target.Id
+        Platform = $target.Platform
+        BaseUrl = $effUrl
+        Message = "✓ 「$($target.Name)」接口与密钥核验就绪 ($effUrl)"
+    }
 }
 
 function Remove-CapsulePlatform {
@@ -1276,32 +1296,8 @@ function Remove-CapsulePlatform {
             $activeByPlat[[string]$k] = [string]$state.ActiveProfileByPlatform[$k]
         }
     }
-    $rawProfiles = @(foreach ($p in $state.Profiles) {
-        [pscustomobject]@{
-            id = $p.Id
-            name = $p.Name
-            platform = $p.Platform
-            kind = $p.Kind
-            tunnel_id = $p.TunnelId
-            base_url = $p.BaseUrl
-            api_base_url = $p.ApiBaseUrl
-            key_file = $p.KeyFile
-            enabled = [bool]$p.Enabled
-        }
-    })
-    $storePath = if ($Context.PSObject.Properties.Name -contains 'ProfilesStorePath' -and $Context.ProfilesStorePath) {
-        $Context.ProfilesStorePath
-    } else {
-        Join-Path $Context.DataRoot 'credential-profiles.json'
-    }
-    $storePayload = [pscustomobject]@{
-        schema_version = 1
-        active_profile_id = $state.ActiveProfileId
-        enabled_platforms = @($enabled)
-        active_profile_by_platform = $activeByPlat
-        profiles = $rawProfiles
-    } | ConvertTo-Json -Depth 6
-    Write-AtomicConnectionText $storePath $storePayload
+    $rawProfiles = @(foreach ($p in $state.Profiles) { ConvertTo-SerializedProfileEntry $p })
+    Write-ConnectionProfilesStorePayload -Context $Context -ActiveProfileId $state.ActiveProfileId -EnabledPlatforms $enabled -ActiveProfileByPlatform $activeByPlat -SerializedProfiles $rawProfiles
     return (Get-ConnectionProfiles $Context $Settings)
 }
 
@@ -5540,9 +5536,7 @@ function Get-DetectedCliAgents {
     foreach ($c in $customArr) {
         if (-not $c) { continue }
         $rawCId = if ($c.PSObject.Properties['id'] -and $c.id) { ([string]$c.id).Trim() } else { '' }
-        $cId = ([regex]::Replace($rawCId.ToLowerInvariant(), '[^a-z0-9._-]+', '-')).Trim('-', '.', '_')
-        if ($cId.Length -gt 64) { $cId = $cId.Substring(0, 64).TrimEnd('-', '.', '_') }
-        if ($cId -in @('codex', 'claude')) { $cId = "custom-$cId" }
+        $cId = Normalize-SafeCliAgentId -RawId $rawCId
         $cCmd = if ($c.PSObject.Properties['command'] -and $c.command) { ([string]$c.command).Trim() } else { '' }
         if (-not $cId -or -not $cCmd -or $seenIds.ContainsKey($cId)) { continue }
         if (-not [IO.File]::Exists($cCmd)) { continue }
@@ -5575,10 +5569,8 @@ function Add-CustomCliAgent {
     }
     $fullPath = [IO.Path]::GetFullPath($cleanPath)
     $baseName = [IO.Path]::GetFileNameWithoutExtension($fullPath)
-    $idSlug = ([regex]::Replace($baseName.ToLowerInvariant(), '[^a-z0-9._-]+', '-')).Trim('-', '.', '_')
+    $idSlug = Normalize-SafeCliAgentId -RawId $baseName
     if (-not $idSlug) { $idSlug = 'custom-cli' }
-    if ($idSlug.Length -gt 64) { $idSlug = $idSlug.Substring(0, 64).TrimEnd('-', '.', '_') }
-    if ($idSlug -in @('codex', 'claude')) { $idSlug = "custom-$idSlug" }
     $disp = if ($DisplayName -and $DisplayName.Trim()) { $DisplayName.Trim() } else { $baseName }
     $settings = Read-ConnectionSettings $Context
     $existing = @(if ($settings.PSObject.Properties['custom_cli_agents'] -and $settings.custom_cli_agents) { $settings.custom_cli_agents })

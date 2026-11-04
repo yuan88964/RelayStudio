@@ -154,7 +154,11 @@ $groupItems = @($multiPlatState.ModelCombo.Items | Where-Object { -not $_.IsEnab
 Assert-Case ([string]$firstDefaultRef.Tag -eq 'inherit' -and [string]$firstDefaultRef.Content -eq '🤖 默认 (跟随网页)') 'Multi-platform ModelCombo keeps Items[0] as the primary inherit option'
 Assert-Case ($groupItems.Count -eq 2 -and ($multiContents -join '|') -match '🟢 OpenAI · 主力隧道' -and ($multiContents -join '|') -match '⚪ Claude · 默认') 'Multi-platform ModelCombo renders breathing status headers (🟢/⚪) corresponding to enabled capsule platforms'
 $selectableItems = @($multiPlatState.ModelCombo.Items | Where-Object { $_.IsEnabled })
-Assert-Case ($selectableItems.Count -eq 2 -and (@($selectableItems | Where-Object { [string]$_.Content -ne '🤖 默认 (跟随网页)' }).Count -eq 0)) 'Cold start multi-platform ModelCombo contains only 🤖 默认 (跟随网页) under each enabled platform without fake models'
+Assert-Case ($selectableItems.Count -eq 2 -and (@($selectableItems | Where-Object { [string]$_.Content -ne '🤖 默认 (跟随网页)' -or [string]$_.Tag -ne 'inherit' }).Count -eq 0)) 'Cold start multi-platform ModelCombo contains only 🤖 默认 (跟随网页) (Tag=inherit) under each enabled platform without fake models'
+$multiPlatState | Add-Member -NotePropertyName 'TunnelOnline' -NotePropertyValue $false -Force
+Sync-ComposerModelAndEffortCombos -StateInfo $multiPlatState -AvailModels @() -CurModel 'inherit' -WebModel '' -CurEffort 'inherit' -WebEffort '' -IsNarrow $false
+$offlineContents = @($multiPlatState.ModelCombo.Items | ForEach-Object { [string]$_.Content })
+Assert-Case (($offlineContents -join '|') -match '⚪ OpenAI · 主力隧道') 'Multi-platform ModelCombo dynamically updates OpenAI group dot to ⚪ when tunnel goes offline'
 $script:profilesState = $null
 
 Write-Output ('{"result":"PASS","assertions":' + $script:passed + ',"network":"OFFLINE_FAKE_ONLY","production_config_written":false}')

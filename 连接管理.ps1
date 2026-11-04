@@ -610,11 +610,12 @@ $script:PANE_SNAP_HIDE_PX = 140.0
    </Border.Effect>
    <StackPanel>
     <Grid Margin="0,0,0,8">
-     <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+     <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
      <TextBlock x:Name="PopoverHeaderTitle" Text="OpenAI 隧道配置 (1)" FontSize="13.5" FontWeight="Bold" Foreground="#18181B" VerticalAlignment="Center"/>
      <Button x:Name="RemoveCapsulePlatformButton" Grid.Column="1" Content="移除此栏" Style="{StaticResource LinkButton}" Foreground="#71717A" FontSize="11.5" Margin="0,0,8,0" Visibility="Collapsed"/>
-     <Button x:Name="AddProfileButton" Grid.Column="2" Content="+ 新增配置" Padding="9,3" MinHeight="25" FontSize="11.5" FontWeight="SemiBold" Background="#FFFFFF" BorderBrush="#E4E4E7"/>
+     <Button x:Name="AddProfileButton" Grid.Column="2" Content="+ 新增配置" Padding="9,3" MinHeight="25" FontSize="11.5" FontWeight="SemiBold" Background="#FFFFFF" BorderBrush="#E4E4E7" Margin="0,0,6,0"/>
      <Button x:Name="TogglePopoverEditButton" Grid.Column="3" Content="✎ 编辑当前" Style="{StaticResource LinkButton}" FontSize="12" FontWeight="SemiBold" Visibility="Collapsed"/>
+     <Button x:Name="DismissKeyPopoverButton" Grid.Column="4" Content="×" Style="{StaticResource LinkButton}" FontSize="14" FontWeight="Bold" Foreground="#71717A" Padding="4,0" ToolTip="收起弹出面板"/>
     </Grid>
 
     <Border x:Name="AddPlatformPanelBorder" Background="#FAFAFA" BorderBrush="#E4E4E7" BorderThickness="1" CornerRadius="8" Padding="10,8" Margin="0,0,0,8" Visibility="Collapsed">
@@ -679,8 +680,8 @@ $script:PANE_SNAP_HIDE_PX = 140.0
      </Border>
     </ScrollViewer>
 
-    <!-- Popover Footer: Left OpenAI Links (Small Font) + Right Start/Disconnect Buttons (No Close Button) -->
-    <Border BorderBrush="#F1F1F4" BorderThickness="0,1,0,0" Padding="0,10,0,0">
+    <!-- Popover Footer: Left Platform Links + Right Action Buttons -->
+    <Border x:Name="PopoverFooterBorder" BorderBrush="#F1F1F4" BorderThickness="0,1,0,0" Padding="0,10,0,0">
      <Grid>
       <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
       <CheckBox x:Name="ShieldCheck" Content="内核直通" IsChecked="True" Visibility="Collapsed"/>
@@ -696,8 +697,8 @@ $script:PANE_SNAP_HIDE_PX = 140.0
    </StackPanel>
   </Border>
 
-  <!-- Floating Right-Anchored Global & Local Engine Settings Popover (⚙) -->
-  <Border x:Name="GlobalSettingsPopoverBorder" Grid.RowSpan="2" Width="460" HorizontalAlignment="Right" VerticalAlignment="Top" Margin="0,38,14,0" Background="#FFFFFF" BorderBrush="#E4E4E7" BorderThickness="1" CornerRadius="12" Padding="18,16" Visibility="Collapsed">
+  <!-- Floating Trigger-Anchored Global & Local Engine Settings Popover (⚙) -->
+  <Border x:Name="GlobalSettingsPopoverBorder" Grid.RowSpan="2" Width="460" HorizontalAlignment="Left" VerticalAlignment="Top" Margin="14,38,0,0" Background="#FFFFFF" BorderBrush="#E4E4E7" BorderThickness="1" CornerRadius="12" Padding="18,16" Visibility="Collapsed">
    <Border.Effect>
     <DropShadowEffect BlurRadius="28" ShadowDepth="8" Opacity="0.11" Color="#09090B"/>
    </Border.Effect>
@@ -1468,12 +1469,96 @@ function Reset-DefaultWindowLayout {
 $script:popoverExpandedProfileId = ''
 $script:globalSettingsOpen = $false
 $script:suppressDefaultCarrierComboEvent = $false
+$script:capsuleSegmentButtons = @{}
+$script:lastTestedApiKeyProfileId = ''
+
+function Sync-PopoverAnchorAndAnimate {
+    param(
+        [Windows.Controls.Border]$PopoverBorder,
+        [Windows.FrameworkElement]$TriggerElement = $null,
+        [bool]$WasAlreadyOpen = $false
+    )
+    if (-not $PopoverBorder) { return }
+    if (-not ($PopoverBorder.CacheMode -is [Windows.Media.BitmapCache])) { try { $PopoverBorder.CacheMode = New-Object Windows.Media.BitmapCache } catch {} }
+    try {
+        if ($script:window -and $script:window.Content -is [Windows.UIElement]) {
+            $rootEl = [Windows.UIElement]$script:window.Content
+            $winW = if ($script:window.ActualWidth -gt 0) { [double]$script:window.ActualWidth } elseif ($script:window.Width -gt 0) { [double]$script:window.Width } else { 1180.0 }
+            $winH = if ($script:window.ActualHeight -gt 0) { [double]$script:window.ActualHeight } elseif ($script:window.Height -gt 0) { [double]$script:window.Height } else { 740.0 }
+            if (-not $TriggerElement -or $TriggerElement.ActualWidth -le 0) {
+                $rootEl.Measure([Windows.Size]::new($winW, $winH))
+                $rootEl.Arrange([Windows.Rect]::new(0, 0, $winW, $winH))
+                $rootEl.UpdateLayout()
+            }
+            $popW = if ($PopoverBorder.Width -gt 0) { [double]$PopoverBorder.Width } elseif ($PopoverBorder.ActualWidth -gt 0) { [double]$PopoverBorder.ActualWidth } else { 460.0 }
+            $prevLeft = [double]$PopoverBorder.Margin.Left
+            $targetLeft = $prevLeft
+            if ($TriggerElement) {
+                $pt = $TriggerElement.TranslatePoint([Windows.Point]::new(0, 0), $rootEl)
+                $maxLeft = [Math]::Max(14.0, $winW - $popW - 14.0)
+                $targetLeft = [Math]::Round([Math]::Max(14.0, [Math]::Min($maxLeft, $pt.X)))
+            }
+            $PopoverBorder.HorizontalAlignment = 'Left'
+            $PopoverBorder.Margin = [Windows.Thickness]::new($targetLeft, 38, 0, 0)
+
+            $scaleTrans = New-Object Windows.Media.ScaleTransform(1.0, 1.0)
+            $transTrans = New-Object Windows.Media.TranslateTransform(0.0, 0.0)
+            $tGroup = New-Object Windows.Media.TransformGroup
+            [void]$tGroup.Children.Add($scaleTrans)
+            [void]$tGroup.Children.Add($transTrans)
+            $PopoverBorder.RenderTransformOrigin = [Windows.Point]::new(0.15, 0.0)
+            $PopoverBorder.RenderTransform = $tGroup
+
+            if (-not $NoShow) {
+                $dur = [Windows.Duration]::new([TimeSpan]::FromMilliseconds(180))
+                $ease = New-Object Windows.Media.Animation.QuarticEase
+                $ease.EasingMode = [Windows.Media.Animation.EasingMode]::EaseOut
+                if ($WasAlreadyOpen -and [Math]::Abs($prevLeft - $targetLeft) -gt 2.0) {
+                    $deltaX = [Math]::Max(-120.0, [Math]::Min(120.0, $prevLeft - $targetLeft))
+                    $animX = New-Object Windows.Media.Animation.DoubleAnimation($deltaX, 0.0, $dur)
+                    $animX.EasingFunction = $ease
+                    $transTrans.BeginAnimation([Windows.Media.TranslateTransform]::XProperty, $animX)
+                } else {
+                    $animOp = New-Object Windows.Media.Animation.DoubleAnimation(0.0, 1.0, $dur)
+                    $animOp.EasingFunction = $ease
+                    $PopoverBorder.BeginAnimation([Windows.UIElement]::OpacityProperty, $animOp)
+                    $animY = New-Object Windows.Media.Animation.DoubleAnimation(-7.0, 0.0, $dur)
+                    $animY.EasingFunction = $ease
+                    $transTrans.BeginAnimation([Windows.Media.TranslateTransform]::YProperty, $animY)
+                    $animSX = New-Object Windows.Media.Animation.DoubleAnimation(0.975, 1.0, $dur)
+                    $animSX.EasingFunction = $ease
+                    $scaleTrans.BeginAnimation([Windows.Media.ScaleTransform]::ScaleXProperty, $animSX)
+                    $animSY = New-Object Windows.Media.Animation.DoubleAnimation(0.975, 1.0, $dur)
+                    $animSY.EasingFunction = $ease
+                    $scaleTrans.BeginAnimation([Windows.Media.ScaleTransform]::ScaleYProperty, $animSY)
+                }
+            } else {
+                $PopoverBorder.Opacity = 1.0
+            }
+        }
+    } catch { }
+}
+
+function Close-AllTopPopovers {
+    $script:popoverOpen = $false
+    $script:addPlatformPickerOpen = $false
+    $script:globalSettingsOpen = $false
+    $script:popoverExpandedProfileId = ''
+    $script:popoverEditMode = $false
+    if ($script:controls.AddPlatformPanelBorder) { $script:controls.AddPlatformPanelBorder.Visibility = 'Collapsed' }
+    if ($script:controls.KeyPopoverBorder) { $script:controls.KeyPopoverBorder.Visibility = 'Collapsed' }
+    if ($script:controls.GlobalSettingsPopoverBorder) { $script:controls.GlobalSettingsPopoverBorder.Visibility = 'Collapsed' }
+    if ($script:activeTab -eq 'Config') {
+        Select-WindowTab 'Live'
+    }
+}
 
 function Select-WindowTab([string]$TabName) {
     $script:activeTab = if ($TabName -eq 'Config') { 'Config' } else { 'Live' }
     if ($script:activeTab -eq 'Live') {
         $script:dirty = $false
         $script:popoverOpen = $false
+        $script:addPlatformPickerOpen = $false
         $script:popoverEditMode = $false
         $script:popoverExpandedProfileId = ''
         $script:controls.KeyPopoverBorder.Visibility = 'Collapsed'
@@ -1487,14 +1572,15 @@ function Select-WindowTab([string]$TabName) {
         $script:controls.TabConfigButton.Foreground = ConvertTo-Brush '#71717A'
     } else {
         $script:globalSettingsOpen = $false
+        $script:addPlatformPickerOpen = $false
         if ($script:controls.GlobalSettingsPopoverBorder) { $script:controls.GlobalSettingsPopoverBorder.Visibility = 'Collapsed' }
+        $wasOpen = [bool]$script:popoverOpen
         $script:popoverOpen = $true
         $script:popoverEditMode = $true
         if (-not $script:popoverExpandedProfileId) {
             $script:popoverExpandedProfileId = if ($script:viewingProfileId) { $script:viewingProfileId } else { 'prof_primary' }
         }
         $script:controls.KeyPopoverBorder.Visibility = 'Visible'
-        Start-SmoothEnterAnimation $script:controls.KeyPopoverBorder -FromY -6 -DurationMs 160
         $script:controls.LiveTabPanel.Visibility = 'Visible'
         if ($script:controls.PopoverDetailCardBorder) { $script:controls.PopoverDetailCardBorder.Visibility = 'Collapsed' }
         $script:controls.FormScroll.Visibility = 'Visible'
@@ -1504,6 +1590,12 @@ function Select-WindowTab([string]$TabName) {
         $script:controls.TabLiveButton.BorderBrush = ConvertTo-Brush 'Transparent'
         $script:controls.TabLiveButton.Foreground = ConvertTo-Brush '#71717A'
         Refresh-ProfilePopoverState
+        $trig = if ($script:activeCapsulePlatform -and $script:activeCapsulePlatform -ne 'openai' -and $script:capsuleSegmentButtons[$script:activeCapsulePlatform]) {
+            $script:capsuleSegmentButtons[$script:activeCapsulePlatform]
+        } else {
+            $script:controls.ConnIconBadgeButton
+        }
+        Sync-PopoverAnchorAndAnimate -PopoverBorder $script:controls.KeyPopoverBorder -TriggerElement $trig -WasAlreadyOpen $wasOpen
     }
 }
 
@@ -1511,6 +1603,7 @@ function Toggle-KeyPopover {
     $script:popoverOpen = -not $script:popoverOpen
     if ($script:popoverOpen) {
         $script:globalSettingsOpen = $false
+        $script:addPlatformPickerOpen = $false
         if ($script:controls.GlobalSettingsPopoverBorder) { $script:controls.GlobalSettingsPopoverBorder.Visibility = 'Collapsed' }
         $script:popoverEditMode = $false
         $script:popoverExpandedProfileId = ''
@@ -1519,15 +1612,15 @@ function Toggle-KeyPopover {
         $script:controls.FormScroll.Visibility = 'Collapsed'
         $script:controls.PopoverViewPanel.Visibility = 'Visible'
         $script:controls.KeyPopoverBorder.Visibility = 'Visible'
-        Start-SmoothEnterAnimation $script:controls.KeyPopoverBorder -FromY -6 -DurationMs 160
         Refresh-ProfilePopoverState
-    } else {
-        $script:popoverExpandedProfileId = ''
-        $script:popoverEditMode = $false
-        $script:controls.KeyPopoverBorder.Visibility = 'Collapsed'
-        if ($script:activeTab -eq 'Config') {
-            Select-WindowTab 'Live'
+        $trig = if ($script:activeCapsulePlatform -and $script:activeCapsulePlatform -ne 'openai' -and $script:capsuleSegmentButtons[$script:activeCapsulePlatform]) {
+            $script:capsuleSegmentButtons[$script:activeCapsulePlatform]
+        } else {
+            $script:controls.ConnIconBadgeButton
         }
+        Sync-PopoverAnchorAndAnimate -PopoverBorder $script:controls.KeyPopoverBorder -TriggerElement $trig -WasAlreadyOpen $false
+    } else {
+        Close-AllTopPopovers
     }
 }
 
@@ -1535,14 +1628,15 @@ function Toggle-GlobalSettingsPopover {
     $script:globalSettingsOpen = -not $script:globalSettingsOpen
     if ($script:globalSettingsOpen) {
         $script:popoverOpen = $false
+        $script:addPlatformPickerOpen = $false
         $script:popoverExpandedProfileId = ''
         $script:popoverEditMode = $false
         if ($script:controls.KeyPopoverBorder) { $script:controls.KeyPopoverBorder.Visibility = 'Collapsed' }
         if ($script:controls.GlobalSettingsPopoverBorder) {
             $script:controls.GlobalSettingsPopoverBorder.Visibility = 'Visible'
-            Start-SmoothEnterAnimation $script:controls.GlobalSettingsPopoverBorder -FromY -6 -DurationMs 160
         }
         Refresh-ProfilePopoverState
+        Sync-PopoverAnchorAndAnimate -PopoverBorder $script:controls.GlobalSettingsPopoverBorder -TriggerElement $script:controls.GlobalSettingsButton -WasAlreadyOpen $false
     } else {
         if ($script:controls.GlobalSettingsPopoverBorder) {
             $script:controls.GlobalSettingsPopoverBorder.Visibility = 'Collapsed'
@@ -1598,6 +1692,8 @@ function Get-CapsulePlatformMeta([string]$Platform = 'openai') {
         'claude' {
             return [pscustomobject]@{
                 Code = 'claude'; Title = 'Claude'; Kind = 'apikey'
+                DefaultUrl = 'https://api.anthropic.com'
+                PurposeDesc = 'Anthropic 官方密钥与自定义接口 · 供本地 Claude CLI 智能体使用'
                 SecondLabel = 'Base URL / 接入点'; KeyLabel = 'Anthropic API Key'
                 ApiKeysUrl = 'https://console.anthropic.com/settings/keys'
                 PlatText = '网页端 Connectors ↗'; PlatUrl = 'https://claude.ai/settings/connectors'
@@ -1606,6 +1702,8 @@ function Get-CapsulePlatformMeta([string]$Platform = 'openai') {
         'gemini' {
             return [pscustomobject]@{
                 Code = 'gemini'; Title = 'Gemini'; Kind = 'apikey'
+                DefaultUrl = 'https://generativelanguage.googleapis.com'
+                PurposeDesc = 'Google AI Studio 密钥与接口 · 供本地工具与多模态脚本调用'
                 SecondLabel = 'Base URL / 接入点'; KeyLabel = 'Gemini API Key'
                 ApiKeysUrl = 'https://aistudio.google.com/app/apikey'
                 PlatText = '打开 Google AI Studio ↗'; PlatUrl = 'https://aistudio.google.com/'
@@ -1614,6 +1712,8 @@ function Get-CapsulePlatformMeta([string]$Platform = 'openai') {
         'deepseek' {
             return [pscustomobject]@{
                 Code = 'deepseek'; Title = 'DeepSeek'; Kind = 'apikey'
+                DefaultUrl = 'https://api.deepseek.com'
+                PurposeDesc = 'DeepSeek 开放平台密钥与接口 · 供本地推理与编码工具调用'
                 SecondLabel = 'Base URL / 接入点'; KeyLabel = 'DeepSeek API Key'
                 ApiKeysUrl = 'https://platform.deepseek.com/api_keys'
                 PlatText = '开放平台文档 ↗'; PlatUrl = 'https://api-docs.deepseek.com/'
@@ -1622,6 +1722,8 @@ function Get-CapsulePlatformMeta([string]$Platform = 'openai') {
         'opencode' {
             return [pscustomobject]@{
                 Code = 'opencode'; Title = 'OpenCode'; Kind = 'apikey'
+                DefaultUrl = 'https://api.opencode.ai/v1'
+                PurposeDesc = 'OpenCode 聚合接口与密钥 · 供本地 OpenCode CLI 智能体使用'
                 SecondLabel = 'Base URL / 接入点'; KeyLabel = 'OpenCode API Key'
                 ApiKeysUrl = 'https://opencode.ai/'
                 PlatText = 'OpenCode 官方文档 ↗'; PlatUrl = 'https://opencode.ai/docs'
@@ -1630,6 +1732,8 @@ function Get-CapsulePlatformMeta([string]$Platform = 'openai') {
         default {
             return [pscustomobject]@{
                 Code = 'openai'; Title = 'OpenAI'; Kind = 'tunnel'
+                DefaultUrl = 'https://api.openai.com'
+                PurposeDesc = 'MCP 反向隧道连接与 API Key · 供 ChatGPT 网页端操控本地电脑'
                 SecondLabel = '隧道编号或完整链接'; KeyLabel = 'OpenAI API Key'
                 ApiKeysUrl = 'https://platform.openai.com/settings/organization/api-keys'
                 PlatText = '打开 OpenAI 隧道设置 ↗'; PlatUrl = 'https://platform.openai.com/settings/organization/tunnels'
@@ -1638,8 +1742,13 @@ function Get-CapsulePlatformMeta([string]$Platform = 'openai') {
     }
 }
 
-function Select-CapsulePlatform([string]$Platform = 'openai') {
+function Select-CapsulePlatform([string]$Platform = 'openai', [Windows.FrameworkElement]$TriggerButton = $null) {
     $p = if ($Platform) { $Platform.Trim().ToLowerInvariant() } else { 'openai' }
+    if ($script:popoverOpen -and (-not $script:addPlatformPickerOpen) -and $script:activeCapsulePlatform -eq $p) {
+        Close-AllTopPopovers
+        return
+    }
+    $wasOpen = [bool]$script:popoverOpen
     $script:activeCapsulePlatform = $p
     $script:addPlatformPickerOpen = $false
     if ($script:controls.AddPlatformPanelBorder) {
@@ -1663,9 +1772,18 @@ function Select-CapsulePlatform([string]$Platform = 'openai') {
     $script:popoverOpen = $true
     if ($script:controls.KeyPopoverBorder) {
         $script:controls.KeyPopoverBorder.Visibility = 'Visible'
-        Start-SmoothEnterAnimation $script:controls.KeyPopoverBorder -FromY -6 -DurationMs 160
     }
     Refresh-ProfilePopoverState
+    $resolvedTrigger = if ($TriggerButton) {
+        $TriggerButton
+    } elseif ($p -eq 'openai') {
+        $script:controls.ConnIconBadgeButton
+    } elseif ($script:capsuleSegmentButtons[$p]) {
+        $script:capsuleSegmentButtons[$p]
+    } else {
+        $script:controls.ConnIconBadgeButton
+    }
+    Sync-PopoverAnchorAndAnimate -PopoverBorder $script:controls.KeyPopoverBorder -TriggerElement $resolvedTrigger -WasAlreadyOpen $wasOpen
 }
 
 function Toggle-AddPlatformPopover {
@@ -1674,12 +1792,10 @@ function Toggle-AddPlatformPopover {
         $script:controls.GlobalSettingsPopoverBorder.Visibility = 'Collapsed'
     }
     if ($script:popoverOpen -and $script:addPlatformPickerOpen) {
-        $script:addPlatformPickerOpen = $false
-        $script:popoverOpen = $false
-        if ($script:controls.AddPlatformPanelBorder) { $script:controls.AddPlatformPanelBorder.Visibility = 'Collapsed' }
-        if ($script:controls.KeyPopoverBorder) { $script:controls.KeyPopoverBorder.Visibility = 'Collapsed' }
+        Close-AllTopPopovers
         return
     }
+    $wasOpen = [bool]$script:popoverOpen
     $script:popoverOpen = $true
     $script:addPlatformPickerOpen = $true
     $script:popoverEditMode = $false
@@ -1687,9 +1803,9 @@ function Toggle-AddPlatformPopover {
     if ($script:controls.FormScroll) { $script:controls.FormScroll.Visibility = 'Collapsed' }
     if ($script:controls.KeyPopoverBorder) {
         $script:controls.KeyPopoverBorder.Visibility = 'Visible'
-        Start-SmoothEnterAnimation $script:controls.KeyPopoverBorder -FromY -6 -DurationMs 160
     }
     Refresh-ProfilePopoverState
+    Sync-PopoverAnchorAndAnimate -PopoverBorder $script:controls.KeyPopoverBorder -TriggerElement $script:controls.AddPlatformCellButton -WasAlreadyOpen $wasOpen
 }
 
 function Invoke-SelectOrAddCapsulePlatform([string]$Platform) {
@@ -1750,6 +1866,7 @@ function Refresh-ProfilePopoverState {
 
     if ($script:controls.CapsuleExtraSegmentsPanel) {
         $script:controls.CapsuleExtraSegmentsPanel.Children.Clear()
+        $script:capsuleSegmentButtons = @{}
         foreach ($ep in @($enabledPlats | Where-Object { $_ -ne 'openai' })) {
             $div = New-Object Windows.Controls.Border
             $div.Width = 1
@@ -1790,8 +1907,9 @@ function Refresh-ProfilePopoverState {
             $segBtn.Content = $segStack
             $segBtn.Add_Click({
                 param($s, $e)
-                if ($s.Tag) { Select-CapsulePlatform ([string]$s.Tag) }
+                if ($s.Tag) { Select-CapsulePlatform ([string]$s.Tag) $s }
             })
+            $script:capsuleSegmentButtons[$ep] = $segBtn
             [void]$script:controls.CapsuleExtraSegmentsPanel.Children.Add($segBtn)
         }
     }
@@ -1804,28 +1922,37 @@ function Refresh-ProfilePopoverState {
             $isAdded = ($enabledPlats -contains $presetCode)
             $pBtn = New-Object Windows.Controls.Button
             $pBtn.HorizontalContentAlignment = 'Stretch'
-            $pBtn.Padding = [Windows.Thickness]::new(10, 5, 10, 5)
-            $pBtn.MinHeight = 28
-            $pBtn.Margin = [Windows.Thickness]::new(0, 0, 0, 4)
+            $pBtn.Padding = [Windows.Thickness]::new(11, 7, 11, 7)
+            $pBtn.MinHeight = 42
+            $pBtn.Margin = [Windows.Thickness]::new(0, 0, 0, 5)
             $pBtn.Background = ConvertTo-Brush '#FFFFFF'
-            $pBtn.BorderBrush = ConvertTo-Brush $(if ($curPlat -eq $presetCode) { '#60A5FA' } else { '#E4E4E7' })
+            $pBtn.BorderBrush = ConvertTo-Brush $(if ($isAdded) { '#BBF7D0' } else { '#E4E4E7' })
             $pBtn.BorderThickness = [Windows.Thickness]::new(1)
             $pBtn.Tag = $presetCode
             $pGrid = New-Object Windows.Controls.Grid
             $pc0 = New-Object Windows.Controls.ColumnDefinition; $pc0.Width = [Windows.GridLength]::new(1, [Windows.GridUnitType]::Star)
             $pc1 = New-Object Windows.Controls.ColumnDefinition; $pc1.Width = [Windows.GridLength]::Auto
             [void]$pGrid.ColumnDefinitions.Add($pc0); [void]$pGrid.ColumnDefinitions.Add($pc1)
+            $leftStack = New-Object Windows.Controls.StackPanel
+            $leftStack.VerticalAlignment = 'Center'
             $pNameTxt = New-Object Windows.Controls.TextBlock
             $pNameTxt.Text = $pm.Title
-            $pNameTxt.FontSize = 12
+            $pNameTxt.FontSize = 12.5
             $pNameTxt.FontWeight = 'SemiBold'
             $pNameTxt.Foreground = ConvertTo-Brush '#18181B'
-            $pNameTxt.VerticalAlignment = 'Center'
-            [Windows.Controls.Grid]::SetColumn($pNameTxt, 0)
-            [void]$pGrid.Children.Add($pNameTxt)
+            [void]$leftStack.Children.Add($pNameTxt)
+            $pDescTxt = New-Object Windows.Controls.TextBlock
+            $pDescTxt.Text = $pm.PurposeDesc
+            $pDescTxt.FontSize = 10.5
+            $pDescTxt.Foreground = ConvertTo-Brush '#71717A'
+            $pDescTxt.Margin = [Windows.Thickness]::new(0, 2, 8, 0)
+            [void]$leftStack.Children.Add($pDescTxt)
+            [Windows.Controls.Grid]::SetColumn($leftStack, 0)
+            [void]$pGrid.Children.Add($leftStack)
             $pRightTxt = New-Object Windows.Controls.TextBlock
-            $pRightTxt.Text = $(if ($isAdded) { '已添加' } else { '+ 添加分栏' })
-            $pRightTxt.FontSize = 11
+            $pRightTxt.Text = $(if ($isAdded) { '已添加' } else { '+ 添加' })
+            $pRightTxt.FontSize = 11.5
+            $pRightTxt.FontWeight = 'SemiBold'
             $pRightTxt.Foreground = ConvertTo-Brush $(if ($isAdded) { '#16A34A' } else { '#2563EB' })
             $pRightTxt.VerticalAlignment = 'Center'
             [Windows.Controls.Grid]::SetColumn($pRightTxt, 1)
@@ -1839,15 +1966,31 @@ function Refresh-ProfilePopoverState {
         }
     }
 
-    if ($script:controls.PopoverHeaderTitle) {
-        $script:controls.PopoverHeaderTitle.Text = if ($curPlat -eq 'openai') {
-            "OpenAI 隧道配置 ($($platProfs.Count))"
-        } else {
-            "$($platMeta.Title) 接入配置 ($($platProfs.Count))"
+    if ($script:addPlatformPickerOpen) {
+        if ($script:controls.PopoverHeaderTitle) { $script:controls.PopoverHeaderTitle.Text = '添加平台隧道或密钥' }
+        if ($script:controls.RemoveCapsulePlatformButton) { $script:controls.RemoveCapsulePlatformButton.Visibility = 'Collapsed' }
+        if ($script:controls.AddProfileButton) { $script:controls.AddProfileButton.Visibility = 'Collapsed' }
+        if ($script:controls.TogglePopoverEditButton) { $script:controls.TogglePopoverEditButton.Visibility = 'Collapsed' }
+        if ($script:controls.ProfilesListScroll) { $script:controls.ProfilesListScroll.Visibility = 'Collapsed' }
+        if ($script:controls.FormScroll) { $script:controls.FormScroll.Visibility = 'Collapsed' }
+        if ($script:controls.PopoverFooterBorder) { $script:controls.PopoverFooterBorder.Visibility = 'Collapsed' }
+    } else {
+        if ($script:controls.PopoverHeaderTitle) {
+            $script:controls.PopoverHeaderTitle.Text = if ($curPlat -eq 'openai') {
+                "OpenAI 隧道配置 ($($platProfs.Count))"
+            } else {
+                "$($platMeta.Title) 接入配置 ($($platProfs.Count))"
+            }
         }
-    }
-    if ($script:controls.RemoveCapsulePlatformButton) {
-        $script:controls.RemoveCapsulePlatformButton.Visibility = $(if ($curPlat -eq 'openai') { 'Collapsed' } else { 'Visible' })
+        if ($script:controls.RemoveCapsulePlatformButton) {
+            $script:controls.RemoveCapsulePlatformButton.Visibility = $(if ($curPlat -eq 'openai') { 'Collapsed' } else { 'Visible' })
+        }
+        if ($script:controls.AddProfileButton) { $script:controls.AddProfileButton.Visibility = 'Visible' }
+        if ($script:controls.ProfilesListScroll) {
+            $script:controls.ProfilesListScroll.Visibility = 'Visible'
+            $script:controls.ProfilesListScroll.MaxHeight = if ($script:popoverEditMode) { 450 } else { 250 }
+        }
+        if ($script:controls.PopoverFooterBorder) { $script:controls.PopoverFooterBorder.Visibility = 'Visible' }
     }
     if ($script:controls.TunnelInputLabel) {
         $script:controls.TunnelInputLabel.Text = $platMeta.SecondLabel
@@ -1857,10 +2000,6 @@ function Refresh-ProfilePopoverState {
     }
     if ($script:controls.PlatformButton) {
         $script:controls.PlatformButton.Content = $platMeta.PlatText
-    }
-
-    if ($script:controls.ProfilesListScroll) {
-        $script:controls.ProfilesListScroll.MaxHeight = if ($script:popoverEditMode) { 450 } else { 250 }
     }
 
     # Detach FormScroll before rebuilding ProfilesListPanel so it can be embedded inline inside the expanded strip
@@ -1914,9 +2053,12 @@ function Refresh-ProfilePopoverState {
             $nameRow = New-Object Windows.Controls.StackPanel
             $nameRow.Orientation = 'Horizontal'
             $nameRow.VerticalAlignment = 'Center'
+            $isApiKeyProfReady = ($curPlat -ne 'openai') -and [bool]$prof.Enabled -and [bool]$prof.HasKey
             $dot = New-Object Windows.Shapes.Ellipse
             $dot.Width = 7; $dot.Height = 7
-            $dot.Fill = ConvertTo-Brush $(if ($isProfActive -and $tunRunning) { '#16A34A' } elseif ($isProfActive) { '#22C55E' } elseif ($isProfViewing) { '#2563EB' } else { '#A1A1AA' })
+            $dot.Fill = ConvertTo-Brush $(if ($curPlat -ne 'openai') {
+                if ($isApiKeyProfReady) { '#16A34A' } elseif ($isProfViewing) { '#2563EB' } else { '#A1A1AA' }
+            } elseif ($isProfActive -and $tunRunning) { '#16A34A' } elseif ($isProfActive) { '#22C55E' } elseif ($isProfViewing) { '#2563EB' } else { '#A1A1AA' })
             $dot.VerticalAlignment = 'Center'
             $dot.Margin = [Windows.Thickness]::new(0, 0, 7, 0)
             [void]$nameRow.Children.Add($dot)
@@ -1925,7 +2067,7 @@ function Refresh-ProfilePopoverState {
             $nTxt.Text = $prof.Name
             $nTxt.FontSize = 12.5
             $nTxt.FontWeight = 'SemiBold'
-            $nTxt.Foreground = ConvertTo-Brush $(if ($isProfActive) { '#14532D' } else { '#18181B' })
+            $nTxt.Foreground = ConvertTo-Brush $(if (($curPlat -eq 'openai' -and $isProfActive) -or $isApiKeyProfReady) { '#14532D' } else { '#18181B' })
             $nTxt.VerticalAlignment = 'Center'
             [void]$nameRow.Children.Add($nTxt)
             [Windows.Controls.Grid]::SetColumn($nameRow, 0)
@@ -1935,7 +2077,20 @@ function Refresh-ProfilePopoverState {
             $rightStack.Orientation = 'Horizontal'
             $rightStack.VerticalAlignment = 'Center'
 
-            if ($isProfActive) {
+            if ($curPlat -ne 'openai') {
+                $actTag = New-Object Windows.Controls.Border
+                $actTag.Background = ConvertTo-Brush $(if ($isApiKeyProfReady) { '#DCFCE7' } else { '#F4F4F5' })
+                $actTag.CornerRadius = [Windows.CornerRadius]::new(4)
+                $actTag.Padding = [Windows.Thickness]::new(6, 2, 6, 2)
+                $actTag.VerticalAlignment = 'Center'
+                $actTxt = New-Object Windows.Controls.TextBlock
+                $actTxt.Text = $(if ($isApiKeyProfReady) { '已启用' } else { '待配置密钥' })
+                $actTxt.FontSize = 10.5
+                $actTxt.FontWeight = 'SemiBold'
+                $actTxt.Foreground = ConvertTo-Brush $(if ($isApiKeyProfReady) { '#15803D' } else { '#71717A' })
+                $actTag.Child = $actTxt
+                [void]$rightStack.Children.Add($actTag)
+            } elseif ($isProfActive) {
                 $actTag = New-Object Windows.Controls.Border
                 $actTag.Background = ConvertTo-Brush '#DCFCE7'
                 $actTag.CornerRadius = [Windows.CornerRadius]::new(4)
@@ -1972,7 +2127,7 @@ function Refresh-ProfilePopoverState {
             $expandBtn.MinHeight = 20
             $expandBtn.Margin = [Windows.Thickness]::new(4, 0, 0, 0)
             $expandBtn.Foreground = ConvertTo-Brush $(if ($isProfActive) { '#15803D' } elseif ($isProfViewing) { '#2563EB' } else { '#71717A' })
-            $expandBtn.ToolTip = $(if ($isProfExpanded) { '收起编辑框' } else { '展开修改配置名称、隧道号与 API Key' })
+            $expandBtn.ToolTip = $(if ($isProfExpanded) { '收起编辑框' } else { '展开修改配置名称、接入点与 API Key' })
             $expandBtn.Tag = $prof.Id
             $expandBtn.Add_Click({
                 param($s, $e)
@@ -1985,14 +2140,22 @@ function Refresh-ProfilePopoverState {
             [void]$rGrid.Children.Add($rightStack)
             [void]$cardStack.Children.Add($rGrid)
 
-            # Line 2: Small Font Masked Tunnel ID + API Key + Inline Copy Links
-            $rawTid = [string]$prof.TunnelId
-            $shortTid = if ($rawTid.Length -gt 18) {
-                "$($rawTid.Substring(0, 11))...$($rawTid.Substring($rawTid.Length - 5))"
-            } elseif ($rawTid.Length -gt 0) {
-                $rawTid
+            # Line 2: Small Font Masked Endpoint/Tunnel ID + API Key + Inline Copy Links
+            $rawEndpointOrTid = if ($curPlat -ne 'openai') {
+                $(if ($prof.BaseUrl) { [string]$prof.BaseUrl } else { $platMeta.DefaultUrl })
             } else {
-                '未填写'
+                [string]$prof.TunnelId
+            }
+            $shortEndpointOrTid = if ($curPlat -ne 'openai') {
+                if ($rawEndpointOrTid.Length -gt 28) { "$($rawEndpointOrTid.Substring(0, 25))..." } elseif ($rawEndpointOrTid) { $rawEndpointOrTid } else { '默认官方接口' }
+            } else {
+                if ($rawEndpointOrTid.Length -gt 18) {
+                    "$($rawEndpointOrTid.Substring(0, 11))...$($rawEndpointOrTid.Substring($rawEndpointOrTid.Length - 5))"
+                } elseif ($rawEndpointOrTid.Length -gt 0) {
+                    $rawEndpointOrTid
+                } else {
+                    '未填写'
+                }
             }
             $rawPlain = [string]$prof.PlainKey
             $shortKey = if ($rawPlain.Length -ge 12) {
@@ -2007,7 +2170,7 @@ function Refresh-ProfilePopoverState {
             $subRow.Margin = [Windows.Thickness]::new(14, 3, 0, 0)
 
             $tunLbl = New-Object Windows.Controls.TextBlock
-            $tunLbl.Text = "隧道: $shortTid "
+            $tunLbl.Text = $(if ($curPlat -ne 'openai') { "接口: $shortEndpointOrTid " } else { "隧道: $shortEndpointOrTid " })
             $tunLbl.FontSize = 10.5
             $tunLbl.Foreground = ConvertTo-Brush '#71717A'
             $tunLbl.FontFamily = New-Object Windows.Media.FontFamily('Consolas, Cascadia Mono, Microsoft YaHei UI')
@@ -2021,18 +2184,20 @@ function Refresh-ProfilePopoverState {
             $copyTunBtn.Padding = [Windows.Thickness]::new(2, 0, 2, 0)
             $copyTunBtn.MinHeight = 16
             $copyTunBtn.VerticalAlignment = 'Center'
-            $copyTunBtn.Tag = $rawTid
+            $copyTunBtn.Tag = [pscustomobject]@{ Val = $rawEndpointOrTid; IsTunnel = ($curPlat -eq 'openai') }
             $copyTunBtn.Add_Click({
                 param($s, $e)
                 $e.Handled = $true
-                $val = [string]$s.Tag
+                $tagObj = $s.Tag
+                $val = if ($tagObj) { [string]$tagObj.Val } else { '' }
+                $isTun = if ($tagObj) { [bool]$tagObj.IsTunnel } else { $true }
                 if ($val) {
                     try { [Windows.Clipboard]::SetText($val) } catch { }
                     $s.Content = '✓ 已复制'
                     $s.Foreground = ConvertTo-Brush '#16A34A'
-                    Show-QuickToast '已复制隧道编号到剪贴板'
+                    Show-QuickToast ($(if ($isTun) { '已复制隧道编号到剪贴板' } else { '已复制接口地址到剪贴板' }))
                 } else {
-                    Show-QuickToast '当前配置尚未填写隧道编号'
+                    Show-QuickToast ($(if ($isTun) { '当前配置尚未填写隧道编号' } else { '当前配置尚未填写接口地址' }))
                 }
             })
             [void]$subRow.Children.Add($copyTunBtn)
@@ -2092,12 +2257,13 @@ function Refresh-ProfilePopoverState {
         $script:controls.DeleteProfileButton.Visibility = 'Visible'
     }
 
-    # Bottom Start / Reconnect Button State
+    # Bottom Start / Reconnect / Test / Disable Button State
     if ($script:controls.QuickConnectButton) {
         if ($curPlat -ne 'openai') {
-            $script:controls.QuickConnectButton.Content = "✓ 启用此配置"
-            $script:controls.QuickConnectButton.Background = ConvertTo-Brush '#2563EB'
-            $script:controls.QuickConnectButton.BorderBrush = ConvertTo-Brush '#2563EB'
+            $testedOk = ($viewProf -and $script:lastTestedApiKeyProfileId -eq $viewProf.Id -and $viewProf.HasKey)
+            $script:controls.QuickConnectButton.Content = $(if ($testedOk) { '✓ 接口连通正常' } else { '✓ 测试连接' })
+            $script:controls.QuickConnectButton.Background = ConvertTo-Brush $(if ($testedOk) { '#16A34A' } else { '#2563EB' })
+            $script:controls.QuickConnectButton.BorderBrush = ConvertTo-Brush $(if ($testedOk) { '#16A34A' } else { '#2563EB' })
             $script:controls.QuickConnectButton.Foreground = ConvertTo-Brush '#FEFEFF'
         } elseif ($viewProf -and $activeProf -and $viewProf.Id -ne $activeProf.Id) {
             $script:controls.QuickConnectButton.Content = "▶ 启动此隧道"
@@ -2116,14 +2282,28 @@ function Refresh-ProfilePopoverState {
             $script:controls.QuickConnectButton.Foreground = ConvertTo-Brush '#2563EB'
         }
     }
+    if ($script:controls.DisconnectButton) {
+        if ($curPlat -ne 'openai') {
+            $script:controls.DisconnectButton.Visibility = 'Visible'
+            $script:controls.DisconnectButton.Content = $(if ($viewProf -and $viewProf.Enabled -and $viewProf.HasKey) { '停用' } else { '启用' })
+            $script:controls.DisconnectButton.IsEnabled = [bool]($viewProf -and $viewProf.HasKey)
+        } else {
+            $coreReady = ($script:display -and $script:display.Core -eq '已准备好')
+            $legacy = ($script:display -and $script:display.Tunnel -eq '旧脚本连接仍在运行')
+            $script:controls.DisconnectButton.Content = '断开隧道'
+            $script:controls.DisconnectButton.IsEnabled = [bool]($script:display -and $script:display.Running)
+            $script:controls.DisconnectButton.Visibility = $(if ($coreReady -and $legacy) { 'Collapsed' } else { 'Visible' })
+        }
+    }
 
     $isPrimaryViewing = ($curPlat -eq 'openai') -and ((-not $viewProf) -or ($viewProf.Id -eq 'prof_primary'))
     $plainKey = if ($viewProf -and $viewProf.PlainKey) { $viewProf.PlainKey } elseif ($isPrimaryViewing) { Get-SavedOpenAIKeyPlaintext $script:context } else { '' }
     $maskedKey = Format-MaskedApiKey $plainKey
     $script:controls.MaskedKeyText.Text = if ($script:keyMasked) { $maskedKey } elseif ($plainKey) { $plainKey } else { '尚未保存密钥（请点击编辑粘贴）' }
     $script:controls.ToggleKeyMaskButton.Content = if ($script:keyMasked) { '显示完整' } else { '隐藏明文' }
-    $tunText = if ($curPlat -ne 'openai') {
-        $(if ($viewProf -and $viewProf.BaseUrl) { [string]$viewProf.BaseUrl } else { '' })
+    # Note: CurrentTunnelIdText / TunnelInput retain their XAML contract names for test compatibility; local variable uses neutral endpointOrTunnelText
+    $endpointOrTunnelText = if ($curPlat -ne 'openai') {
+        $(if ($viewProf -and $viewProf.BaseUrl) { [string]$viewProf.BaseUrl } else { $platMeta.DefaultUrl })
     } elseif ($viewProf -and $viewProf.TunnelId) {
         $viewProf.TunnelId
     } elseif ($isPrimaryViewing -and $script:settings.tunnel_id) {
@@ -2131,7 +2311,7 @@ function Refresh-ProfilePopoverState {
     } else {
         '尚未配置隧道编号'
     }
-    $script:controls.CurrentTunnelIdText.Text = $tunText
+    $script:controls.CurrentTunnelIdText.Text = $endpointOrTunnelText
 
     if (-not $script:dirty -and $viewProf -and $script:controls.ProfileNameInput) {
         $prevInit = $script:initializing
@@ -2371,12 +2551,25 @@ function Invoke-DeleteCurrentProfile {
 
 function Invoke-PopoverQuickConnect {
     try {
-        if (-not $script:viewingProfileId) { $script:viewingProfileId = 'prof_primary' }
+        $curPlat = if ($script:activeCapsulePlatform) { $script:activeCapsulePlatform.Trim().ToLowerInvariant() } else { 'openai' }
+        if (-not $script:viewingProfileId) {
+            $script:viewingProfileId = $(if ($curPlat -eq 'openai') { 'prof_primary' } else { "prof_${curPlat}_default" })
+        }
         if ($script:controls.FormScroll.Visibility -eq 'Visible') {
             Save-Form
         }
         $script:popoverExpandedProfileId = ''
         $script:popoverEditMode = $false
+        if ($curPlat -ne 'openai') {
+            $selRes = Select-ConnectionProfile -Context $script:context -Settings $script:settings -ProfileId $script:viewingProfileId
+            $probeRes = Test-PlatformConnectionProfile -Context $script:context -Settings $script:settings -ProfileId $script:viewingProfileId
+            $script:lastTestedApiKeyProfileId = $script:viewingProfileId
+            Refresh-ProfilePopoverState
+            Update-SessionCards
+            Show-Feedback $probeRes.Message
+            Show-QuickToast $probeRes.Message
+            return
+        }
         $res = Select-ConnectionProfile -Context $script:context -Settings $script:settings -ProfileId $script:viewingProfileId -AutoReconnect:(-not $script:context.Isolated)
         $script:settings = $res.Settings
         $script:controls.TunnelInput.Text = $script:settings.tunnel_id
@@ -4796,26 +4989,54 @@ function Sync-ComposerModelAndEffortCombos($StateInfo, $AvailModels, [string]$Cu
         $profStateRef.EnabledPlatforms | Where-Object { $_ } | ForEach-Object { ([string]$_).Trim().ToLowerInvariant() }
     } else { @('openai') })
     if ($enabledPlats.Count -eq 0) { $enabledPlats = @('openai') }
-    $platsSig = (@($enabledPlats | ForEach-Object {
-        $pCode = $_
+    $hasLiveDisplay = ($null -ne $script:display -and $script:display.PSObject.Properties['Running'])
+    $tunOnlineNow = if ($StateInfo.PSObject.Properties['TunnelOnline'] -and $null -ne $StateInfo.TunnelOnline) {
+        [bool]$StateInfo.TunnelOnline
+    } elseif ($hasLiveDisplay) {
+        [bool]$script:display.Running
+    } else {
+        $true
+    }
+    $resolvePlatGroupSummary = {
+        param([string]$PlatCode)
+        $pTitle = switch ($PlatCode) {
+            'openai'   { 'OpenAI' }
+            'claude'   { 'Claude' }
+            'gemini'   { 'Gemini' }
+            'deepseek' { 'DeepSeek' }
+            'opencode' { 'OpenCode' }
+            default    { $PlatCode }
+        }
         $actP = $null
         if ($profStateRef -and $profStateRef.PSObject.Properties['Profiles'] -and $profStateRef.Profiles) {
             $actP = $profStateRef.Profiles | Where-Object {
                 $pl = if ($_.PSObject.Properties['Platform'] -and $_.Platform) { ([string]$_.Platform).ToLowerInvariant() } else { 'openai' }
-                $pl -eq $pCode -and ($_.PSObject.Properties['IsActive'] -and [bool]$_.IsActive)
+                $pl -eq $PlatCode -and ($_.PSObject.Properties['IsActive'] -and [bool]$_.IsActive)
             } | Select-Object -First 1
             if (-not $actP) {
                 $actP = $profStateRef.Profiles | Where-Object {
                     $pl = if ($_.PSObject.Properties['Platform'] -and $_.Platform) { ([string]$_.Platform).ToLowerInvariant() } else { 'openai' }
-                    $pl -eq $pCode
+                    $pl -eq $PlatCode
                 } | Select-Object -First 1
             }
         }
         $pName = if ($actP -and $actP.PSObject.Properties['Name'] -and $actP.Name) { [string]$actP.Name } else { '默认' }
         $pEn = if ($actP -and $actP.PSObject.Properties['Enabled']) { [bool]$actP.Enabled } else { $true }
         $pHk = if ($actP -and $actP.PSObject.Properties['HasKey']) { [bool]$actP.HasKey } else { $false }
-        "${pCode}:${pName}:${pEn}:${pHk}"
-    }) -join '|')
+        $pKind = if ($actP -and $actP.PSObject.Properties['Kind'] -and $actP.Kind) { [string]$actP.Kind } elseif ($PlatCode -eq 'openai') { 'tunnel' } else { 'apikey' }
+        $pTid = if ($actP -and $actP.PSObject.Properties['TunnelId']) { [string]$actP.TunnelId } else { '' }
+        $isReady = if ($pKind -eq 'tunnel') { $pEn -and $pHk -and [bool]$pTid -and $tunOnlineNow } else { $pEn -and $pHk }
+        $dotIcon = if ($isReady) { '🟢' } else { '⚪' }
+        return [pscustomobject]@{
+            Code = $PlatCode
+            Title = $pTitle
+            Name = $pName
+            Ready = $isReady
+            Dot = $dotIcon
+            Sig = "${PlatCode}:${pName}:${isReady}"
+        }
+    }
+    $platsSig = (@($enabledPlats | ForEach-Object { (& $resolvePlatGroupSummary $_).Sig }) -join '|')
     $isColdStartNoWebModel = ($modelsArr.Count -eq 0) -and [string]::IsNullOrWhiteSpace($WebModel) -and ([string]::IsNullOrWhiteSpace($CurModel) -or $CurModel -eq 'inherit') -and [string]::IsNullOrWhiteSpace($WebEffort)
     $catalogSig = "$modelSlugsSig||webM=$WebModel||webE=$WebEffort||curM=$CurModel||plats=$platsSig||cold=$isColdStartNoWebModel"
 
@@ -4955,36 +5176,9 @@ function Sync-ComposerModelAndEffortCombos($StateInfo, $AvailModels, [string]$Cu
 
         $buildPlatGroupHeader = {
             param([string]$PlatCode)
-            $pTitle = switch ($PlatCode) {
-                'openai'   { 'OpenAI' }
-                'claude'   { 'Claude' }
-                'gemini'   { 'Gemini' }
-                'deepseek' { 'DeepSeek' }
-                'opencode' { 'OpenCode' }
-                default    { $PlatCode }
-            }
-            $actP = $null
-            if ($profStateRef -and $profStateRef.PSObject.Properties['Profiles'] -and $profStateRef.Profiles) {
-                $actP = $profStateRef.Profiles | Where-Object {
-                    $pl = if ($_.PSObject.Properties['Platform'] -and $_.Platform) { ([string]$_.Platform).ToLowerInvariant() } else { 'openai' }
-                    $pl -eq $PlatCode -and ($_.PSObject.Properties['IsActive'] -and [bool]$_.IsActive)
-                } | Select-Object -First 1
-                if (-not $actP) {
-                    $actP = $profStateRef.Profiles | Where-Object {
-                        $pl = if ($_.PSObject.Properties['Platform'] -and $_.Platform) { ([string]$_.Platform).ToLowerInvariant() } else { 'openai' }
-                        $pl -eq $PlatCode
-                    } | Select-Object -First 1
-                }
-            }
-            $pName = if ($actP -and $actP.PSObject.Properties['Name'] -and $actP.Name) { [string]$actP.Name } else { '默认' }
-            $pEn = if ($actP -and $actP.PSObject.Properties['Enabled']) { [bool]$actP.Enabled } else { $true }
-            $pHk = if ($actP -and $actP.PSObject.Properties['HasKey']) { [bool]$actP.HasKey } else { $false }
-            $pKind = if ($actP -and $actP.PSObject.Properties['Kind'] -and $actP.Kind) { [string]$actP.Kind } elseif ($PlatCode -eq 'openai') { 'tunnel' } else { 'apikey' }
-            $pTid = if ($actP -and $actP.PSObject.Properties['TunnelId']) { [string]$actP.TunnelId } else { '' }
-            $isReady = if ($pKind -eq 'tunnel') { $pEn -and $pHk -and [bool]$pTid } else { $pEn -and $pHk }
-            $dotIcon = if ($isReady) { '🟢' } else { '⚪' }
+            $summary = & $resolvePlatGroupSummary $PlatCode
             $hdrItem = New-Object Windows.Controls.ComboBoxItem
-            $hdrItem.Content = "$dotIcon $pTitle · $pName"
+            $hdrItem.Content = "$($summary.Dot) $($summary.Title) · $($summary.Name)"
             $hdrItem.Tag = "__group_$PlatCode"
             $hdrItem.IsEnabled = $false
             return $hdrItem
@@ -5031,7 +5225,7 @@ function Sync-ComposerModelAndEffortCombos($StateInfo, $AvailModels, [string]$Cu
                 [void]$modelCombo.Items.Add((& $buildPlatGroupHeader $pCode))
                 $pDefItem = New-Object Windows.Controls.ComboBoxItem
                 $pDefItem.Content = $(if ($IsNarrow) { '🤖 默认' } else { "🤖 默认 ($webModelDisplay)" })
-                $pDefItem.Tag = "inherit:$pCode"
+                $pDefItem.Tag = 'inherit'
                 [void]$modelCombo.Items.Add($pDefItem)
             }
         }
@@ -6910,11 +7104,7 @@ if ($script:controls.ProfileNameInput) {
     $script:controls.ProfileNameInput.Add_TextChanged({ if (-not $script:initializing) { $script:dirty = $true } })
 }
 $script:controls.ConnIconBadgeButton.Add_Click({
-    if ($script:popoverOpen -and $script:activeCapsulePlatform -eq 'openai' -and -not $script:addPlatformPickerOpen) {
-        Toggle-KeyPopover
-    } else {
-        Select-CapsulePlatform 'openai'
-    }
+    Select-CapsulePlatform 'openai' $script:controls.ConnIconBadgeButton
 })
 if ($script:controls.AddPlatformCellButton) {
     $script:controls.AddPlatformCellButton.Add_Click({ Toggle-AddPlatformPopover })
@@ -6927,17 +7117,26 @@ if ($script:controls.GlobalSettingsButton) {
 }
 if ($script:controls.CloseGlobalSettingsButton) {
     $script:controls.CloseGlobalSettingsButton.Add_Click({
-        $script:globalSettingsOpen = $false
-        if ($script:controls.GlobalSettingsPopoverBorder) {
-            $script:controls.GlobalSettingsPopoverBorder.Visibility = 'Collapsed'
-        }
+        Close-AllTopPopovers
+    })
+}
+if ($script:controls.DismissKeyPopoverButton) {
+    $script:controls.DismissKeyPopoverButton.Add_Click({
+        Close-AllTopPopovers
     })
 }
 $script:controls.ClosePopoverButton.Add_Click({
-    $script:popoverOpen = $false
-    $script:controls.KeyPopoverBorder.Visibility = 'Collapsed'
-    if ($script:activeTab -eq 'Config') { Select-WindowTab 'Live' }
+    Close-AllTopPopovers
 })
+foreach ($outsideSurface in @($script:controls.WorkspaceOuterBorder, $script:controls.LeftTaskRail)) {
+    if ($outsideSurface) {
+        $outsideSurface.Add_PreviewMouseLeftButtonDown({
+            if (($script:popoverOpen -or $script:globalSettingsOpen) -and (-not (Test-HasUnsavedFormEdits))) {
+                Close-AllTopPopovers
+            }
+        })
+    }
+}
 $script:controls.TogglePopoverEditButton.Add_Click({
     if ($script:activeTab -eq 'Config') { Select-WindowTab 'Live' } else { Select-WindowTab 'Config' }
 })
@@ -7178,7 +7377,29 @@ $script:controls.ConnectButton.Add_Click({ Invoke-FormAction {
     Show-Feedback (Start-ConnectionTunnel $script:context $script:settings)
     Refresh-FormState
 } })
-$script:controls.DisconnectButton.Add_Click({ Invoke-FormAction { Show-Feedback (Stop-ConnectionTunnel $script:context $script:settings); Refresh-FormState } })
+$script:controls.DisconnectButton.Add_Click({
+    Invoke-FormAction {
+        $curPlat = if ($script:activeCapsulePlatform) { $script:activeCapsulePlatform.Trim().ToLowerInvariant() } else { 'openai' }
+        if ($curPlat -ne 'openai') {
+            $viewProf = $script:profilesState.Profiles | Where-Object { $_.Id -eq $script:viewingProfileId } | Select-Object -First 1
+            if ($viewProf) {
+                $nextEn = -not [bool]$viewProf.Enabled
+                $script:profilesState = Set-ConnectionProfileEnabled -Context $script:context -Settings $script:settings -ProfileId $viewProf.Id -Enabled $nextEn
+                if (-not $nextEn -and $script:lastTestedApiKeyProfileId -eq $viewProf.Id) {
+                    $script:lastTestedApiKeyProfileId = ''
+                }
+                Refresh-ProfilePopoverState
+                Update-SessionCards
+                $msg = if ($nextEn) { "已启用「$($viewProf.Name)」配置。" } else { "已停用「$($viewProf.Name)」配置。" }
+                Show-Feedback $msg
+                Show-QuickToast $msg
+            }
+            return
+        }
+        Show-Feedback (Stop-ConnectionTunnel $script:context $script:settings)
+        Refresh-FormState
+    }
+})
 $script:controls.OfficialButton.Add_Click({ Invoke-FormAction { Open-OfficialPanel } })
 $script:controls.PlatformButton.Add_Click({
     $pm = Get-CapsulePlatformMeta $script:activeCapsulePlatform
