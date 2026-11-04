@@ -424,6 +424,57 @@ try {
 
     Assert ($resetLayout.WinWidth -eq 1180 -and $resetLayout.RailCollapsed -eq $false -and $resetLayout.Panes.Count -eq 1) 'Reset-WindowLayoutMemory restores default layout'
 
+    # ---- Spec Module 1 (Hazards 1-5): ConnectionManager.psm1 Guards & Multi-Platform Capsule CRUD ----
+    $guardBinDir = Join-Path $testRoot 'guard-cli-bin'
+    [IO.Directory]::CreateDirectory($guardBinDir) | Out-Null
+    $fakeCodexExe = Join-Path $guardBinDir 'codex.exe'
+    $fakeClaudeCmd = Join-Path $guardBinDir 'claude.cmd'
+    [IO.File]::WriteAllText($fakeCodexExe, 'fake', [Text.Encoding]::ASCII)
+    [IO.File]::WriteAllText($fakeClaudeCmd, '@echo off', [Text.Encoding]::ASCII)
+    $addCodexRes = Add-CustomCliAgent -Context $context -CommandPath $fakeCodexExe -DisplayName 'Custom Codex'
+    $addClaudeRes = Add-CustomCliAgent -Context $context -CommandPath $fakeClaudeCmd -DisplayName 'Custom Claude'
+    Assert ($addCodexRes.AddedAgent.id -eq 'custom-codex' -and $addCodexRes.AddedAgent.kind -eq 'custom') 'Hazard 1: Add-CustomCliAgent prefixes reserved codex id to custom-codex with kind=custom'
+    Assert ($addClaudeRes.AddedAgent.id -eq 'custom-claude' -and $addClaudeRes.AddedAgent.kind -eq 'custom') 'Hazard 1: Add-CustomCliAgent prefixes reserved claude id to custom-claude with kind=custom'
+
+    $coreGuardAst = (Get-Command Start-OfficialCoreIfNeeded).ScriptBlock.Ast.Extent.Text
+    Assert ($coreGuardAst -match '\[Math\]::Min\(8,\s*\[Math\]::Max\(1,' -and $coreGuardAst -match 'LastCoreStartError') 'Hazard 1 & 2: Start-OfficialCoreIfNeeded clamps ACP concurrency to 1..8 and captures core.err.log into LastCoreStartError'
+
+    # Hazard 4: Non-destructive merge in Save-ConnectionSettings
+    $diskPreMerge = [IO.File]::ReadAllText($context.SettingsPath, [Text.Encoding]::UTF8) | ConvertFrom-Json
+    $diskPreMerge | Add-Member -NotePropertyName 'workspace_roots' -NotePropertyValue @('D:\ws_keep') -Force
+    $diskPreMerge | Add-Member -NotePropertyName 'enabled_platforms' -NotePropertyValue @('openai', 'claude') -Force
+    $diskPreMerge | Add-Member -NotePropertyName 'custom_extension_field' -NotePropertyValue 'keep_value_123' -Force
+    [IO.File]::WriteAllText($context.SettingsPath, ($diskPreMerge | ConvertTo-Json -Depth 6), (New-Object Text.UTF8Encoding($false)))
+    $bareSettings = Get-DefaultConnectionSettings $context
+    $bareSettings.tunnel_id = $id
+    $bareSettings.runtime_root = $fixture
+    Save-ConnectionSettings $context $bareSettings '' ''
+    $diskPostMerge = [IO.File]::ReadAllText($context.SettingsPath, [Text.Encoding]::UTF8) | ConvertFrom-Json
+    Assert ($diskPostMerge.custom_extension_field -eq 'keep_value_123' -and @($diskPostMerge.workspace_roots)[0] -eq 'D:\ws_keep' -and (@($diskPostMerge.enabled_platforms) -contains 'claude')) 'Hazard 4: Save-ConnectionSettings performs non-destructive merge preserving extension fields in settings.json'
+
+    # Hazard 3: Multi-Platform Capsule CRUD & tunnel/apikey isolation
+    $capCtx = New-ConnectionContext -DataRoot (Join-Path $testRoot 'capsule-data') -Isolated
+    $capSettings = Get-DefaultConnectionSettings $capCtx
+    $capSettings.tunnel_id = $id
+    $capSettings.runtime_root = $fixture
+    Save-ConnectionSettings $capCtx $capSettings $fakeKey $fakeToken
+    $openaiKeyBytesBefore = [IO.File]::ReadAllText($capCtx.KeyPath)
+    $capState1 = Add-CapsulePlatform -Context $capCtx -Platform 'claude'
+    $claudeDefProf = $capState1.Profiles | Where-Object { $_.Platform -eq 'claude' } | Select-Object -First 1
+    Assert (($capState1.EnabledPlatforms -contains 'openai') -and ($capState1.EnabledPlatforms -contains 'claude') -and $null -ne $claudeDefProf -and $claudeDefProf.Name -eq '默认' -and $claudeDefProf.Kind -eq 'apikey' -and $claudeDefProf.TunnelId -eq '' -and $claudeDefProf.HasKey -eq $false -and $claudeDefProf.Enabled -eq $false) 'Hazard 3: Add-CapsulePlatform adds claude to EnabledPlatforms with a clean disabled default apikey profile'
+    $claudeKey = 'sk-ant-api03-offline-test-key-123456'
+    $capState2 = Save-ConnectionProfile -Context $capCtx -Settings $capSettings -ProfileId $claudeDefProf.Id -Name 'Claude 个人 Pro' -TunnelId '' -ApiKey $claudeKey -Platform 'claude' -Kind 'apikey' -BaseUrl 'https://api.anthropic.com' -SetActive
+    $selClaudeRes = Select-ConnectionProfile -Context $capCtx -Settings $capSettings -ProfileId $claudeDefProf.Id
+    $capSettingsAfter = Read-ConnectionSettings $capCtx
+    $openaiKeyBytesAfter = [IO.File]::ReadAllText($capCtx.KeyPath)
+    Assert ($capState2.ActiveProfileId -eq 'prof_primary' -and $selClaudeRes.ProfilesState.ActiveProfileByPlatform['claude'] -eq $claudeDefProf.Id -and $capSettingsAfter.tunnel_id -eq $id -and $openaiKeyBytesAfter -eq $openaiKeyBytesBefore) 'Hazard 3: Saving and selecting an apikey profile never overwrites OpenAI tunnel_id or openai-key.dpapi'
+    $capState3 = Remove-CapsulePlatform -Context $capCtx -Platform 'claude'
+    Assert ($capState3.EnabledPlatforms -notcontains 'claude' -and ($capState3.EnabledPlatforms -contains 'openai')) 'Hazard 3: Remove-CapsulePlatform removes claude from EnabledPlatforms while keeping openai'
+
+    # Hazard 5: Get-WebBridgeState cold start never borrows ~/.codex models
+    $wbColdState = Get-WebBridgeState $capCtx
+    Assert (@($wbColdState.available_models).Count -eq 0 -and $null -ne (Get-Command Get-CodexCachedAvailableModels -ErrorAction SilentlyContinue)) 'Hazard 5: Get-WebBridgeState returns empty available_models on cold start while preserving Get-CodexCachedAvailableModels helper'
+
 
 
     # Load the actual WPF form in an isolated context and exercise its real P3 UI handlers.
@@ -861,6 +912,20 @@ try {
     Invoke-DeleteCurrentProfile
     Assert (@($script:profilesState.Profiles).Count -eq 1 -and $script:controls.FormScroll.Visibility -eq 'Collapsed') 'Clicking 删除此配置 removes the profile cleanly'
     Select-WindowTab 'Live'
+
+    # ---- Spec Module 2 (Slice C): Top Bar 2-Group Pure Icons, Segmented Capsule, Popover Footer Order & + Platform Panel ----
+    Assert ($script:controls.TunnelCapsuleBorder -is [Windows.Controls.Border] -and $script:controls.CapsuleSegmentsPanel -is [Windows.Controls.StackPanel] -and $script:controls.AddPlatformCellButton -is [Windows.Controls.Button]) 'Top bar renders segmented TunnelCapsuleBorder with CapsuleSegmentsPanel and AddPlatformCellButton'
+    Assert ([Windows.Controls.Grid]::GetColumn($script:controls.ThemeToggleButton.Parent) -eq 0 -and [Windows.Controls.Grid]::GetColumn($script:controls.GlobalSettingsButton.Parent) -eq 0) 'ThemeToggleButton and GlobalSettingsButton are placed in the top-left 2-group icon bar'
+    $footerLinksStack = $script:controls.ApiKeysButton.Parent
+    Assert ($footerLinksStack.Children.IndexOf($script:controls.ApiKeysButton) -eq 0 -and $footerLinksStack.Children.IndexOf($script:controls.PlatformButton) -eq 1) 'KeyPopoverBorder footer places ApiKeysButton on the left and PlatformButton on the right'
+    $script:controls.AddPlatformCellButton.RaiseEvent((New-Object Windows.RoutedEventArgs([Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+    Assert ($script:controls.KeyPopoverBorder.Visibility -eq 'Visible' -and $script:controls.AddPlatformPanelBorder.Visibility -eq 'Visible' -and $script:controls.AddPlatformListPanel.Children.Count -eq 5) 'Clicking AddPlatformCellButton (+) opens AddPlatformPanelBorder with 5 preset platforms'
+    Invoke-SelectOrAddCapsulePlatform 'claude'
+    Assert ($script:activeCapsulePlatform -eq 'claude' -and $script:controls.PopoverHeaderTitle.Text -match '^Claude 接入配置' -and [string]$script:controls.PlatformButton.Content -eq '网页端 Connectors ↗' -and $script:controls.CapsuleExtraSegmentsPanel.Children.Count -ge 2) 'Selecting Claude from + panel grows capsule segment and switches KeyPopoverBorder to Claude config'
+    Invoke-RemoveCurrentCapsulePlatform
+    Assert ($script:activeCapsulePlatform -eq 'openai' -and $script:controls.PopoverHeaderTitle.Text -match '^OpenAI 隧道配置 \(\d+\)$' -and [string]$script:controls.PlatformButton.Content -eq '打开 OpenAI 隧道设置 ↗') 'Removing non-OpenAI capsule platform restores OpenAI tunnel config card'
+    $script:popoverOpen = $false
+    $script:controls.KeyPopoverBorder.Visibility = 'Collapsed'
 
 
 

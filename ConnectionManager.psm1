@@ -85,12 +85,11 @@ function Read-ConnectionSettings {
     if ($setPath -and (Test-Path -LiteralPath $setPath)) {
         $saved = [IO.File]::ReadAllText($setPath) | ConvertFrom-Json
         if ($saved.schema_version -ne 1) { throw '配置版本不兼容，请保留现有文件并查看使用说明。' }
-        foreach ($property in $settings.PSObject.Properties.Name) {
-            if ($saved.PSObject.Properties.Name -contains $property) { $settings.$property = $saved.$property }
-        }
-        foreach ($optProp in @('default_browser_profile', 'preferred_browser_profiles', 'workspace_roots', 'skills_junction_target', 'agents_md_target', 'python_path', 'extra_bin_dirs', 'auto_archive_completed_mode', 'custom_cli_agents')) {
-            if ($saved.PSObject.Properties.Name -contains $optProp) {
-                $settings | Add-Member -NotePropertyName $optProp -NotePropertyValue $saved.$optProp -Force
+        foreach ($prop in $saved.PSObject.Properties) {
+            if ($settings.PSObject.Properties.Name -contains $prop.Name) {
+                $settings.($prop.Name) = $prop.Value
+            } else {
+                $settings | Add-Member -NotePropertyName $prop.Name -NotePropertyValue $prop.Value -Force
             }
         }
         if (-not $settings.runtime_root -or -not (Test-Path -LiteralPath $settings.runtime_root)) {
@@ -157,17 +156,26 @@ function Save-ConnectionSettings {
     if ($ApiKey) { $writes[$Context.KeyPath] = Protect-ConnectionSecret $ApiKey }
     if ($RelayToken) { $writes[$Context.TokenPath] = Protect-ConnectionSecret $RelayToken }
     if ($ApiKey -or $RelayToken) { $Settings.credential_revision = [Guid]::NewGuid().ToString('N') }
-    if (Test-Path -LiteralPath $Context.SettingsPath) {
+    $mergedSettings = [ordered]@{}
+    if ($Context.SettingsPath -and (Test-Path -LiteralPath $Context.SettingsPath)) {
         try {
-            $diskSaved = [IO.File]::ReadAllText($Context.SettingsPath) | ConvertFrom-Json
-            foreach ($optProp in @('default_browser_profile', 'preferred_browser_profiles', 'workspace_roots', 'skills_junction_target', 'agents_md_target', 'python_path', 'extra_bin_dirs', 'auto_archive_completed_mode', 'custom_cli_agents')) {
-                if (-not ($Settings.PSObject.Properties.Name -contains $optProp) -and ($diskSaved.PSObject.Properties.Name -contains $optProp)) {
-                    $Settings | Add-Member -NotePropertyName $optProp -NotePropertyValue $diskSaved.$optProp -Force
+            $diskSaved = [IO.File]::ReadAllText($Context.SettingsPath, [Text.Encoding]::UTF8) | ConvertFrom-Json
+            if ($null -ne $diskSaved) {
+                foreach ($dp in $diskSaved.PSObject.Properties) {
+                    $mergedSettings[$dp.Name] = $dp.Value
                 }
             }
         } catch {}
     }
-    $writes[$Context.SettingsPath] = $Settings | ConvertTo-Json -Depth 6
+    foreach ($sp in $Settings.PSObject.Properties) {
+        $mergedSettings[$sp.Name] = $sp.Value
+    }
+    foreach ($mk in @($mergedSettings.Keys)) {
+        if (-not ($Settings.PSObject.Properties.Name -contains $mk)) {
+            $Settings | Add-Member -NotePropertyName $mk -NotePropertyValue $mergedSettings[$mk] -Force
+        }
+    }
+    $writes[$Context.SettingsPath] = ([pscustomobject]$mergedSettings) | ConvertTo-Json -Depth 6
     [IO.Directory]::CreateDirectory($Context.DataRoot) | Out-Null
     $lock = [IO.File]::Open((Join-Path $Context.DataRoot 'save.lock'), [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
     $before = @{}; $committed = New-Object 'System.Collections.Generic.List[string]'
@@ -507,17 +515,39 @@ function Start-OfficialCoreIfNeeded {
             $browserEn = if ($Settings.PSObject.Properties['browser_enabled']) { [bool]$Settings.browser_enabled } else { $true }
             $detectedAgents = @(Get-DetectedCliAgents -ForceRescan -Settings $Settings -Context $Context)
             $acpList = @(foreach ($ag in $detectedAgents) {
+                $rawId = ([string]$ag.id).Trim().ToLowerInvariant()
+                $cleanId = ([regex]::Replace($rawId, '[^a-z0-9._-]+', '-')).Trim('-', '.', '_')
+                if (-not $cleanId) { continue }
+                if ($cleanId.Length -gt 64) { $cleanId = $cleanId.Substring(0, 64).TrimEnd('-', '.', '_') }
                 $rawKind = ([string]$ag.kind).Trim().ToLowerInvariant()
-                $safeKind = if ($rawKind -in @('codex', 'claude')) { $rawKind } else { 'custom' }
+                $isCustomEntry = ($ag.PSObject.Properties['is_custom'] -and [bool]$ag.is_custom)
+                if ($cleanId -eq 'codex' -and $rawKind -eq 'codex' -and -not $isCustomEntry) {
+                    $safeId = 'codex'
+                    $safeKind = 'codex'
+                } elseif ($cleanId -eq 'claude' -and $rawKind -eq 'claude' -and -not $isCustomEntry) {
+                    $safeId = 'claude'
+                    $safeKind = 'claude'
+                } else {
+                    $safeId = if ($cleanId -in @('codex', 'claude')) { "custom-$cleanId" } else { $cleanId }
+                    $safeKind = 'custom'
+                }
                 @{
-                    id = [string]$ag.id
-                    display_name = [string]$ag.display_name
+                    id = $safeId
+                    display_name = $(if ([string]$ag.display_name) { ([string]$ag.display_name).Trim() } else { $safeId })
                     kind = $safeKind
-                    command = [string]$ag.command
-                    args = @($ag.args)
+                    command = ([string]$ag.command).Trim()
+                    args = @($ag.args | ForEach-Object { [string]$_ })
                     enabled = $true
                 }
             })
+            $acpIds = @($acpList | ForEach-Object { [string]$_.id })
+            if ($acpList.Count -gt 0 -and $acpDef -notin $acpIds) {
+                $acpDef = [string]$acpList[0].id
+            }
+            $clampedAcpLim = [Math]::Min(8, [Math]::Max(1, [int]$(if ($acpLim -gt 0) { $acpLim } else { 1 })))
+            $mcpAppsMode = if ($Settings.PSObject.Properties['mcp_apps_mode'] -and ([string]$Settings.mcp_apps_mode).Trim().ToLowerInvariant() -in @('full', 'compact', 'off')) {
+                ([string]$Settings.mcp_apps_mode).Trim().ToLowerInvariant()
+            } else { 'off' }
             $acpProfilesJson = if ($acpList.Count -gt 0) { ConvertTo-Json -InputObject @($acpList) -Depth 4 -Compress } else { '[]' }
             if ($acpList.Count -eq 1 -and -not $acpProfilesJson.StartsWith('[')) {
                 $acpProfilesJson = '[' + $acpProfilesJson + ']'
@@ -527,17 +557,17 @@ function Start-OfficialCoreIfNeeded {
             $environment['RELAYCORE_HOME'] = $engineHome
             $environment['RELAYCORE_DEFAULT_DIR'] = $wsDir
             $environment['RELAYCORE_PORT'] = "$port"
-            $environment['RELAYCORE_MCP_APPS_MODE'] = 'off'
+            $environment['RELAYCORE_MCP_APPS_MODE'] = $mcpAppsMode
             $environment['RELAYCORE_BROWSER_ENABLED'] = $(if ($browserEn) { 'true' } else { 'false' })
             $environment['RELAYCORE_BROWSER_REUSE_EXISTING_CDP'] = 'true'
-            $environment['RELAYCORE_ACP_ENABLED'] = $(if ($acpLim -gt 0) { 'true' } else { 'false' })
+            $environment['RELAYCORE_ACP_ENABLED'] = $(if ($acpList.Count -gt 0 -and $acpLim -gt 0) { 'true' } else { 'false' })
             $environment['RELAYCORE_ACP_DEFAULT_PROFILE'] = $acpDef
-            $environment['RELAYCORE_ACP_MAX_CONCURRENT_PROMPTS'] = "$(if ($acpLim -gt 0) { $acpLim } else { 1 })"
+            $environment['RELAYCORE_ACP_MAX_CONCURRENT_PROMPTS'] = "$clampedAcpLim"
             $environment['RELAYCORE_ACP_PROFILES_JSON'] = $acpProfilesJson
             $list = @($environment.Keys | ForEach-Object { "$_=$($environment[$_])" })
             $outLog = Join-Path $logsDir 'core.out.log'
             $errLog = Join-Path $logsDir 'core.err.log'
-            $cmdLine = 'cmd.exe /d /s /c ""' + $standaloneCore + '" -host 127.0.0.1 -port ' + $port + ' -mcp-apps-mode off 1>>"' + $outLog + '" 2>>"' + $errLog + '""'
+            $cmdLine = 'cmd.exe /d /s /c ""' + $standaloneCore + '" -host 127.0.0.1 -port ' + $port + ' -mcp-apps-mode ' + $mcpAppsMode + ' 1>>"' + $outLog + '" 2>>"' + $errLog + '""'
             [void](Start-InteractiveHiddenCmd -CommandLine $cmdLine -WorkingDirectory $rootDir -EnvironmentOverrides $environment)
         } catch {}
     }
@@ -545,8 +575,20 @@ function Start-OfficialCoreIfNeeded {
         Start-Sleep -Milliseconds 200
         $probe = Invoke-ConnectionProbe $healthUrl
         if ($probe.Status -eq 200 -and $probe.Body -match '"ok"\s*:\s*true') {
+            $script:LastCoreStartError = ''
             [void](Repair-RelayProcessPriority $Context $Settings)
             return $true
+        }
+    }
+    if ($standaloneCore) {
+        $errLogPath = Join-Path (Join-Path $Context.DataRoot 'logs') 'core.err.log'
+        if (Test-Path -LiteralPath $errLogPath) {
+            try {
+                $errTail = @(Get-Content -LiteralPath $errLogPath -Tail 8 -ErrorAction SilentlyContinue | Where-Object { $_ -and $_.Trim() })
+                if ($errTail.Count -gt 0) {
+                    $script:LastCoreStartError = ($errTail -join ' | ')
+                }
+            } catch {}
         }
     }
     return $false
@@ -673,6 +715,19 @@ function Get-SavedOpenAIKeyPlaintext {
     return ''
 }
 
+function Get-DefaultPlatformBaseUrl {
+    param([string]$Platform = 'openai', $Settings = $null)
+    $plat = if ($Platform) { $Platform.Trim().ToLowerInvariant() } else { 'openai' }
+    switch ($plat) {
+        'openai'   { return $(if ($Settings -and $Settings.PSObject.Properties['api_base_url'] -and $Settings.api_base_url) { [string]$Settings.api_base_url } else { 'https://api.openai.com' }) }
+        'claude'   { return 'https://api.anthropic.com' }
+        'gemini'   { return 'https://generativelanguage.googleapis.com' }
+        'deepseek' { return 'https://api.deepseek.com' }
+        'opencode' { return 'https://api.opencode.ai/v1' }
+        default    { return 'https://api.openai.com' }
+    }
+}
+
 function Get-ConnectionProfiles {
     param($Context, $Settings = $null)
     if (-not $Settings) { $Settings = Read-ConnectionSettings $Context }
@@ -683,6 +738,8 @@ function Get-ConnectionProfiles {
     }
     $activeId = 'prof_primary'
     $rawItems = @()
+    $enabledPlatforms = New-Object 'System.Collections.Generic.List[string]'
+    $activeByPlatform = [ordered]@{}
     $hasExplicitProfilesStore = $false
     if (Test-Path -LiteralPath $storePath) {
         try {
@@ -690,13 +747,41 @@ function Get-ConnectionProfiles {
             if ($null -ne $storeObj -and ($storeObj.PSObject.Properties.Name -contains 'profiles')) {
                 $hasExplicitProfilesStore = $true
             }
-            if ($storeObj.PSObject.Properties.Name -contains 'active_profile_id') {
+            if ($storeObj.PSObject.Properties.Name -contains 'active_profile_id' -and $storeObj.active_profile_id) {
                 $activeId = [string]$storeObj.active_profile_id
+            }
+            if ($storeObj.PSObject.Properties.Name -contains 'enabled_platforms' -and $storeObj.enabled_platforms) {
+                foreach ($ep in @($storeObj.enabled_platforms)) {
+                    $epNorm = ([string]$ep).Trim().ToLowerInvariant()
+                    if ($epNorm -and -not $enabledPlatforms.Contains($epNorm)) {
+                        [void]$enabledPlatforms.Add($epNorm)
+                    }
+                }
+            }
+            if ($storeObj.PSObject.Properties.Name -contains 'active_profile_by_platform' -and $storeObj.active_profile_by_platform) {
+                foreach ($prop in $storeObj.active_profile_by_platform.PSObject.Properties) {
+                    if ($prop.Name -and $prop.Value) {
+                        $activeByPlatform[$prop.Name.ToLowerInvariant()] = [string]$prop.Value
+                    }
+                }
             }
             if ($storeObj.PSObject.Properties.Name -contains 'profiles' -and $storeObj.profiles) {
                 $rawItems = @($storeObj.profiles)
             }
         } catch { $rawItems = @() }
+    }
+    if ($enabledPlatforms.Count -eq 0) {
+        if ($Settings -and $Settings.PSObject.Properties.Name -contains 'enabled_platforms' -and $Settings.enabled_platforms) {
+            foreach ($ep in @($Settings.enabled_platforms)) {
+                $epNorm = ([string]$ep).Trim().ToLowerInvariant()
+                if ($epNorm -and -not $enabledPlatforms.Contains($epNorm)) {
+                    [void]$enabledPlatforms.Add($epNorm)
+                }
+            }
+        }
+        if ($enabledPlatforms.Count -eq 0) {
+            [void]$enabledPlatforms.Add('openai')
+        }
     }
 
     if ($rawItems.Count -eq 0 -and -not $hasExplicitProfilesStore) {
@@ -710,44 +795,72 @@ function Get-ConnectionProfiles {
             [pscustomobject]@{
                 id = 'prof_primary'
                 name = '主工作台隧道'
+                platform = 'openai'
+                kind = 'tunnel'
                 tunnel_id = [string]$Settings.tunnel_id
+                base_url = [string]$Settings.api_base_url
                 api_base_url = [string]$Settings.api_base_url
                 key_file = $primKeyFile
+                enabled = $true
             }
         )
     }
 
+    $activeByPlatform['openai'] = $activeId
     $profiles = @(foreach ($item in $rawItems) {
         $pidStr = [string]$item.id
-        $keyFile = if ($item.PSObject.Properties.Name -contains 'key_file' -and $item.key_file) { [string]$item.key_file } else { "openai-key-$pidStr.dpapi" }
+        $plat = if ($item.PSObject.Properties.Name -contains 'platform' -and $item.platform) { ([string]$item.platform).Trim().ToLowerInvariant() } else { 'openai' }
+        $kind = if ($item.PSObject.Properties.Name -contains 'kind' -and $item.kind) { ([string]$item.kind).Trim().ToLowerInvariant() } elseif ($plat -eq 'openai') { 'tunnel' } else { 'apikey' }
+        $defaultKeyFile = if ($plat -eq 'openai') { "openai-key-$pidStr.dpapi" } else { "credential-$pidStr.dpapi" }
+        $keyFile = if ($item.PSObject.Properties.Name -contains 'key_file' -and $item.key_file) { [string]$item.key_file } else { $defaultKeyFile }
         $keyFullPath = Join-Path $Context.DataRoot $keyFile
         $plain = ''
         if (Test-Path -LiteralPath $keyFullPath) {
             try { $plain = Read-ConnectionSecret $keyFullPath } catch { $plain = '' }
-        } elseif ($pidStr -eq $activeId) {
+        } elseif ($plat -eq 'openai' -and $kind -eq 'tunnel' -and $pidStr -eq $activeId) {
             $plain = Get-SavedOpenAIKeyPlaintext $Context
         }
-        $tunId = if ($item.PSObject.Properties.Name -contains 'tunnel_id' -and $item.tunnel_id) { [string]$item.tunnel_id } elseif ($pidStr -eq $activeId) { [string]$Settings.tunnel_id } else { '' }
-        $baseUrl = if ($item.PSObject.Properties.Name -contains 'api_base_url' -and $item.api_base_url) { [string]$item.api_base_url } else { [string]$Settings.api_base_url }
-        # Skip legacy empty 'Business 席位号' placeholder if unconfigured
+        $tunId = if ($item.PSObject.Properties.Name -contains 'tunnel_id' -and $item.tunnel_id) {
+            [string]$item.tunnel_id
+        } elseif ($plat -eq 'openai' -and $kind -eq 'tunnel' -and $pidStr -eq $activeId) {
+            [string]$Settings.tunnel_id
+        } else { '' }
+        $baseUrl = if ($item.PSObject.Properties.Name -contains 'base_url' -and $item.base_url) {
+            [string]$item.base_url
+        } elseif ($item.PSObject.Properties.Name -contains 'api_base_url' -and $item.api_base_url) {
+            [string]$item.api_base_url
+        } else {
+            Get-DefaultPlatformBaseUrl $plat $Settings
+        }
+        $enabledFlag = if ($item.PSObject.Properties.Name -contains 'enabled' -and $null -ne $item.enabled) { [bool]$item.enabled } else { $true }
         if ($pidStr -eq 'prof_business' -and [string]$item.name -eq 'Business 席位号' -and (-not $tunId) -and (-not $plain) -and ($pidStr -ne $activeId)) {
             continue
         }
+        if ($plat -ne 'openai' -and (-not $activeByPlatform.Contains($plat) -or -not $activeByPlatform[$plat])) {
+            $activeByPlatform[$plat] = $pidStr
+        }
+        $isAct = if ($plat -eq 'openai') { ($pidStr -eq $activeId) } else { ($activeByPlatform[$plat] -eq $pidStr) }
         $displayName = if ([string]$item.name -eq '个人主力号') { '主工作台隧道' } else { [string]$item.name }
         [pscustomobject]@{
             Id = $pidStr
             Name = $displayName
+            Platform = $plat
+            Kind = $kind
             TunnelId = $tunId
+            BaseUrl = $baseUrl
             ApiBaseUrl = $baseUrl
             KeyFile = $keyFile
             HasKey = [bool]($plain.Length -gt 0)
             PlainKey = $plain
             MaskedKey = (Format-MaskedApiKey $plain)
-            IsActive = ($pidStr -eq $activeId)
+            Enabled = $enabledFlag
+            IsActive = [bool]$isAct
         }
     })
     return [pscustomobject]@{
         ActiveProfileId = $activeId
+        EnabledPlatforms = @($enabledPlatforms.ToArray())
+        ActiveProfileByPlatform = $activeByPlatform
         Profiles = $profiles
     }
 }
@@ -760,6 +873,10 @@ function Save-ConnectionProfile {
         [string]$Name = '',
         [string]$TunnelId = '',
         [string]$ApiKey = '',
+        [string]$Platform = '',
+        [string]$Kind = '',
+        [string]$BaseUrl = '',
+        $Enabled = $null,
         [switch]$SetActive
     )
     if (-not $Settings) { $Settings = Read-ConnectionSettings $Context }
@@ -767,7 +884,22 @@ function Save-ConnectionProfile {
         $ProfileId = 'prof_' + [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
     }
     $state = Get-ConnectionProfiles $Context $Settings
-    $cleanTun = if ($TunnelId.Trim()) { ConvertTo-TunnelId $TunnelId } else { '' }
+    $existingProf = $state.Profiles | Where-Object { $_.Id -eq $ProfileId } | Select-Object -First 1
+    $effPlatform = if ($Platform -and $Platform.Trim()) {
+        $Platform.Trim().ToLowerInvariant()
+    } elseif ($existingProf -and $existingProf.PSObject.Properties['Platform'] -and $existingProf.Platform) {
+        ([string]$existingProf.Platform).Trim().ToLowerInvariant()
+    } else { 'openai' }
+    $effKind = if ($Kind -and $Kind.Trim()) {
+        $Kind.Trim().ToLowerInvariant()
+    } elseif ($existingProf -and $existingProf.PSObject.Properties['Kind'] -and $existingProf.Kind) {
+        ([string]$existingProf.Kind).Trim().ToLowerInvariant()
+    } elseif ($effPlatform -eq 'openai') {
+        'tunnel'
+    } else {
+        'apikey'
+    }
+    $cleanTun = if ($effKind -eq 'tunnel' -and $TunnelId.Trim()) { ConvertTo-TunnelId $TunnelId } else { '' }
     $cleanKey = $ApiKey.Trim()
     if ($cleanKey -and ($cleanKey -match '^[a-z]+://' -or $cleanKey -match '\s' -or $cleanKey.Length -lt 12)) {
         throw 'API Key 栏请粘贴密钥本身，不是网页链接；密钥中不能有空格或换行。'
@@ -777,14 +909,31 @@ function Save-ConnectionProfile {
     } else {
         Join-Path $Context.DataRoot 'credential-profiles.json'
     }
-    $activeId = if ($SetActive) { $ProfileId } else { $state.ActiveProfileId }
+    $activeId = $state.ActiveProfileId
+    $activeByPlat = [ordered]@{}
+    if ($state.PSObject.Properties['ActiveProfileByPlatform'] -and $state.ActiveProfileByPlatform) {
+        foreach ($k in $state.ActiveProfileByPlatform.Keys) {
+            $activeByPlat[[string]$k] = [string]$state.ActiveProfileByPlatform[$k]
+        }
+    }
+    if ($effPlatform -eq 'openai' -and $effKind -eq 'tunnel') {
+        if ($SetActive -or -not $activeId) { $activeId = $ProfileId }
+        $activeByPlat['openai'] = $activeId
+    } else {
+        if ($SetActive -or -not $activeByPlat.Contains($effPlatform) -or -not $activeByPlat[$effPlatform]) {
+            $activeByPlat[$effPlatform] = $ProfileId
+        }
+    }
+
     $updatedList = New-Object 'System.Collections.Generic.List[object]'
     $found = $false
     foreach ($p in $state.Profiles) {
         if ($p.Id -eq $ProfileId) {
             $found = $true
             $newName = if ($Name.Trim()) { $Name.Trim() } else { $p.Name }
-            $newTun = if ($cleanTun) { $cleanTun } else { $p.TunnelId }
+            $newTun = if ($effKind -eq 'tunnel') { $(if ($cleanTun) { $cleanTun } else { $p.TunnelId }) } else { '' }
+            $newBaseUrl = if ($BaseUrl -and $BaseUrl.Trim()) { $BaseUrl.Trim() } elseif ($p.BaseUrl) { $p.BaseUrl } else { Get-DefaultPlatformBaseUrl $effPlatform $Settings }
+            $newEnabled = if ($null -ne $Enabled) { [bool]$Enabled } elseif ($cleanKey) { $true } else { [bool]$p.Enabled }
             $keyFile = $p.KeyFile
             if ($cleanKey) {
                 Write-AtomicConnectionText (Join-Path $Context.DataRoot $keyFile) (Protect-ConnectionSecret $cleanKey)
@@ -792,42 +941,62 @@ function Save-ConnectionProfile {
             $updatedList.Add([pscustomobject]@{
                 id = $p.Id
                 name = $newName
+                platform = $effPlatform
+                kind = $effKind
                 tunnel_id = $newTun
-                api_base_url = $p.ApiBaseUrl
+                base_url = $newBaseUrl
+                api_base_url = $newBaseUrl
                 key_file = $keyFile
+                enabled = $newEnabled
             })
         } else {
             $updatedList.Add([pscustomobject]@{
                 id = $p.Id
                 name = $p.Name
+                platform = $p.Platform
+                kind = $p.Kind
                 tunnel_id = $p.TunnelId
+                base_url = $p.BaseUrl
                 api_base_url = $p.ApiBaseUrl
                 key_file = $p.KeyFile
+                enabled = [bool]$p.Enabled
             })
         }
     }
     if (-not $found) {
-        $keyFile = "openai-key-$ProfileId.dpapi"
+        $keyFile = if ($effPlatform -eq 'openai') { "openai-key-$ProfileId.dpapi" } else { "credential-$ProfileId.dpapi" }
         if ($cleanKey) {
             Write-AtomicConnectionText (Join-Path $Context.DataRoot $keyFile) (Protect-ConnectionSecret $cleanKey)
         }
-        $idxNum = $updatedList.Count + 1
+        $idxNum = @($updatedList | Where-Object { $_.platform -eq $effPlatform }).Count + 1
+        $defBaseUrl = if ($BaseUrl -and $BaseUrl.Trim()) { $BaseUrl.Trim() } else { Get-DefaultPlatformBaseUrl $effPlatform $Settings }
+        $newEnabled = if ($null -ne $Enabled) { [bool]$Enabled } elseif ($cleanKey) { $true } else { $false }
         $updatedList.Add([pscustomobject]@{
             id = $ProfileId
-            name = $(if ($Name.Trim()) { $Name.Trim() } else { "自定义隧道配置 #$idxNum" })
+            name = $(if ($Name.Trim()) { $Name.Trim() } elseif ($effKind -eq 'tunnel') { "自定义隧道配置 #$idxNum" } else { "配置 #$idxNum" })
+            platform = $effPlatform
+            kind = $effKind
             tunnel_id = $cleanTun
-            api_base_url = $Settings.api_base_url
+            base_url = $defBaseUrl
+            api_base_url = $defBaseUrl
             key_file = $keyFile
+            enabled = $newEnabled
         })
+    }
+    $enabledPlats = @($state.EnabledPlatforms)
+    if ($enabledPlats -notcontains $effPlatform) {
+        $enabledPlats = @($enabledPlats) + @($effPlatform)
     }
     $storePayload = [pscustomobject]@{
         schema_version = 1
         active_profile_id = $activeId
+        enabled_platforms = @($enabledPlats)
+        active_profile_by_platform = $activeByPlat
         profiles = $updatedList.ToArray()
-    } | ConvertTo-Json -Depth 5
+    } | ConvertTo-Json -Depth 6
     Write-AtomicConnectionText $storePath $storePayload
 
-    if ($activeId -eq $ProfileId -and $cleanTun) {
+    if ($effPlatform -eq 'openai' -and $effKind -eq 'tunnel' -and $activeId -eq $ProfileId -and $cleanTun) {
         $Settings.tunnel_id = $cleanTun
         $effectiveKey = $cleanKey
         if (-not $effectiveKey) {
@@ -856,11 +1025,30 @@ function Remove-ConnectionProfile {
             Remove-Item -LiteralPath $delKeyPath -Force -ErrorAction SilentlyContinue
         }
     }
+    $targetPlat = if ($targetProf -and $targetProf.Platform) { [string]$targetProf.Platform } else { 'openai' }
     $newActiveId = $state.ActiveProfileId
-    if ($remaining.Count -eq 0) {
-        $newActiveId = ''
-    } elseif ($newActiveId -eq $ProfileId) {
-        $newActiveId = $remaining[0].Id
+    $openaiRemaining = @($remaining | Where-Object { $_.Platform -eq 'openai' })
+    if ($targetPlat -eq 'openai') {
+        if ($openaiRemaining.Count -eq 0) {
+            $newActiveId = ''
+        } elseif ($newActiveId -eq $ProfileId) {
+            $newActiveId = $openaiRemaining[0].Id
+        }
+    }
+    $activeByPlat = [ordered]@{}
+    if ($state.PSObject.Properties['ActiveProfileByPlatform'] -and $state.ActiveProfileByPlatform) {
+        foreach ($k in $state.ActiveProfileByPlatform.Keys) {
+            $activeByPlat[[string]$k] = [string]$state.ActiveProfileByPlatform[$k]
+        }
+    }
+    $activeByPlat['openai'] = $newActiveId
+    if ($targetPlat -ne 'openai') {
+        $platRem = @($remaining | Where-Object { $_.Platform -eq $targetPlat })
+        if ($platRem.Count -eq 0) {
+            $activeByPlat.Remove($targetPlat)
+        } elseif ($activeByPlat[$targetPlat] -eq $ProfileId) {
+            $activeByPlat[$targetPlat] = [string]$platRem[0].Id
+        }
     }
     $storePath = if ($Context.PSObject.Properties.Name -contains 'ProfilesStorePath' -and $Context.ProfilesStorePath) {
         $Context.ProfilesStorePath
@@ -871,16 +1059,22 @@ function Remove-ConnectionProfile {
         [pscustomobject]@{
             id = $p.Id
             name = $p.Name
+            platform = $p.Platform
+            kind = $p.Kind
             tunnel_id = $p.TunnelId
+            base_url = $p.BaseUrl
             api_base_url = $p.ApiBaseUrl
             key_file = $p.KeyFile
+            enabled = [bool]$p.Enabled
         }
     })
     $storePayload = [pscustomobject]@{
         schema_version = 1
         active_profile_id = $newActiveId
+        enabled_platforms = @($state.EnabledPlatforms)
+        active_profile_by_platform = $activeByPlat
         profiles = $rawProfiles
-    } | ConvertTo-Json -Depth 5
+    } | ConvertTo-Json -Depth 6
     Write-AtomicConnectionText $storePath $storePayload
     return (Get-ConnectionProfiles $Context $Settings)
 }
@@ -891,28 +1085,82 @@ function Select-ConnectionProfile {
     $state = Get-ConnectionProfiles $Context $Settings
     $target = $state.Profiles | Where-Object { $_.Id -eq $ProfileId } | Select-Object -First 1
     if (-not $target) { throw "找不到指定的连接配置 ($ProfileId)。" }
-    if (-not $target.TunnelId -or -not $target.HasKey) {
-        throw "配置「$($target.Name)」尚未填写隧道编号或 API Key，请先点击修改并粘贴凭据。"
-    }
+    $targetPlat = if ($target.PSObject.Properties['Platform'] -and $target.Platform) { ([string]$target.Platform).ToLowerInvariant() } else { 'openai' }
+    $targetKind = if ($target.PSObject.Properties['Kind'] -and $target.Kind) { ([string]$target.Kind).ToLowerInvariant() } elseif ($targetPlat -eq 'openai') { 'tunnel' } else { 'apikey' }
+
     $storePath = if ($Context.PSObject.Properties.Name -contains 'ProfilesStorePath' -and $Context.ProfilesStorePath) {
         $Context.ProfilesStorePath
     } else {
         Join-Path $Context.DataRoot 'credential-profiles.json'
     }
+    $activeByPlat = [ordered]@{}
+    if ($state.PSObject.Properties['ActiveProfileByPlatform'] -and $state.ActiveProfileByPlatform) {
+        foreach ($k in $state.ActiveProfileByPlatform.Keys) {
+            $activeByPlat[[string]$k] = [string]$state.ActiveProfileByPlatform[$k]
+        }
+    }
+
+    if ($targetKind -eq 'apikey') {
+        if (-not $target.HasKey) {
+            throw "配置「$($target.Name)」尚未填写 API Key，请先点击修改并粘贴凭据。"
+        }
+        $activeByPlat[$targetPlat] = $ProfileId
+        $rawProfiles = @(foreach ($p in $state.Profiles) {
+            $isTarget = ($p.Id -eq $ProfileId)
+            [pscustomobject]@{
+                id = $p.Id
+                name = $p.Name
+                platform = $p.Platform
+                kind = $p.Kind
+                tunnel_id = $p.TunnelId
+                base_url = $p.BaseUrl
+                api_base_url = $p.ApiBaseUrl
+                key_file = $p.KeyFile
+                enabled = $(if ($isTarget) { $true } else { [bool]$p.Enabled })
+            }
+        })
+        $storePayload = [pscustomobject]@{
+            schema_version = 1
+            active_profile_id = $state.ActiveProfileId
+            enabled_platforms = @($state.EnabledPlatforms)
+            active_profile_by_platform = $activeByPlat
+            profiles = $rawProfiles
+        } | ConvertTo-Json -Depth 6
+        Write-AtomicConnectionText $storePath $storePayload
+        $updatedState = Get-ConnectionProfiles $Context $Settings
+        $updatedTarget = $updatedState.Profiles | Where-Object { $_.Id -eq $ProfileId } | Select-Object -First 1
+        return [pscustomobject]@{
+            ActiveProfile = $updatedTarget
+            ProfilesState = $updatedState
+            Settings = $Settings
+            Message = "已启用「$($target.Name)」配置。"
+        }
+    }
+
+    if (-not $target.TunnelId -or -not $target.HasKey) {
+        throw "配置「$($target.Name)」尚未填写隧道编号或 API Key，请先点击修改并粘贴凭据。"
+    }
+    $activeByPlat['openai'] = $ProfileId
     $rawProfiles = @(foreach ($p in $state.Profiles) {
         [pscustomobject]@{
             id = $p.Id
             name = $p.Name
+            platform = $p.Platform
+            kind = $p.Kind
             tunnel_id = $p.TunnelId
+            base_url = $p.BaseUrl
             api_base_url = $p.ApiBaseUrl
             key_file = $p.KeyFile
+            enabled = $(if ($p.Id -eq $ProfileId) { $true } else { [bool]$p.Enabled })
         }
     })
     $storePayload = [pscustomobject]@{
         schema_version = 1
         active_profile_id = $ProfileId
+        enabled_platforms = @($state.EnabledPlatforms)
+        active_profile_by_platform = $activeByPlat
         profiles = $rawProfiles
-    } | ConvertTo-Json -Depth 5
+    } | ConvertTo-Json -Depth 6
     Write-AtomicConnectionText $storePath $storePayload
 
     $Settings.tunnel_id = $target.TunnelId
@@ -925,11 +1173,136 @@ function Select-ConnectionProfile {
         $startMsg = Start-ConnectionTunnel $Context $newSettings
         $reconnectMsg = "已自动切换至「$($target.Name)」并重新建立隧道连接（$startMsg）"
     }
+    $updatedState = Get-ConnectionProfiles $Context $newSettings
     return [pscustomobject]@{
         ActiveProfile = $target
+        ProfilesState = $updatedState
         Settings = $newSettings
         Message = $reconnectMsg
     }
+}
+
+function Add-CapsulePlatform {
+    param(
+        $Context,
+        [string]$Platform,
+        $Settings = $null
+    )
+    if (-not $Settings) { $Settings = Read-ConnectionSettings $Context }
+    $plat = if ($Platform) { $Platform.Trim().ToLowerInvariant() } else { '' }
+    if ($plat -notin @('openai', 'claude', 'gemini', 'deepseek', 'opencode')) {
+        throw "不支持的平台标识：$Platform"
+    }
+    $state = Get-ConnectionProfiles $Context $Settings
+    $enabled = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($ep in @($state.EnabledPlatforms)) {
+        $epNorm = ([string]$ep).Trim().ToLowerInvariant()
+        if ($epNorm -and -not $enabled.Contains($epNorm)) { [void]$enabled.Add($epNorm) }
+    }
+    if (-not $enabled.Contains($plat)) {
+        [void]$enabled.Add($plat)
+    }
+    $activeByPlat = [ordered]@{}
+    if ($state.PSObject.Properties['ActiveProfileByPlatform'] -and $state.ActiveProfileByPlatform) {
+        foreach ($k in $state.ActiveProfileByPlatform.Keys) {
+            $activeByPlat[[string]$k] = [string]$state.ActiveProfileByPlatform[$k]
+        }
+    }
+    $platProfiles = @($state.Profiles | Where-Object { ([string]$_.Platform).ToLowerInvariant() -eq $plat })
+    $rawProfiles = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($p in $state.Profiles) {
+        $rawProfiles.Add([pscustomobject]@{
+            id = $p.Id
+            name = $p.Name
+            platform = $p.Platform
+            kind = $p.Kind
+            tunnel_id = $p.TunnelId
+            base_url = $p.BaseUrl
+            api_base_url = $p.ApiBaseUrl
+            key_file = $p.KeyFile
+            enabled = [bool]$p.Enabled
+        })
+    }
+    if ($platProfiles.Count -eq 0) {
+        $newId = "prof_${plat}_default"
+        $defUrl = Get-DefaultPlatformBaseUrl $plat $Settings
+        $defKind = if ($plat -eq 'openai') { 'tunnel' } else { 'apikey' }
+        $defKeyFile = if ($plat -eq 'openai') { "openai-key-$newId.dpapi" } else { "credential-$newId.dpapi" }
+        $rawProfiles.Add([pscustomobject]@{
+            id = $newId
+            name = '默认'
+            platform = $plat
+            kind = $defKind
+            tunnel_id = ''
+            base_url = $defUrl
+            api_base_url = $defUrl
+            key_file = $defKeyFile
+            enabled = $false
+        })
+        $activeByPlat[$plat] = $newId
+    } elseif (-not $activeByPlat.Contains($plat) -or -not $activeByPlat[$plat]) {
+        $activeByPlat[$plat] = [string]$platProfiles[0].Id
+    }
+    $storePath = if ($Context.PSObject.Properties.Name -contains 'ProfilesStorePath' -and $Context.ProfilesStorePath) {
+        $Context.ProfilesStorePath
+    } else {
+        Join-Path $Context.DataRoot 'credential-profiles.json'
+    }
+    $storePayload = [pscustomobject]@{
+        schema_version = 1
+        active_profile_id = $state.ActiveProfileId
+        enabled_platforms = $enabled.ToArray()
+        active_profile_by_platform = $activeByPlat
+        profiles = $rawProfiles.ToArray()
+    } | ConvertTo-Json -Depth 6
+    Write-AtomicConnectionText $storePath $storePayload
+    return (Get-ConnectionProfiles $Context $Settings)
+}
+
+function Remove-CapsulePlatform {
+    param(
+        $Context,
+        [string]$Platform,
+        $Settings = $null
+    )
+    if (-not $Settings) { $Settings = Read-ConnectionSettings $Context }
+    $plat = if ($Platform) { $Platform.Trim().ToLowerInvariant() } else { '' }
+    $state = Get-ConnectionProfiles $Context $Settings
+    $enabled = @($state.EnabledPlatforms | Where-Object { ([string]$_).Trim().ToLowerInvariant() -ne $plat })
+    if ($enabled.Count -eq 0) { $enabled = @('openai') }
+    $activeByPlat = [ordered]@{}
+    if ($state.PSObject.Properties['ActiveProfileByPlatform'] -and $state.ActiveProfileByPlatform) {
+        foreach ($k in $state.ActiveProfileByPlatform.Keys) {
+            $activeByPlat[[string]$k] = [string]$state.ActiveProfileByPlatform[$k]
+        }
+    }
+    $rawProfiles = @(foreach ($p in $state.Profiles) {
+        [pscustomobject]@{
+            id = $p.Id
+            name = $p.Name
+            platform = $p.Platform
+            kind = $p.Kind
+            tunnel_id = $p.TunnelId
+            base_url = $p.BaseUrl
+            api_base_url = $p.ApiBaseUrl
+            key_file = $p.KeyFile
+            enabled = [bool]$p.Enabled
+        }
+    })
+    $storePath = if ($Context.PSObject.Properties.Name -contains 'ProfilesStorePath' -and $Context.ProfilesStorePath) {
+        $Context.ProfilesStorePath
+    } else {
+        Join-Path $Context.DataRoot 'credential-profiles.json'
+    }
+    $storePayload = [pscustomobject]@{
+        schema_version = 1
+        active_profile_id = $state.ActiveProfileId
+        enabled_platforms = @($enabled)
+        active_profile_by_platform = $activeByPlat
+        profiles = $rawProfiles
+    } | ConvertTo-Json -Depth 6
+    Write-AtomicConnectionText $storePath $storePayload
+    return (Get-ConnectionProfiles $Context $Settings)
 }
 
 function Invoke-StudioHubSnapshot {
@@ -2064,6 +2437,17 @@ function New-HandoverPrompt {
     return ($lines -join "`n")
 }
 
+function Get-CodexCachedAvailableModels {
+    param([string]$ConfigPath = '')
+    $targetPath = if ($ConfigPath) { $ConfigPath } else { Join-Path (Join-Path $HOME '.codex') '.codex-global-state.json' }
+    if (-not $targetPath -or -not (Test-Path -LiteralPath $targetPath)) { return @() }
+    try {
+        $raw = [IO.File]::ReadAllText($targetPath, [Text.Encoding]::UTF8) | ConvertFrom-Json
+        if ($raw -and $raw.PSObject.Properties['models'] -and $raw.models) { return @($raw.models) }
+    } catch {}
+    return @()
+}
+
 function Get-WebBridgeState {
     param($Context)
     $logDir = Join-Path $Context.DataRoot 'logs'
@@ -2072,7 +2456,12 @@ function Get-WebBridgeState {
     if (Test-Path -LiteralPath $bpath) {
         try {
             $raw = [IO.File]::ReadAllText($bpath, [Text.Encoding]::UTF8) | ConvertFrom-Json
-            if ($raw) { return $raw }
+            if ($raw) {
+                if (-not ($raw.PSObject.Properties.Name -contains 'available_models') -or $null -eq $raw.available_models) {
+                    $raw | Add-Member -NotePropertyName 'available_models' -NotePropertyValue @() -Force
+                }
+                return $raw
+            }
         } catch { }
     }
     return [pscustomobject]@{
@@ -2082,6 +2471,7 @@ function Get-WebBridgeState {
         session_bindings = [pscustomobject]@{}
         queue = @()
         breakers = [pscustomobject]@{}
+        available_models = @()
     }
 }
 
@@ -5149,13 +5539,15 @@ function Get-DetectedCliAgents {
 
     foreach ($c in $customArr) {
         if (-not $c) { continue }
-        $cId = if ($c.PSObject.Properties['id'] -and $c.id) { ([string]$c.id).Trim() } else { '' }
+        $rawCId = if ($c.PSObject.Properties['id'] -and $c.id) { ([string]$c.id).Trim() } else { '' }
+        $cId = ([regex]::Replace($rawCId.ToLowerInvariant(), '[^a-z0-9._-]+', '-')).Trim('-', '.', '_')
+        if ($cId.Length -gt 64) { $cId = $cId.Substring(0, 64).TrimEnd('-', '.', '_') }
+        if ($cId -in @('codex', 'claude')) { $cId = "custom-$cId" }
         $cCmd = if ($c.PSObject.Properties['command'] -and $c.command) { ([string]$c.command).Trim() } else { '' }
         if (-not $cId -or -not $cCmd -or $seenIds.ContainsKey($cId)) { continue }
         if (-not [IO.File]::Exists($cCmd)) { continue }
         $cDisp = if ($c.PSObject.Properties['display_name'] -and $c.display_name) { ([string]$c.display_name).Trim() } else { $cId }
-        $rawCKind = if ($c.PSObject.Properties['kind'] -and $c.kind) { ([string]$c.kind).Trim().ToLowerInvariant() } else { 'custom' }
-        $cKind = if ($rawCKind -in @('codex', 'claude')) { $rawCKind } else { 'custom' }
+        $cKind = 'custom'
         $cArgs = @(if ($c.PSObject.Properties['args'] -and $c.args) { $c.args | ForEach-Object { [string]$_ } })
         $seenIds[$cId] = $true
         [void]$results.Add([pscustomobject]@{
@@ -5183,8 +5575,10 @@ function Add-CustomCliAgent {
     }
     $fullPath = [IO.Path]::GetFullPath($cleanPath)
     $baseName = [IO.Path]::GetFileNameWithoutExtension($fullPath)
-    $idSlug = (($baseName.ToLowerInvariant() -replace '[^a-z0-9_-]', '-').Trim('-'))
+    $idSlug = ([regex]::Replace($baseName.ToLowerInvariant(), '[^a-z0-9._-]+', '-')).Trim('-', '.', '_')
     if (-not $idSlug) { $idSlug = 'custom-cli' }
+    if ($idSlug.Length -gt 64) { $idSlug = $idSlug.Substring(0, 64).TrimEnd('-', '.', '_') }
+    if ($idSlug -in @('codex', 'claude')) { $idSlug = "custom-$idSlug" }
     $disp = if ($DisplayName -and $DisplayName.Trim()) { $DisplayName.Trim() } else { $baseName }
     $settings = Read-ConnectionSettings $Context
     $existing = @(if ($settings.PSObject.Properties['custom_cli_agents'] -and $settings.custom_cli_agents) { $settings.custom_cli_agents })

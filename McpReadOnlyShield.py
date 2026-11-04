@@ -201,27 +201,11 @@ def _normalize_available_models(raw_models: list | None) -> list[dict]:
 
 
 def _get_effective_available_models(wb_state: dict) -> list[dict]:
-    """Return live reported cloud models, or read-only pre-warmed models from .codex-global-state.json when empty."""
+    """Return live reported cloud models only; never borrow ~/.codex cached models on cold start."""
     live = wb_state.get("available_models")
     if isinstance(live, list) and live:
         return live
-    cfg_path = _CODEX_GLOBAL_STATE_PATH
-    if not cfg_path and _HOST_SIDE_EFFECTS_ENABLED:
-        cfg_path = os.path.expanduser(os.path.join("~", ".codex", ".codex-global-state.json"))
-    if not cfg_path or not os.path.isfile(cfg_path):
-        return []
-    try:
-        st_mtime = os.stat(cfg_path).st_mtime_ns
-    except OSError:
-        return []
-    if _CODEX_MODELS_CACHE.get("path") == cfg_path and _CODEX_MODELS_CACHE.get("mtime_ns") == st_mtime:
-        cached = _CODEX_MODELS_CACHE.get("models")
-        return list(cached) if isinstance(cached, list) else []
-    models = _normalize_available_models(RelayCdp.read_codex_cached_models(cfg_path))
-    _CODEX_MODELS_CACHE["path"] = cfg_path
-    _CODEX_MODELS_CACHE["mtime_ns"] = st_mtime
-    _CODEX_MODELS_CACHE["models"] = list(models)
-    return models
+    return []
 
 
 def _normalize_raw_effort_id(raw_effort: str, available_models: list | None = None, current_model: str = "") -> str:

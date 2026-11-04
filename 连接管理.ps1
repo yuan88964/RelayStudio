@@ -368,25 +368,48 @@ $script:PANE_SNAP_HIDE_PX = 140.0
      <ColumnDefinition Width="Auto"/>
     </Grid.ColumnDefinitions>
     <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-     <Button x:Name="ToggleRailButton" Style="{StaticResource IconButton}" Width="26" Height="26" Margin="0,0,6,0" ToolTip="展开 / 收起左侧任务栏（不改变窗口外框大小，也可向左拖拽竖线自动吸附隐藏）">
+     <Border Width="18" Height="18" CornerRadius="4.5" Background="#18181F" BorderBrush="#27272A" BorderThickness="1" VerticalAlignment="Center" Margin="0,0,6,0">
+      <TextBlock Text="R" FontSize="11" FontWeight="Bold" Foreground="#FEFEFF" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,-0.5,0,0"/>
+     </Border>
+     <TextBlock Text="RelayStudio" FontSize="13" FontWeight="Bold" Foreground="#18181B" VerticalAlignment="Center" Margin="0,0,6,0"/>
+     <Button x:Name="ToggleRailButton" Style="{StaticResource IconButton}" Width="26" Height="26" Margin="0,0,2,0" ToolTip="展开 / 收起左侧任务栏（不改变窗口外框大小，也可向左拖拽竖线自动吸附隐藏）">
       <Viewbox Width="15" Height="15">
        <Canvas Width="24" Height="24">
         <Path Data="M4 4h16a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1z M9 4v16" Stroke="#52525B" StrokeThickness="1.8" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"/>
        </Canvas>
       </Viewbox>
      </Button>
-     <Border Width="18" Height="18" CornerRadius="4.5" Background="#18181F" BorderBrush="#27272A" BorderThickness="1" VerticalAlignment="Center" Margin="0,0,6,0">
-      <TextBlock Text="R" FontSize="11" FontWeight="Bold" Foreground="#FEFEFF" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,-0.5,0,0"/>
-     </Border>
-     <TextBlock Text="RelayStudio" FontSize="13" FontWeight="Bold" Foreground="#18181B" VerticalAlignment="Center" Margin="0,0,8,0"/>
-     <Button x:Name="ConnIconBadgeButton" Padding="8,2" MinHeight="24" Background="#FFFFFF" BorderBrush="#E4E4E7" BorderThickness="1" Margin="0,0,6,0" ToolTip="点击打开「OpenAI 隧道配置」切换隧道或管理 API Key">
-      <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-       <Ellipse x:Name="TopStatusDot" Width="7" Height="7" Fill="#16A34A" VerticalAlignment="Center" Margin="0,0,6,0"/>
-       <Border x:Name="ConnProfileMiniTagBorder" Background="Transparent" CornerRadius="4" Padding="0" VerticalAlignment="Center">
-        <TextBlock x:Name="ConnProfileMiniTagText" Text="主工作台 ▾" FontSize="11.5" FontWeight="SemiBold" Foreground="#18181B" TextWrapping="NoWrap"/>
-       </Border>
-      </StackPanel>
+     <Button x:Name="ThemeToggleButton" Style="{StaticResource IconButton}" Width="26" Height="26" Margin="0,0,0,0" ToolTip="一键切换深色 / 浅色模式 (Ctrl+Shift+D)&#x0a;右键点击：恢复「跟随系统」">
+      <Viewbox Width="13" Height="13">
+       <Canvas Width="24" Height="24">
+        <Path x:Name="ThemeToggleIconPath" Data="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" Stroke="#52525B" StrokeThickness="1.8" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"/>
+       </Canvas>
+      </Viewbox>
      </Button>
+     <Button x:Name="GlobalSettingsButton" Style="{StaticResource IconButton}" Width="26" Height="26" Margin="20,0,4,0" ToolTip="通用设置（本地内核、自动归档、默认载体、CLI 智能体与外观）">
+      <Viewbox Width="13.5" Height="13.5">
+       <Canvas Width="24" Height="24">
+        <Path Data="M12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6z M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" Stroke="#52525B" StrokeThickness="1.8" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"/>
+       </Canvas>
+      </Viewbox>
+     </Button>
+     <Border x:Name="TunnelCapsuleBorder" Background="#FFFFFF" BorderBrush="#E4E4E7" BorderThickness="1" CornerRadius="8" Padding="0" Margin="0,0,6,0" VerticalAlignment="Center">
+      <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+       <StackPanel x:Name="CapsuleSegmentsPanel" Orientation="Horizontal" VerticalAlignment="Center">
+        <Button x:Name="ConnIconBadgeButton" Padding="8,2" MinHeight="24" Background="Transparent" BorderBrush="Transparent" BorderThickness="0" ToolTip="点击打开「OpenAI 隧道配置」切换隧道或管理 API Key">
+         <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+          <Ellipse x:Name="TopStatusDot" Width="7" Height="7" Fill="#16A34A" VerticalAlignment="Center" Margin="0,0,6,0"/>
+          <Border x:Name="ConnProfileMiniTagBorder" Background="Transparent" CornerRadius="4" Padding="0" VerticalAlignment="Center">
+           <TextBlock x:Name="ConnProfileMiniTagText" Text="OpenAI · 主工作台 ▾" FontSize="11.5" FontWeight="SemiBold" Foreground="#18181B" TextWrapping="NoWrap"/>
+          </Border>
+         </StackPanel>
+        </Button>
+        <StackPanel x:Name="CapsuleExtraSegmentsPanel" Orientation="Horizontal" VerticalAlignment="Center"/>
+       </StackPanel>
+       <Border Width="1" Background="#E4E4E7" Margin="0,3,0,3"/>
+       <Button x:Name="AddPlatformCellButton" Content="＋" Padding="7,2" MinWidth="24" MinHeight="24" Background="Transparent" BorderBrush="Transparent" BorderThickness="0" FontSize="12" FontWeight="Bold" Foreground="#71717A" ToolTip="添加或管理平台配置分栏"/>
+      </StackPanel>
+     </Border>
      <Border x:Name="TopHeartbeatPillBorder" Background="#FEF2F2" BorderBrush="#FECACA" BorderThickness="1" CornerRadius="12" Padding="9,2" MinHeight="22" VerticalAlignment="Center" Visibility="Collapsed" Cursor="Hand" ToolTip="隧道或本地内核连接异常，点击打开配置面板排查">
       <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
        <Ellipse x:Name="TopHeartbeatDot" Width="6" Height="6" Fill="#EF4444" VerticalAlignment="Center" Margin="0,0,5,0"/>
@@ -395,20 +418,6 @@ $script:PANE_SNAP_HIDE_PX = 140.0
      </Border>
     </StackPanel>
     <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
-     <Button x:Name="ThemeToggleButton" Style="{StaticResource IconButton}" Width="28" Height="26" Margin="0,0,2,0" ToolTip="一键切换深色 / 浅色模式 (Ctrl+Shift+D)&#x0a;右键点击：恢复「跟随系统」">
-      <Viewbox Width="13" Height="13">
-       <Canvas Width="24" Height="24">
-        <Path x:Name="ThemeToggleIconPath" Data="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" Stroke="#52525B" StrokeThickness="1.8" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"/>
-       </Canvas>
-      </Viewbox>
-     </Button>
-     <Button x:Name="GlobalSettingsButton" Style="{StaticResource IconButton}" Width="28" Height="26" Margin="0,0,2,0" ToolTip="通用设置（本地内核、自动归档、默认载体、CLI 智能体与外观）">
-      <Viewbox Width="13.5" Height="13.5">
-       <Canvas Width="24" Height="24">
-        <Path Data="M12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6z M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" Stroke="#52525B" StrokeThickness="1.8" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"/>
-       </Canvas>
-      </Viewbox>
-     </Button>
      <Button x:Name="AppMinButton" Style="{StaticResource IconButton}" Width="28" Height="26" Margin="0,0,2,0" ToolTip="最小化窗口">
       <Viewbox Width="12" Height="12">
        <Canvas Width="24" Height="24">
@@ -601,11 +610,16 @@ $script:PANE_SNAP_HIDE_PX = 140.0
    </Border.Effect>
    <StackPanel>
     <Grid Margin="0,0,0,8">
-     <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+     <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
      <TextBlock x:Name="PopoverHeaderTitle" Text="OpenAI 隧道配置 (1)" FontSize="13.5" FontWeight="Bold" Foreground="#18181B" VerticalAlignment="Center"/>
-     <Button x:Name="AddProfileButton" Grid.Column="1" Content="+ 新增配置" Padding="9,3" MinHeight="25" FontSize="11.5" FontWeight="SemiBold" Background="#FFFFFF" BorderBrush="#E4E4E7"/>
-     <Button x:Name="TogglePopoverEditButton" Grid.Column="2" Content="✎ 编辑当前" Style="{StaticResource LinkButton}" FontSize="12" FontWeight="SemiBold" Visibility="Collapsed"/>
+     <Button x:Name="RemoveCapsulePlatformButton" Grid.Column="1" Content="移除此栏" Style="{StaticResource LinkButton}" Foreground="#71717A" FontSize="11.5" Margin="0,0,8,0" Visibility="Collapsed"/>
+     <Button x:Name="AddProfileButton" Grid.Column="2" Content="+ 新增配置" Padding="9,3" MinHeight="25" FontSize="11.5" FontWeight="SemiBold" Background="#FFFFFF" BorderBrush="#E4E4E7"/>
+     <Button x:Name="TogglePopoverEditButton" Grid.Column="3" Content="✎ 编辑当前" Style="{StaticResource LinkButton}" FontSize="12" FontWeight="SemiBold" Visibility="Collapsed"/>
     </Grid>
+
+    <Border x:Name="AddPlatformPanelBorder" Background="#FAFAFA" BorderBrush="#E4E4E7" BorderThickness="1" CornerRadius="8" Padding="10,8" Margin="0,0,0,8" Visibility="Collapsed">
+     <StackPanel x:Name="AddPlatformListPanel"/>
+    </Border>
 
     <!-- Dynamic Multi-Profile Strip + Inline Accordion Edit Container -->
     <ScrollViewer x:Name="ProfilesListScroll" MaxHeight="240" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Margin="0,0,0,8">
@@ -636,9 +650,9 @@ $script:PANE_SNAP_HIDE_PX = 140.0
       <StackPanel>
        <TextBlock Text="配置名称" FontSize="11" Foreground="#52525B" FontWeight="SemiBold" Margin="0,0,0,2"/>
        <TextBox x:Name="ProfileNameInput" AutomationProperties.Name="配置名称" FontSize="11.5" Padding="7,3" MinHeight="24" Margin="0,0,0,5"/>
-       <TextBlock Text="隧道编号或完整链接" FontSize="11" Foreground="#52525B" FontWeight="SemiBold" Margin="0,0,0,2"/>
+       <TextBlock x:Name="TunnelInputLabel" Text="隧道编号或完整链接" FontSize="11" Foreground="#52525B" FontWeight="SemiBold" Margin="0,0,0,2"/>
        <TextBox x:Name="TunnelInput" AutomationProperties.Name="隧道编号或链接" FontFamily="Consolas, Cascadia Mono, Source Han Serif SC VF, Noto Serif SC" FontSize="11.5" Padding="7,3" MinHeight="24" Margin="0,0,0,5"/>
-       <TextBlock Text="OpenAI API Key" FontSize="11" Foreground="#52525B" FontWeight="SemiBold" Margin="0,0,0,2"/>
+       <TextBlock x:Name="KeyInputLabel" Text="OpenAI API Key" FontSize="11" Foreground="#52525B" FontWeight="SemiBold" Margin="0,0,0,2"/>
        <TextBox x:Name="KeyInput" AutomationProperties.Name="OpenAI API Key" FontFamily="Consolas, Cascadia Mono, Source Han Serif SC VF, Noto Serif SC" FontSize="11.5" Padding="7,3" MinHeight="24" Margin="0,0,0,5"/>
        <TextBlock x:Name="KeyHint" Foreground="#71717A" FontSize="10.5" Visibility="Collapsed"/>
 
@@ -671,8 +685,8 @@ $script:PANE_SNAP_HIDE_PX = 140.0
       <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
       <CheckBox x:Name="ShieldCheck" Content="内核直通" IsChecked="True" Visibility="Collapsed"/>
       <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
-       <Button x:Name="PlatformButton" Content="打开 OpenAI 隧道设置 ↗" Style="{StaticResource LinkButton}" FontSize="11" Margin="0,0,10,0"/>
-       <Button x:Name="ApiKeysButton" Content="获取或管理 API Key ↗" Style="{StaticResource LinkButton}" FontSize="11"/>
+       <Button x:Name="ApiKeysButton" Content="获取或管理 API Key ↗" Style="{StaticResource LinkButton}" FontSize="11" Margin="0,0,10,0"/>
+       <Button x:Name="PlatformButton" Content="打开 OpenAI 隧道设置 ↗" Style="{StaticResource LinkButton}" FontSize="11"/>
       </StackPanel>
       <Button x:Name="QuickConnectButton" Grid.Column="1" Content="▶ 启动隧道" Background="#2563EB" BorderBrush="#2563EB" Foreground="#FEFEFF" FontWeight="SemiBold" Padding="12,4" MinHeight="27" FontSize="11.5" Margin="0,0,6,0"/>
       <Button x:Name="DisconnectButton" Grid.Column="2" Content="断开隧道" Padding="9,4" MinHeight="27" FontSize="11.5"/>
@@ -1578,29 +1592,271 @@ function Invoke-RescanCliAgents {
     Show-QuickToast "✓ 已重新检测本机 CLI 智能体（共发现 $($agents.Count) 个）"
 }
 
+function Get-CapsulePlatformMeta([string]$Platform = 'openai') {
+    $p = if ($Platform) { $Platform.Trim().ToLowerInvariant() } else { 'openai' }
+    switch ($p) {
+        'claude' {
+            return [pscustomobject]@{
+                Code = 'claude'; Title = 'Claude'; Kind = 'apikey'
+                SecondLabel = 'Base URL / 接入点'; KeyLabel = 'Anthropic API Key'
+                ApiKeysUrl = 'https://console.anthropic.com/settings/keys'
+                PlatText = '网页端 Connectors ↗'; PlatUrl = 'https://claude.ai/settings/connectors'
+            }
+        }
+        'gemini' {
+            return [pscustomobject]@{
+                Code = 'gemini'; Title = 'Gemini'; Kind = 'apikey'
+                SecondLabel = 'Base URL / 接入点'; KeyLabel = 'Gemini API Key'
+                ApiKeysUrl = 'https://aistudio.google.com/app/apikey'
+                PlatText = '打开 Google AI Studio ↗'; PlatUrl = 'https://aistudio.google.com/'
+            }
+        }
+        'deepseek' {
+            return [pscustomobject]@{
+                Code = 'deepseek'; Title = 'DeepSeek'; Kind = 'apikey'
+                SecondLabel = 'Base URL / 接入点'; KeyLabel = 'DeepSeek API Key'
+                ApiKeysUrl = 'https://platform.deepseek.com/api_keys'
+                PlatText = '开放平台文档 ↗'; PlatUrl = 'https://api-docs.deepseek.com/'
+            }
+        }
+        'opencode' {
+            return [pscustomobject]@{
+                Code = 'opencode'; Title = 'OpenCode'; Kind = 'apikey'
+                SecondLabel = 'Base URL / 接入点'; KeyLabel = 'OpenCode API Key'
+                ApiKeysUrl = 'https://opencode.ai/'
+                PlatText = 'OpenCode 官方文档 ↗'; PlatUrl = 'https://opencode.ai/docs'
+            }
+        }
+        default {
+            return [pscustomobject]@{
+                Code = 'openai'; Title = 'OpenAI'; Kind = 'tunnel'
+                SecondLabel = '隧道编号或完整链接'; KeyLabel = 'OpenAI API Key'
+                ApiKeysUrl = 'https://platform.openai.com/settings/organization/api-keys'
+                PlatText = '打开 OpenAI 隧道设置 ↗'; PlatUrl = 'https://platform.openai.com/settings/organization/tunnels'
+            }
+        }
+    }
+}
+
+function Select-CapsulePlatform([string]$Platform = 'openai') {
+    $p = if ($Platform) { $Platform.Trim().ToLowerInvariant() } else { 'openai' }
+    $script:activeCapsulePlatform = $p
+    $script:addPlatformPickerOpen = $false
+    if ($script:controls.AddPlatformPanelBorder) {
+        $script:controls.AddPlatformPanelBorder.Visibility = 'Collapsed'
+    }
+    $script:globalSettingsOpen = $false
+    if ($script:controls.GlobalSettingsPopoverBorder) {
+        $script:controls.GlobalSettingsPopoverBorder.Visibility = 'Collapsed'
+    }
+    $script:popoverEditMode = $false
+    $script:popoverExpandedProfileId = ''
+    if ($script:controls.FormScroll) { $script:controls.FormScroll.Visibility = 'Collapsed' }
+    $script:profilesState = Get-ConnectionProfiles $script:context $script:settings
+    $platProfs = @($script:profilesState.Profiles | Where-Object {
+        $pl = if ($_.PSObject.Properties['Platform'] -and $_.Platform) { ([string]$_.Platform).ToLowerInvariant() } else { 'openai' }
+        $pl -eq $p
+    })
+    $actProf = $platProfs | Where-Object { $_.IsActive } | Select-Object -First 1
+    if (-not $actProf -and $platProfs.Count -gt 0) { $actProf = $platProfs[0] }
+    $script:viewingProfileId = if ($actProf) { [string]$actProf.Id } else { '' }
+    $script:popoverOpen = $true
+    if ($script:controls.KeyPopoverBorder) {
+        $script:controls.KeyPopoverBorder.Visibility = 'Visible'
+        Start-SmoothEnterAnimation $script:controls.KeyPopoverBorder -FromY -6 -DurationMs 160
+    }
+    Refresh-ProfilePopoverState
+}
+
+function Toggle-AddPlatformPopover {
+    $script:globalSettingsOpen = $false
+    if ($script:controls.GlobalSettingsPopoverBorder) {
+        $script:controls.GlobalSettingsPopoverBorder.Visibility = 'Collapsed'
+    }
+    if ($script:popoverOpen -and $script:addPlatformPickerOpen) {
+        $script:addPlatformPickerOpen = $false
+        $script:popoverOpen = $false
+        if ($script:controls.AddPlatformPanelBorder) { $script:controls.AddPlatformPanelBorder.Visibility = 'Collapsed' }
+        if ($script:controls.KeyPopoverBorder) { $script:controls.KeyPopoverBorder.Visibility = 'Collapsed' }
+        return
+    }
+    $script:popoverOpen = $true
+    $script:addPlatformPickerOpen = $true
+    $script:popoverEditMode = $false
+    $script:popoverExpandedProfileId = ''
+    if ($script:controls.FormScroll) { $script:controls.FormScroll.Visibility = 'Collapsed' }
+    if ($script:controls.KeyPopoverBorder) {
+        $script:controls.KeyPopoverBorder.Visibility = 'Visible'
+        Start-SmoothEnterAnimation $script:controls.KeyPopoverBorder -FromY -6 -DurationMs 160
+    }
+    Refresh-ProfilePopoverState
+}
+
+function Invoke-SelectOrAddCapsulePlatform([string]$Platform) {
+    $p = if ($Platform) { $Platform.Trim().ToLowerInvariant() } else { 'openai' }
+    $script:profilesState = Add-CapsulePlatform -Context $script:context -Platform $p -Settings $script:settings
+    Select-CapsulePlatform $p
+    Update-SessionCards
+}
+
+function Invoke-RemoveCurrentCapsulePlatform {
+    $curPlat = if ($script:activeCapsulePlatform) { $script:activeCapsulePlatform.Trim().ToLowerInvariant() } else { 'openai' }
+    if ($curPlat -eq 'openai') { return }
+    $script:profilesState = Remove-CapsulePlatform -Context $script:context -Platform $curPlat -Settings $script:settings
+    $script:activeCapsulePlatform = 'openai'
+    $script:addPlatformPickerOpen = $false
+    $script:viewingProfileId = $script:profilesState.ActiveProfileId
+    Refresh-ProfilePopoverState
+    Update-SessionCards
+}
+
 function Refresh-ProfilePopoverState {
     $script:profilesState = Get-ConnectionProfiles $script:context $script:settings
     $allProfs = @($script:profilesState.Profiles)
-    $activeProf = $allProfs | Where-Object { $_.IsActive } | Select-Object -First 1
-    if (-not $activeProf -and $allProfs.Count -gt 0) {
-        $activeProf = $allProfs[0]
+    $enabledPlats = @(if ($script:profilesState.PSObject.Properties['EnabledPlatforms'] -and $script:profilesState.EnabledPlatforms) {
+        $script:profilesState.EnabledPlatforms
+    } else { @('openai') })
+    if (-not $script:activeCapsulePlatform -or ($enabledPlats -notcontains $script:activeCapsulePlatform)) {
+        $script:activeCapsulePlatform = 'openai'
     }
-    if (-not $script:viewingProfileId -or ($script:viewingProfileId -ne 'new' -and -not ($allProfs | Where-Object { $_.Id -eq $script:viewingProfileId }))) {
+    $curPlat = $script:activeCapsulePlatform
+    $platMeta = Get-CapsulePlatformMeta $curPlat
+
+    $openaiProfs = @($allProfs | Where-Object { (-not $_.PSObject.Properties['Platform']) -or (-not $_.Platform) -or ([string]$_.Platform).ToLowerInvariant() -eq 'openai' })
+    $openaiActiveProf = $openaiProfs | Where-Object { $_.IsActive } | Select-Object -First 1
+    if (-not $openaiActiveProf -and $openaiProfs.Count -gt 0) { $openaiActiveProf = $openaiProfs[0] }
+
+    $platProfs = @($allProfs | Where-Object {
+        $pl = if ($_.PSObject.Properties['Platform'] -and $_.Platform) { ([string]$_.Platform).ToLowerInvariant() } else { 'openai' }
+        $pl -eq $curPlat
+    })
+    $activeProf = $platProfs | Where-Object { $_.IsActive } | Select-Object -First 1
+    if (-not $activeProf -and $platProfs.Count -gt 0) {
+        $activeProf = $platProfs[0]
+    }
+    if (-not $script:viewingProfileId -or ($script:viewingProfileId -ne 'new' -and -not ($platProfs | Where-Object { $_.Id -eq $script:viewingProfileId }))) {
         $script:viewingProfileId = if ($activeProf) { $activeProf.Id } else { '' }
     }
-    $viewProf = $allProfs | Where-Object { $_.Id -eq $script:viewingProfileId } | Select-Object -First 1
+    $viewProf = $platProfs | Where-Object { $_.Id -eq $script:viewingProfileId } | Select-Object -First 1
     if (-not $viewProf -and $script:viewingProfileId -ne 'new') { $viewProf = $activeProf }
 
     $tunRunning = [bool]($script:display -and $script:display.Running)
-    $activeShortName = if ($activeProf -and $activeProf.Name) {
-        ($activeProf.Name -replace '\s*(主力隧道|主力号|隧道|配置).*$', '').Trim()
+    $activeShortName = if ($openaiActiveProf -and $openaiActiveProf.Name) {
+        ($openaiActiveProf.Name -replace '\s*(主力隧道|主力号|隧道|配置).*$', '').Trim()
     } else { '未配置' }
     if (-not $activeShortName) { $activeShortName = '主力隧道' }
     if ($activeShortName.Length -gt 12) { $activeShortName = $activeShortName.Substring(0, 12) }
-    $script:controls.ConnProfileMiniTagText.Text = "$activeShortName ▾"
+    $script:controls.ConnProfileMiniTagText.Text = $(if ($enabledPlats.Count -gt 1) { "OpenAI · $activeShortName ▾" } else { "$activeShortName ▾" })
+
+    if ($script:controls.CapsuleExtraSegmentsPanel) {
+        $script:controls.CapsuleExtraSegmentsPanel.Children.Clear()
+        foreach ($ep in @($enabledPlats | Where-Object { $_ -ne 'openai' })) {
+            $div = New-Object Windows.Controls.Border
+            $div.Width = 1
+            $div.Background = ConvertTo-Brush '#E4E4E7'
+            $div.Margin = [Windows.Thickness]::new(0, 3, 0, 3)
+            [void]$script:controls.CapsuleExtraSegmentsPanel.Children.Add($div)
+
+            $epMeta = Get-CapsulePlatformMeta $ep
+            $epAct = $allProfs | Where-Object { ([string]$_.Platform).ToLowerInvariant() -eq $ep -and $_.IsActive } | Select-Object -First 1
+            if (-not $epAct) {
+                $epAct = $allProfs | Where-Object { ([string]$_.Platform).ToLowerInvariant() -eq $ep } | Select-Object -First 1
+            }
+            $epShort = if ($epAct -and $epAct.Name) { [string]$epAct.Name } else { '默认' }
+            $epReady = [bool]($epAct -and $epAct.Enabled -and $epAct.HasKey)
+            $segBtn = New-Object Windows.Controls.Button
+            $segBtn.Padding = [Windows.Thickness]::new(8, 2, 8, 2)
+            $segBtn.MinHeight = 24
+            $segBtn.Background = ConvertTo-Brush 'Transparent'
+            $segBtn.BorderBrush = ConvertTo-Brush 'Transparent'
+            $segBtn.BorderThickness = [Windows.Thickness]::new(0)
+            $segBtn.Tag = $ep
+            $segStack = New-Object Windows.Controls.StackPanel
+            $segStack.Orientation = 'Horizontal'
+            $segStack.VerticalAlignment = 'Center'
+            $segDot = New-Object Windows.Shapes.Ellipse
+            $segDot.Width = 7; $segDot.Height = 7
+            $segDot.Fill = ConvertTo-Brush $(if ($epReady) { '#16A34A' } else { '#A1A1AA' })
+            $segDot.VerticalAlignment = 'Center'
+            $segDot.Margin = [Windows.Thickness]::new(0, 0, 6, 0)
+            [void]$segStack.Children.Add($segDot)
+            $segTxt = New-Object Windows.Controls.TextBlock
+            $segTxt.Text = "$($epMeta.Title) · $epShort ▾"
+            $segTxt.FontSize = 11.5
+            $segTxt.FontWeight = 'SemiBold'
+            $segTxt.Foreground = ConvertTo-Brush '#18181B'
+            $segTxt.VerticalAlignment = 'Center'
+            [void]$segStack.Children.Add($segTxt)
+            $segBtn.Content = $segStack
+            $segBtn.Add_Click({
+                param($s, $e)
+                if ($s.Tag) { Select-CapsulePlatform ([string]$s.Tag) }
+            })
+            [void]$script:controls.CapsuleExtraSegmentsPanel.Children.Add($segBtn)
+        }
+    }
+
+    if ($script:controls.AddPlatformPanelBorder -and $script:controls.AddPlatformListPanel) {
+        $script:controls.AddPlatformPanelBorder.Visibility = $(if ($script:addPlatformPickerOpen) { 'Visible' } else { 'Collapsed' })
+        $script:controls.AddPlatformListPanel.Children.Clear()
+        foreach ($presetCode in @('openai', 'claude', 'gemini', 'deepseek', 'opencode')) {
+            $pm = Get-CapsulePlatformMeta $presetCode
+            $isAdded = ($enabledPlats -contains $presetCode)
+            $pBtn = New-Object Windows.Controls.Button
+            $pBtn.HorizontalContentAlignment = 'Stretch'
+            $pBtn.Padding = [Windows.Thickness]::new(10, 5, 10, 5)
+            $pBtn.MinHeight = 28
+            $pBtn.Margin = [Windows.Thickness]::new(0, 0, 0, 4)
+            $pBtn.Background = ConvertTo-Brush '#FFFFFF'
+            $pBtn.BorderBrush = ConvertTo-Brush $(if ($curPlat -eq $presetCode) { '#60A5FA' } else { '#E4E4E7' })
+            $pBtn.BorderThickness = [Windows.Thickness]::new(1)
+            $pBtn.Tag = $presetCode
+            $pGrid = New-Object Windows.Controls.Grid
+            $pc0 = New-Object Windows.Controls.ColumnDefinition; $pc0.Width = [Windows.GridLength]::new(1, [Windows.GridUnitType]::Star)
+            $pc1 = New-Object Windows.Controls.ColumnDefinition; $pc1.Width = [Windows.GridLength]::Auto
+            [void]$pGrid.ColumnDefinitions.Add($pc0); [void]$pGrid.ColumnDefinitions.Add($pc1)
+            $pNameTxt = New-Object Windows.Controls.TextBlock
+            $pNameTxt.Text = $pm.Title
+            $pNameTxt.FontSize = 12
+            $pNameTxt.FontWeight = 'SemiBold'
+            $pNameTxt.Foreground = ConvertTo-Brush '#18181B'
+            $pNameTxt.VerticalAlignment = 'Center'
+            [Windows.Controls.Grid]::SetColumn($pNameTxt, 0)
+            [void]$pGrid.Children.Add($pNameTxt)
+            $pRightTxt = New-Object Windows.Controls.TextBlock
+            $pRightTxt.Text = $(if ($isAdded) { '已添加' } else { '+ 添加分栏' })
+            $pRightTxt.FontSize = 11
+            $pRightTxt.Foreground = ConvertTo-Brush $(if ($isAdded) { '#16A34A' } else { '#2563EB' })
+            $pRightTxt.VerticalAlignment = 'Center'
+            [Windows.Controls.Grid]::SetColumn($pRightTxt, 1)
+            [void]$pGrid.Children.Add($pRightTxt)
+            $pBtn.Content = $pGrid
+            $pBtn.Add_Click({
+                param($s, $e)
+                if ($s.Tag) { Invoke-SelectOrAddCapsulePlatform ([string]$s.Tag) }
+            })
+            [void]$script:controls.AddPlatformListPanel.Children.Add($pBtn)
+        }
+    }
 
     if ($script:controls.PopoverHeaderTitle) {
-        $script:controls.PopoverHeaderTitle.Text = "OpenAI 隧道配置 ($($allProfs.Count))"
+        $script:controls.PopoverHeaderTitle.Text = if ($curPlat -eq 'openai') {
+            "OpenAI 隧道配置 ($($platProfs.Count))"
+        } else {
+            "$($platMeta.Title) 接入配置 ($($platProfs.Count))"
+        }
+    }
+    if ($script:controls.RemoveCapsulePlatformButton) {
+        $script:controls.RemoveCapsulePlatformButton.Visibility = $(if ($curPlat -eq 'openai') { 'Collapsed' } else { 'Visible' })
+    }
+    if ($script:controls.TunnelInputLabel) {
+        $script:controls.TunnelInputLabel.Text = $platMeta.SecondLabel
+    }
+    if ($script:controls.KeyInputLabel) {
+        $script:controls.KeyInputLabel.Text = $platMeta.KeyLabel
+    }
+    if ($script:controls.PlatformButton) {
+        $script:controls.PlatformButton.Content = $platMeta.PlatText
     }
 
     if ($script:controls.ProfilesListScroll) {
@@ -1614,7 +1870,7 @@ function Refresh-ProfilePopoverState {
 
     if ($script:controls.ProfilesListPanel) {
         $script:controls.ProfilesListPanel.Children.Clear()
-        foreach ($prof in $allProfs) {
+        foreach ($prof in $platProfs) {
             $isProfActive = ($activeProf -and $prof.Id -eq $activeProf.Id)
             $isProfViewing = ($viewProf -and $prof.Id -eq $viewProf.Id)
             $isProfExpanded = ($script:popoverEditMode -and $script:popoverExpandedProfileId -eq $prof.Id)
@@ -1838,7 +2094,12 @@ function Refresh-ProfilePopoverState {
 
     # Bottom Start / Reconnect Button State
     if ($script:controls.QuickConnectButton) {
-        if ($viewProf -and $activeProf -and $viewProf.Id -ne $activeProf.Id) {
+        if ($curPlat -ne 'openai') {
+            $script:controls.QuickConnectButton.Content = "✓ 启用此配置"
+            $script:controls.QuickConnectButton.Background = ConvertTo-Brush '#2563EB'
+            $script:controls.QuickConnectButton.BorderBrush = ConvertTo-Brush '#2563EB'
+            $script:controls.QuickConnectButton.Foreground = ConvertTo-Brush '#FEFEFF'
+        } elseif ($viewProf -and $activeProf -and $viewProf.Id -ne $activeProf.Id) {
             $script:controls.QuickConnectButton.Content = "▶ 启动此隧道"
             $script:controls.QuickConnectButton.Background = ConvertTo-Brush '#2563EB'
             $script:controls.QuickConnectButton.BorderBrush = ConvertTo-Brush '#2563EB'
@@ -1856,12 +2117,20 @@ function Refresh-ProfilePopoverState {
         }
     }
 
-    $isPrimaryViewing = (-not $viewProf) -or ($viewProf.Id -eq 'prof_primary')
+    $isPrimaryViewing = ($curPlat -eq 'openai') -and ((-not $viewProf) -or ($viewProf.Id -eq 'prof_primary'))
     $plainKey = if ($viewProf -and $viewProf.PlainKey) { $viewProf.PlainKey } elseif ($isPrimaryViewing) { Get-SavedOpenAIKeyPlaintext $script:context } else { '' }
     $maskedKey = Format-MaskedApiKey $plainKey
     $script:controls.MaskedKeyText.Text = if ($script:keyMasked) { $maskedKey } elseif ($plainKey) { $plainKey } else { '尚未保存密钥（请点击编辑粘贴）' }
     $script:controls.ToggleKeyMaskButton.Content = if ($script:keyMasked) { '显示完整' } else { '隐藏明文' }
-    $tunText = if ($viewProf -and $viewProf.TunnelId) { $viewProf.TunnelId } elseif ($isPrimaryViewing -and $script:settings.tunnel_id) { $script:settings.tunnel_id } else { '尚未配置隧道编号' }
+    $tunText = if ($curPlat -ne 'openai') {
+        $(if ($viewProf -and $viewProf.BaseUrl) { [string]$viewProf.BaseUrl } else { '' })
+    } elseif ($viewProf -and $viewProf.TunnelId) {
+        $viewProf.TunnelId
+    } elseif ($isPrimaryViewing -and $script:settings.tunnel_id) {
+        $script:settings.tunnel_id
+    } else {
+        '尚未配置隧道编号'
+    }
     $script:controls.CurrentTunnelIdText.Text = $tunText
 
     if (-not $script:dirty -and $viewProf -and $script:controls.ProfileNameInput) {
@@ -1869,7 +2138,7 @@ function Refresh-ProfilePopoverState {
         $script:initializing = $true
         try {
             $script:controls.ProfileNameInput.Text = [string]$viewProf.Name
-            $script:controls.TunnelInput.Text = [string]$viewProf.TunnelId
+            $script:controls.TunnelInput.Text = $(if ($curPlat -eq 'openai') { [string]$viewProf.TunnelId } else { [string]$viewProf.BaseUrl })
             $script:controls.KeyInput.Text = [string]$plainKey
         } finally {
             $script:initializing = $prevInit
@@ -2013,11 +2282,11 @@ function Enter-ProfileEditMode([string]$ProfileId = '') {
     $script:profilesState = Get-ConnectionProfiles $script:context $script:settings
     $viewProf = $script:profilesState.Profiles | Where-Object { $_.Id -eq $script:viewingProfileId } | Select-Object -First 1
     if ($viewProf) {
+        $pPlat = if ($viewProf.PSObject.Properties['Platform'] -and $viewProf.Platform) { ([string]$viewProf.Platform).ToLowerInvariant() } else { 'openai' }
         $script:initializing = $true
         try {
             if ($script:controls.ProfileNameInput) { $script:controls.ProfileNameInput.Text = [string]$viewProf.Name }
-            $script:controls.TunnelInput.Text = [string]$viewProf.TunnelId
-            $script:controls.KeyInput.Text = [string]$viewProf.PlainKey
+            $script:controls.TunnelInput.Text = $(if ($pPlat -eq 'openai') { [string]$viewProf.TunnelId } else { [string]$viewProf.BaseUrl })
             $script:controls.KeyInput.Text = [string]$viewProf.PlainKey
         } finally {
             $script:initializing = $false
@@ -2048,10 +2317,11 @@ function Select-ProfileCard([string]$ProfileId) {
     $script:profilesState = Get-ConnectionProfiles $script:context $script:settings
     $viewProf = $script:profilesState.Profiles | Where-Object { $_.Id -eq $ProfileId } | Select-Object -First 1
     if ($viewProf -and -not $script:popoverEditMode) {
+        $pPlat = if ($viewProf.PSObject.Properties['Platform'] -and $viewProf.Platform) { ([string]$viewProf.Platform).ToLowerInvariant() } else { 'openai' }
         $script:initializing = $true
         try {
             if ($script:controls.ProfileNameInput) { $script:controls.ProfileNameInput.Text = [string]$viewProf.Name }
-            $script:controls.TunnelInput.Text = [string]$viewProf.TunnelId
+            $script:controls.TunnelInput.Text = $(if ($pPlat -eq 'openai') { [string]$viewProf.TunnelId } else { [string]$viewProf.BaseUrl })
             $script:controls.KeyInput.Text = [string]$viewProf.PlainKey
         } finally {
             $script:initializing = $false
@@ -2062,8 +2332,14 @@ function Select-ProfileCard([string]$ProfileId) {
 
 function Start-NewProfileForm {
     $script:profilesState = Get-ConnectionProfiles $script:context $script:settings
-    $countNext = @($script:profilesState.Profiles).Count + 1
-    $savedState = Save-ConnectionProfile -Context $script:context -Settings $script:settings -ProfileId 'new' -Name "新隧道配置 #$countNext" -TunnelId '' -ApiKey '' -SetActive:$false
+    $curPlat = if ($script:activeCapsulePlatform) { $script:activeCapsulePlatform.Trim().ToLowerInvariant() } else { 'openai' }
+    $platProfs = @($script:profilesState.Profiles | Where-Object {
+        $pl = if ($_.PSObject.Properties['Platform'] -and $_.Platform) { ([string]$_.Platform).ToLowerInvariant() } else { 'openai' }
+        $pl -eq $curPlat
+    })
+    $countNext = $platProfs.Count + 1
+    $defName = if ($curPlat -eq 'openai') { "新隧道配置 #$countNext" } else { "新配置 #$countNext" }
+    $savedState = Save-ConnectionProfile -Context $script:context -Settings $script:settings -ProfileId 'new' -Name $defName -TunnelId '' -ApiKey '' -Platform $curPlat -SetActive:$false
     $newId = if ($savedState -and $savedState.PSObject.Properties['LastSavedProfileId'] -and $savedState.LastSavedProfileId) {
         [string]$savedState.LastSavedProfileId
     } else {
@@ -4511,7 +4787,37 @@ function Sync-ComposerModelAndEffortCombos($StateInfo, $AvailModels, [string]$Cu
         $defEf = if ($_.PSObject.Properties['default_effort']) { [string]$_.default_effort } else { '' }
         "$s|$t|$ef|$cfgFlag|$defEf"
     }) -join ';')
-    $catalogSig = "$modelSlugsSig||webM=$WebModel||webE=$WebEffort||curM=$CurModel"
+    $profStateRef = if ($StateInfo.PSObject.Properties['ProfilesState'] -and $StateInfo.ProfilesState) {
+        $StateInfo.ProfilesState
+    } elseif ($script:profilesState) {
+        $script:profilesState
+    } else { $null }
+    $enabledPlats = @(if ($profStateRef -and $profStateRef.PSObject.Properties['EnabledPlatforms'] -and $profStateRef.EnabledPlatforms) {
+        $profStateRef.EnabledPlatforms | Where-Object { $_ } | ForEach-Object { ([string]$_).Trim().ToLowerInvariant() }
+    } else { @('openai') })
+    if ($enabledPlats.Count -eq 0) { $enabledPlats = @('openai') }
+    $platsSig = (@($enabledPlats | ForEach-Object {
+        $pCode = $_
+        $actP = $null
+        if ($profStateRef -and $profStateRef.PSObject.Properties['Profiles'] -and $profStateRef.Profiles) {
+            $actP = $profStateRef.Profiles | Where-Object {
+                $pl = if ($_.PSObject.Properties['Platform'] -and $_.Platform) { ([string]$_.Platform).ToLowerInvariant() } else { 'openai' }
+                $pl -eq $pCode -and ($_.PSObject.Properties['IsActive'] -and [bool]$_.IsActive)
+            } | Select-Object -First 1
+            if (-not $actP) {
+                $actP = $profStateRef.Profiles | Where-Object {
+                    $pl = if ($_.PSObject.Properties['Platform'] -and $_.Platform) { ([string]$_.Platform).ToLowerInvariant() } else { 'openai' }
+                    $pl -eq $pCode
+                } | Select-Object -First 1
+            }
+        }
+        $pName = if ($actP -and $actP.PSObject.Properties['Name'] -and $actP.Name) { [string]$actP.Name } else { '默认' }
+        $pEn = if ($actP -and $actP.PSObject.Properties['Enabled']) { [bool]$actP.Enabled } else { $true }
+        $pHk = if ($actP -and $actP.PSObject.Properties['HasKey']) { [bool]$actP.HasKey } else { $false }
+        "${pCode}:${pName}:${pEn}:${pHk}"
+    }) -join '|')
+    $isColdStartNoWebModel = ($modelsArr.Count -eq 0) -and [string]::IsNullOrWhiteSpace($WebModel) -and ([string]::IsNullOrWhiteSpace($CurModel) -or $CurModel -eq 'inherit') -and [string]::IsNullOrWhiteSpace($WebEffort)
+    $catalogSig = "$modelSlugsSig||webM=$WebModel||webE=$WebEffort||curM=$CurModel||plats=$platsSig||cold=$isColdStartNoWebModel"
 
     $modelCombo = $StateInfo.ModelCombo
     $effortCombo = $StateInfo.EffortCombo
@@ -4632,7 +4938,9 @@ function Sync-ComposerModelAndEffortCombos($StateInfo, $AvailModels, [string]$Cu
         [string]$matchedModelEntry.default_effort
     } else { '' }
     $resolvedWebId = & $resolveRawEffortId $rawWebEffortCandidate @()
-    $webEffortDisplay = if ($resolvedWebId -and $resolvedWebId -ne 'inherit') {
+    $webEffortDisplay = if ($isColdStartNoWebModel) {
+        '跟随网页'
+    } elseif ($resolvedWebId -and $resolvedWebId -ne 'inherit') {
         $resolvedWebId
     } elseif ($WebModel -match '(?i)(^gpt-6$|^gpt-5-6$|-instant$|GPT-6 Instant|GPT-5\.6 Instant)') {
         'none'
@@ -4645,12 +4953,53 @@ function Sync-ComposerModelAndEffortCombos($StateInfo, $AvailModels, [string]$Cu
         $StateInfo.LastCatalogSig = $catalogSig
         $StateInfo.AvailableModels = $modelsArr
 
+        $buildPlatGroupHeader = {
+            param([string]$PlatCode)
+            $pTitle = switch ($PlatCode) {
+                'openai'   { 'OpenAI' }
+                'claude'   { 'Claude' }
+                'gemini'   { 'Gemini' }
+                'deepseek' { 'DeepSeek' }
+                'opencode' { 'OpenCode' }
+                default    { $PlatCode }
+            }
+            $actP = $null
+            if ($profStateRef -and $profStateRef.PSObject.Properties['Profiles'] -and $profStateRef.Profiles) {
+                $actP = $profStateRef.Profiles | Where-Object {
+                    $pl = if ($_.PSObject.Properties['Platform'] -and $_.Platform) { ([string]$_.Platform).ToLowerInvariant() } else { 'openai' }
+                    $pl -eq $PlatCode -and ($_.PSObject.Properties['IsActive'] -and [bool]$_.IsActive)
+                } | Select-Object -First 1
+                if (-not $actP) {
+                    $actP = $profStateRef.Profiles | Where-Object {
+                        $pl = if ($_.PSObject.Properties['Platform'] -and $_.Platform) { ([string]$_.Platform).ToLowerInvariant() } else { 'openai' }
+                        $pl -eq $PlatCode
+                    } | Select-Object -First 1
+                }
+            }
+            $pName = if ($actP -and $actP.PSObject.Properties['Name'] -and $actP.Name) { [string]$actP.Name } else { '默认' }
+            $pEn = if ($actP -and $actP.PSObject.Properties['Enabled']) { [bool]$actP.Enabled } else { $true }
+            $pHk = if ($actP -and $actP.PSObject.Properties['HasKey']) { [bool]$actP.HasKey } else { $false }
+            $pKind = if ($actP -and $actP.PSObject.Properties['Kind'] -and $actP.Kind) { [string]$actP.Kind } elseif ($PlatCode -eq 'openai') { 'tunnel' } else { 'apikey' }
+            $pTid = if ($actP -and $actP.PSObject.Properties['TunnelId']) { [string]$actP.TunnelId } else { '' }
+            $isReady = if ($pKind -eq 'tunnel') { $pEn -and $pHk -and [bool]$pTid } else { $pEn -and $pHk }
+            $dotIcon = if ($isReady) { '🟢' } else { '⚪' }
+            $hdrItem = New-Object Windows.Controls.ComboBoxItem
+            $hdrItem.Content = "$dotIcon $pTitle · $pName"
+            $hdrItem.Tag = "__group_$PlatCode"
+            $hdrItem.IsEnabled = $false
+            return $hdrItem
+        }
+
         $modelCombo.ToolTip = "选择本任务使用的 ChatGPT 模型（默认继承原网页当前模型：$webModelDisplay）"
         $modelCombo.Items.Clear()
         $defaultModelItem = New-Object Windows.Controls.ComboBoxItem
         $defaultModelItem.Content = $(if ($IsNarrow) { '🤖 默认' } else { "🤖 默认 ($webModelDisplay)" })
         $defaultModelItem.Tag = 'inherit'
         [void]$modelCombo.Items.Add($defaultModelItem)
+
+        if ($enabledPlats.Count -gt 1) {
+            [void]$modelCombo.Items.Add((& $buildPlatGroupHeader $enabledPlats[0]))
+        }
 
         $seenModelTags = @{ 'inherit' = $true }
         foreach ($m in $modelsArr) {
@@ -4676,6 +5025,17 @@ function Sync-ComposerModelAndEffortCombos($StateInfo, $AvailModels, [string]$Cu
             [void]$modelCombo.Items.Add($extraItem)
         }
 
+        if ($enabledPlats.Count -gt 1) {
+            for ($pi = 1; $pi -lt $enabledPlats.Count; $pi++) {
+                $pCode = $enabledPlats[$pi]
+                [void]$modelCombo.Items.Add((& $buildPlatGroupHeader $pCode))
+                $pDefItem = New-Object Windows.Controls.ComboBoxItem
+                $pDefItem.Content = $(if ($IsNarrow) { '🤖 默认' } else { "🤖 默认 ($webModelDisplay)" })
+                $pDefItem.Tag = "inherit:$pCode"
+                [void]$modelCombo.Items.Add($pDefItem)
+            }
+        }
+
         $effortLabels = New-Object 'System.Collections.Generic.List[string]'
         foreach ($ri in $effortItemsResolved) {
             if ($ri.Id -and -not $effortLabels.Contains([string]$ri.Id)) {
@@ -4690,7 +5050,7 @@ function Sync-ComposerModelAndEffortCombos($StateInfo, $AvailModels, [string]$Cu
                                  ($null -ne $matchedModelEntry -and $matchedModelEntry.PSObject.Properties['fixed_effort'] -and [bool]$matchedModelEntry.fixed_effort) -or
                                  ($hasExplicitNonConfig -and -not $hasThinkingSiblingSupport)
         $isFixedEffortModel = ($effortLabels.Count -eq 0 -and $isExplicitFastOrFixed)
-        if ($effortLabels.Count -eq 0 -and -not $isFixedEffortModel) {
+        if ($effortLabels.Count -eq 0 -and -not $isFixedEffortModel -and -not $isColdStartNoWebModel) {
             if ($activeSlug -match '-pro$') {
                 foreach ($stdId in @('standard', 'max')) { [void]$effortLabels.Add($stdId) }
             } elseif ($activeSlug -match '-instant$') {
@@ -6226,43 +6586,57 @@ function Refresh-SecretHints {
 }
 
 function Save-Form {
-    $coreCfg = Get-CoreEngineConfig $script:context
-    $candidate = [pscustomobject]@{
-        schema_version = 1; tunnel_id = $script:controls.TunnelInput.Text; api_base_url = $script:controls.BaseInput.Text
-        runtime_root = $script:controls.RootInput.Text; tunnel_client = $script:controls.ClientInput.Text
-        health_port = 8789; credential_revision = $script:settings.credential_revision
-        readonly_shield = [bool]$script:controls.ShieldCheck.IsChecked; shield_port = $script:settings.shield_port
-        core_port = $coreCfg.CorePort
-        acp_max_concurrent_prompts = $coreCfg.AcpMaxConcurrentPrompts
-        acp_default_profile = $coreCfg.AcpDefaultProfile
-        browser_enabled = $coreCfg.BrowserEnabled
-        startup_mode = $coreCfg.StartupMode
-    }
+    $curPlat = if ($script:activeCapsulePlatform) { $script:activeCapsulePlatform.Trim().ToLowerInvariant() } else { 'openai' }
     $enteredKey = $script:controls.KeyInput.Text
-    $activeProf = if ($script:profilesState -and $script:profilesState.Profiles) {
-        $script:profilesState.Profiles | Where-Object { $_.IsActive } | Select-Object -First 1
-    } else { $null }
-    $targetProfId = if ($script:viewingProfileId) { $script:viewingProfileId } else {
-        if ($activeProf) { $activeProf.Id } else { 'prof_primary' }
-    }
-    $isEditingActive = (-not $activeProf) -or ($targetProfId -eq $activeProf.Id) -or (@($script:profilesState.Profiles).Count -le 1 -and $targetProfId -ne 'new')
-    if ($isEditingActive -and $script:controls.TunnelInput.Text.Trim()) {
-        Save-ConnectionSettings -Context $script:context -Settings $candidate -ApiKey $enteredKey
-        $script:settings = Read-ConnectionSettings $script:context
-    } elseif ($script:controls.TunnelInput.Text.Trim()) {
-        [void](ConvertTo-TunnelId $script:controls.TunnelInput.Text)
-    }
     $enteredName = if ($script:controls.ProfileNameInput -and $script:controls.ProfileNameInput.Text.Trim()) {
         $script:controls.ProfileNameInput.Text.Trim()
     } else { '' }
-    $savedState = Save-ConnectionProfile -Context $script:context -Settings $script:settings -ProfileId $targetProfId -Name $enteredName -TunnelId $script:controls.TunnelInput.Text -ApiKey $enteredKey -SetActive:$isEditingActive
-    if ($savedState -and $savedState.PSObject.Properties['LastSavedProfileId'] -and $savedState.LastSavedProfileId) {
-        $script:viewingProfileId = $savedState.LastSavedProfileId
-    } elseif ($savedState -and $savedState.ActiveProfileId) {
-        $script:viewingProfileId = $savedState.ActiveProfileId
-    }
-    if ($script:controls.TunnelInput.Text.Trim()) {
-        $script:controls.TunnelInput.Text = [string](ConvertTo-TunnelId $script:controls.TunnelInput.Text)
+    if ($curPlat -ne 'openai') {
+        $platProfs = @(if ($script:profilesState -and $script:profilesState.Profiles) {
+            $script:profilesState.Profiles | Where-Object { ([string]$_.Platform).ToLowerInvariant() -eq $curPlat }
+        })
+        $activeProf = $platProfs | Where-Object { $_.IsActive } | Select-Object -First 1
+        $targetProfId = if ($script:viewingProfileId) { $script:viewingProfileId } elseif ($activeProf) { $activeProf.Id } else { 'new' }
+        $isEditingActive = (-not $activeProf) -or ($targetProfId -eq $activeProf.Id) -or ($platProfs.Count -le 1 -and $targetProfId -ne 'new')
+        $savedState = Save-ConnectionProfile -Context $script:context -Settings $script:settings -ProfileId $targetProfId -Name $enteredName -TunnelId '' -ApiKey $enteredKey -Platform $curPlat -Kind 'apikey' -BaseUrl $script:controls.TunnelInput.Text -SetActive:$isEditingActive
+        if ($savedState -and $savedState.PSObject.Properties['LastSavedProfileId'] -and $savedState.LastSavedProfileId) {
+            $script:viewingProfileId = $savedState.LastSavedProfileId
+        }
+    } else {
+        $coreCfg = Get-CoreEngineConfig $script:context
+        $candidate = [pscustomobject]@{
+            schema_version = 1; tunnel_id = $script:controls.TunnelInput.Text; api_base_url = $script:controls.BaseInput.Text
+            runtime_root = $script:controls.RootInput.Text; tunnel_client = $script:controls.ClientInput.Text
+            health_port = 8789; credential_revision = $script:settings.credential_revision
+            readonly_shield = [bool]$script:controls.ShieldCheck.IsChecked; shield_port = $script:settings.shield_port
+            core_port = $coreCfg.CorePort
+            acp_max_concurrent_prompts = $coreCfg.AcpMaxConcurrentPrompts
+            acp_default_profile = $coreCfg.AcpDefaultProfile
+            browser_enabled = $coreCfg.BrowserEnabled
+            startup_mode = $coreCfg.StartupMode
+        }
+        $activeProf = if ($script:profilesState -and $script:profilesState.Profiles) {
+            $script:profilesState.Profiles | Where-Object { (-not $_.Platform -or $_.Platform -eq 'openai') -and $_.IsActive } | Select-Object -First 1
+        } else { $null }
+        $targetProfId = if ($script:viewingProfileId) { $script:viewingProfileId } else {
+            if ($activeProf) { $activeProf.Id } else { 'prof_primary' }
+        }
+        $isEditingActive = (-not $activeProf) -or ($targetProfId -eq $activeProf.Id) -or (@($script:profilesState.Profiles | Where-Object { -not $_.Platform -or $_.Platform -eq 'openai' }).Count -le 1 -and $targetProfId -ne 'new')
+        if ($isEditingActive -and $script:controls.TunnelInput.Text.Trim()) {
+            Save-ConnectionSettings -Context $script:context -Settings $candidate -ApiKey $enteredKey
+            $script:settings = Read-ConnectionSettings $script:context
+        } elseif ($script:controls.TunnelInput.Text.Trim()) {
+            [void](ConvertTo-TunnelId $script:controls.TunnelInput.Text)
+        }
+        $savedState = Save-ConnectionProfile -Context $script:context -Settings $script:settings -ProfileId $targetProfId -Name $enteredName -TunnelId $script:controls.TunnelInput.Text -ApiKey $enteredKey -Platform 'openai' -Kind 'tunnel' -SetActive:$isEditingActive
+        if ($savedState -and $savedState.PSObject.Properties['LastSavedProfileId'] -and $savedState.LastSavedProfileId) {
+            $script:viewingProfileId = $savedState.LastSavedProfileId
+        } elseif ($savedState -and $savedState.ActiveProfileId) {
+            $script:viewingProfileId = $savedState.ActiveProfileId
+        }
+        if ($script:controls.TunnelInput.Text.Trim()) {
+            $script:controls.TunnelInput.Text = [string](ConvertTo-TunnelId $script:controls.TunnelInput.Text)
+        }
     }
     $script:dirty = $false
     $script:popoverEditMode = $false
@@ -6535,7 +6909,19 @@ $script:controls.RailResizerBar.Add_MouseLeftButtonUp({
 if ($script:controls.ProfileNameInput) {
     $script:controls.ProfileNameInput.Add_TextChanged({ if (-not $script:initializing) { $script:dirty = $true } })
 }
-$script:controls.ConnIconBadgeButton.Add_Click({ Toggle-KeyPopover })
+$script:controls.ConnIconBadgeButton.Add_Click({
+    if ($script:popoverOpen -and $script:activeCapsulePlatform -eq 'openai' -and -not $script:addPlatformPickerOpen) {
+        Toggle-KeyPopover
+    } else {
+        Select-CapsulePlatform 'openai'
+    }
+})
+if ($script:controls.AddPlatformCellButton) {
+    $script:controls.AddPlatformCellButton.Add_Click({ Toggle-AddPlatformPopover })
+}
+if ($script:controls.RemoveCapsulePlatformButton) {
+    $script:controls.RemoveCapsulePlatformButton.Add_Click({ Invoke-RemoveCurrentCapsulePlatform })
+}
 if ($script:controls.GlobalSettingsButton) {
     $script:controls.GlobalSettingsButton.Add_Click({ Toggle-GlobalSettingsPopover })
 }
@@ -6794,8 +7180,14 @@ $script:controls.ConnectButton.Add_Click({ Invoke-FormAction {
 } })
 $script:controls.DisconnectButton.Add_Click({ Invoke-FormAction { Show-Feedback (Stop-ConnectionTunnel $script:context $script:settings); Refresh-FormState } })
 $script:controls.OfficialButton.Add_Click({ Invoke-FormAction { Open-OfficialPanel } })
-$script:controls.PlatformButton.Add_Click({ Start-Process 'https://platform.openai.com/settings/organization/tunnels' })
-$script:controls.ApiKeysButton.Add_Click({ Start-Process 'https://platform.openai.com/settings/organization/api-keys' })
+$script:controls.PlatformButton.Add_Click({
+    $pm = Get-CapsulePlatformMeta $script:activeCapsulePlatform
+    Start-Process $pm.PlatUrl
+})
+$script:controls.ApiKeysButton.Add_Click({
+    $pm = Get-CapsulePlatformMeta $script:activeCapsulePlatform
+    Start-Process $pm.ApiKeysUrl
+})
 $script:controls.StatusButton.Add_Click({ if ($script:display.UiUrl) { Start-Process $script:display.UiUrl } })
 $script:controls.BridgeExtButton.Add_Click({
     $extDir = Join-Path $PSScriptRoot 'browser-bridge'

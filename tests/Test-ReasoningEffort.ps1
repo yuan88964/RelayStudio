@@ -130,4 +130,31 @@ Sync-Test $realState $realOpenAiCatalog 'gpt-6-instant' 'inherit' '未开启思�
 $instantTags = Get-Tags $realState.EffortCombo
 Assert-Case (($instantTags -join ',') -eq 'inherit,none,min,standard,extended,max' -and [string]$realState.EffortCombo.Items[0].Content -eq '🧠 默认 (none)') 'Instant model borrows sibling gpt-6-thinking raw English effort IDs plus none'
 
+# Hazard 5: Cold-start with zero web models must render ONLY "默认 (跟随网页)" in both ModelCombo and EffortCombo
+$coldState = Make-State 'cold_start_pure_default_test'
+Sync-ComposerModelAndEffortCombos -StateInfo $coldState -AvailModels @() -CurModel 'inherit' -WebModel '' -CurEffort 'inherit' -WebEffort '' -IsNarrow $false
+Assert-Case ($coldState.ModelCombo.Items.Count -eq 1 -and [string]$coldState.ModelCombo.Items[0].Content -eq '🤖 默认 (跟随网页)' -and [string]$coldState.ModelCombo.Items[0].Tag -eq 'inherit') 'Cold start with no web models renders only a single 🤖 默认 (跟随网页) item in ModelCombo'
+Assert-Case ($coldState.EffortCombo.Items.Count -eq 1 -and [string]$coldState.EffortCombo.Items[0].Content -eq '🧠 默认 (跟随网页)' -and [string]$coldState.EffortCombo.Items[0].Tag -eq 'inherit') 'Cold start with no web models renders only a single 🧠 默认 (跟随网页) item in EffortCombo without fallback min/standard/extended/max tiers'
+
+# Multi-platform capsule grouping in ModelCombo
+$script:profilesState = [pscustomobject]@{
+    ActiveProfileId = 'prof_1'
+    EnabledPlatforms = @('openai', 'claude')
+    ActiveProfileByPlatform = @{ openai = 'prof_1'; claude = 'prof_claude_1' }
+    Profiles = @(
+        [pscustomobject]@{ Id = 'prof_1'; Name = '主力隧道'; Platform = 'openai'; Kind = 'tunnel'; TunnelId = 'ab12cd34'; HasKey = $true; Enabled = $true; IsActive = $true },
+        [pscustomobject]@{ Id = 'prof_claude_1'; Name = '默认'; Platform = 'claude'; Kind = 'apikey'; TunnelId = ''; HasKey = $false; Enabled = $false; IsActive = $true }
+    )
+}
+$multiPlatState = Make-State 'multi_platform_cold_start_test'
+Sync-ComposerModelAndEffortCombos -StateInfo $multiPlatState -AvailModels @() -CurModel 'inherit' -WebModel '' -CurEffort 'inherit' -WebEffort '' -IsNarrow $false
+$firstDefaultRef = $multiPlatState.ModelCombo.Items[0]
+$multiContents = @($multiPlatState.ModelCombo.Items | ForEach-Object { [string]$_.Content })
+$groupItems = @($multiPlatState.ModelCombo.Items | Where-Object { -not $_.IsEnabled })
+Assert-Case ([string]$firstDefaultRef.Tag -eq 'inherit' -and [string]$firstDefaultRef.Content -eq '🤖 默认 (跟随网页)') 'Multi-platform ModelCombo keeps Items[0] as the primary inherit option'
+Assert-Case ($groupItems.Count -eq 2 -and ($multiContents -join '|') -match '🟢 OpenAI · 主力隧道' -and ($multiContents -join '|') -match '⚪ Claude · 默认') 'Multi-platform ModelCombo renders breathing status headers (🟢/⚪) corresponding to enabled capsule platforms'
+$selectableItems = @($multiPlatState.ModelCombo.Items | Where-Object { $_.IsEnabled })
+Assert-Case ($selectableItems.Count -eq 2 -and (@($selectableItems | Where-Object { [string]$_.Content -ne '🤖 默认 (跟随网页)' }).Count -eq 0)) 'Cold start multi-platform ModelCombo contains only 🤖 默认 (跟随网页) under each enabled platform without fake models'
+$script:profilesState = $null
+
 Write-Output ('{"result":"PASS","assertions":' + $script:passed + ',"network":"OFFLINE_FAKE_ONLY","production_config_written":false}')
