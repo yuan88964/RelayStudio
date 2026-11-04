@@ -372,21 +372,21 @@ $script:PANE_SNAP_HIDE_PX = 140.0
       <TextBlock Text="R" FontSize="11" FontWeight="Bold" Foreground="#FEFEFF" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,-0.5,0,0"/>
      </Border>
      <TextBlock Text="RelayStudio" FontSize="13" FontWeight="Bold" Foreground="#18181B" VerticalAlignment="Center" Margin="0,0,6,0"/>
-     <Button x:Name="ToggleRailButton" Style="{StaticResource IconButton}" Width="26" Height="26" Margin="0,0,2,0" ToolTip="展开 / 收起左侧任务栏（不改变窗口外框大小，也可向左拖拽竖线自动吸附隐藏）">
+     <Button x:Name="ToggleRailButton" Style="{StaticResource IconButton}" Width="28" Height="28" Margin="0,0,2,0" ToolTip="展开 / 收起左侧任务栏（不改变窗口外框大小，也可向左拖拽竖线自动吸附隐藏）">
       <Viewbox Width="15" Height="15">
        <Canvas Width="24" Height="24">
         <Path Data="M4 4h16a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1z M9 4v16" Stroke="#52525B" StrokeThickness="1.8" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"/>
        </Canvas>
       </Viewbox>
      </Button>
-     <Button x:Name="ThemeToggleButton" Style="{StaticResource IconButton}" Width="26" Height="26" Margin="0,0,0,0" ToolTip="一键切换深色 / 浅色模式 (Ctrl+Shift+D)&#x0a;右键点击：恢复「跟随系统」">
+     <Button x:Name="ThemeToggleButton" Style="{StaticResource IconButton}" Width="28" Height="28" Margin="0,0,0,0" ToolTip="一键切换深色 / 浅色模式 (Ctrl+Shift+D)&#x0a;右键点击：恢复「跟随系统」">
       <Viewbox Width="13" Height="13">
        <Canvas Width="24" Height="24">
         <Path x:Name="ThemeToggleIconPath" Data="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" Stroke="#52525B" StrokeThickness="1.8" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"/>
        </Canvas>
       </Viewbox>
      </Button>
-     <Button x:Name="GlobalSettingsButton" Style="{StaticResource IconButton}" Width="26" Height="26" Margin="20,0,4,0" ToolTip="通用设置（本地内核、自动归档、默认载体、CLI 智能体与外观）">
+     <Button x:Name="GlobalSettingsButton" Style="{StaticResource IconButton}" Width="28" Height="28" Margin="20,0,4,0" ToolTip="通用设置（本地内核、自动归档、默认载体、CLI 智能体与外观）">
       <Viewbox Width="13.5" Height="13.5">
        <Canvas Width="24" Height="24">
         <Path Data="M12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6z M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" Stroke="#52525B" StrokeThickness="1.8" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"/>
@@ -410,14 +410,14 @@ $script:PANE_SNAP_HIDE_PX = 140.0
        <Button x:Name="AddPlatformCellButton" Content="＋" Padding="7,2" MinWidth="24" MinHeight="24" Background="Transparent" BorderBrush="Transparent" BorderThickness="0" FontSize="12" FontWeight="Bold" Foreground="#71717A" ToolTip="添加或管理平台配置分栏"/>
       </StackPanel>
      </Border>
-     <Border x:Name="TopHeartbeatPillBorder" Background="#FEF2F2" BorderBrush="#FECACA" BorderThickness="1" CornerRadius="12" Padding="9,2" MinHeight="22" VerticalAlignment="Center" Visibility="Collapsed" Cursor="Hand" ToolTip="隧道或本地内核连接异常，点击打开配置面板排查">
+    </StackPanel>
+    <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+     <Border x:Name="TopHeartbeatPillBorder" Background="#FEF2F2" BorderBrush="#FECACA" BorderThickness="1" CornerRadius="12" Padding="9,2" MinHeight="22" Margin="0,0,8,0" VerticalAlignment="Center" Visibility="Collapsed" Cursor="Hand" ToolTip="隧道或本地内核连接异常，点击打开配置面板排查">
       <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
        <Ellipse x:Name="TopHeartbeatDot" Width="6" Height="6" Fill="#EF4444" VerticalAlignment="Center" Margin="0,0,5,0"/>
        <TextBlock x:Name="TopHeartbeatText" Text="隧道告警: 请检查连接" FontSize="11" FontWeight="SemiBold" Foreground="#B91C1C" TextWrapping="NoWrap"/>
       </StackPanel>
      </Border>
-    </StackPanel>
-    <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
      <Button x:Name="AppMinButton" Style="{StaticResource IconButton}" Width="28" Height="26" Margin="0,0,2,0" ToolTip="最小化窗口">
       <Viewbox Width="12" Height="12">
        <Canvas Width="24" Height="24">
@@ -1774,12 +1774,12 @@ function Select-CapsulePlatform([string]$Platform = 'openai', [Windows.Framework
         $script:controls.KeyPopoverBorder.Visibility = 'Visible'
     }
     Refresh-ProfilePopoverState
-    $resolvedTrigger = if ($TriggerButton) {
-        $TriggerButton
-    } elseif ($p -eq 'openai') {
+    $resolvedTrigger = if ($p -eq 'openai') {
         $script:controls.ConnIconBadgeButton
-    } elseif ($script:capsuleSegmentButtons[$p]) {
+    } elseif ($script:capsuleSegmentButtons -and $script:capsuleSegmentButtons[$p]) {
         $script:capsuleSegmentButtons[$p]
+    } elseif ($TriggerButton) {
+        $TriggerButton
     } else {
         $script:controls.ConnIconBadgeButton
     }
@@ -2561,9 +2561,10 @@ function Invoke-PopoverQuickConnect {
         $script:popoverExpandedProfileId = ''
         $script:popoverEditMode = $false
         if ($curPlat -ne 'openai') {
-            $selRes = Select-ConnectionProfile -Context $script:context -Settings $script:settings -ProfileId $script:viewingProfileId
             $probeRes = Test-PlatformConnectionProfile -Context $script:context -Settings $script:settings -ProfileId $script:viewingProfileId
-            $script:lastTestedApiKeyProfileId = $script:viewingProfileId
+            if ($probeRes -and $probeRes.Ok) {
+                $script:lastTestedApiKeyProfileId = $script:viewingProfileId
+            }
             Refresh-ProfilePopoverState
             Update-SessionCards
             Show-Feedback $probeRes.Message
@@ -5224,7 +5225,7 @@ function Sync-ComposerModelAndEffortCombos($StateInfo, $AvailModels, [string]$Cu
                 $pCode = $enabledPlats[$pi]
                 [void]$modelCombo.Items.Add((& $buildPlatGroupHeader $pCode))
                 $pDefItem = New-Object Windows.Controls.ComboBoxItem
-                $pDefItem.Content = $(if ($IsNarrow) { '🤖 默认' } else { "🤖 默认 ($webModelDisplay)" })
+                $pDefItem.Content = $(if ($IsNarrow) { '🤖 默认' } else { '🤖 默认 (跟随网页)' })
                 $pDefItem.Tag = 'inherit'
                 [void]$modelCombo.Items.Add($pDefItem)
             }
@@ -7131,7 +7132,7 @@ $script:controls.ClosePopoverButton.Add_Click({
 foreach ($outsideSurface in @($script:controls.WorkspaceOuterBorder, $script:controls.LeftTaskRail)) {
     if ($outsideSurface) {
         $outsideSurface.Add_PreviewMouseLeftButtonDown({
-            if (($script:popoverOpen -or $script:globalSettingsOpen) -and (-not (Test-HasUnsavedFormEdits))) {
+            if ($script:popoverOpen -or $script:globalSettingsOpen) {
                 Close-AllTopPopovers
             }
         })

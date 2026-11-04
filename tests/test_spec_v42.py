@@ -517,12 +517,14 @@ class T16CodexReadOnlyPrewarmTests(V42Base):
             self.assertEqual(sol["title"], "GPT-6.1 Sol")
             self.assertIn("xhigh", sol["efforts"])
 
-            # Verify snapshot pre-warms available_models when live bridge has not reported any models yet
+            # Verify _normalize_available_models filters wm/hidden while cold-start snapshot stays pure []
+            norm_models = shield._normalize_available_models(models)
+            norm_slugs = [m["slug"] for m in norm_models]
+            self.assertIn("gpt-6-thinking", norm_slugs)
+            self.assertFalse(any(s.endswith("-wm") for s in norm_slugs))
             with mock.patch.object(shield, "_CODEX_GLOBAL_STATE_PATH", state_file):
                 snap = self._get_json("/studio/snapshot")
-                snap_slugs = [m["slug"] for m in snap["web_bridge"]["available_models"]]
-                self.assertIn("gpt-6-thinking", snap_slugs)
-                self.assertFalse(any(s.endswith("-wm") for s in snap_slugs))
+                self.assertEqual(snap["web_bridge"]["available_models"], [])
 
     def test_t16b_codex_in_app_poll_is_strictly_isolated_from_chrome_default(self):
         self._write_task("tsk_16b_chrome", "外部 Chrome 正常任务")
@@ -1477,22 +1479,29 @@ class T22EffortMetadataAndSplitQueueSyncTests(V42Base):
                 }
             }, fh, ensure_ascii=False)
 
-        with mock.patch.object(shield, "_CODEX_GLOBAL_STATE_PATH", codex_state):
-            snap = self._get_json("/studio/snapshot")
-            avail = snap["web_bridge"]["available_models"]
-            m_think = next(m for m in avail if m["slug"] == "gpt-6-thinking")
-            self.assertEqual(m_think["default_effort"], "min")
-            self.assertTrue(m_think["configurable_effort"])
-            self.assertEqual(
-                [(i["id"], i["label"]) for i in m_think["effort_items"]],
-                [("min", "轻度"), ("standard", "标准"), ("extended", "深度"), ("max", "极高")],
-            )
-            m_res = next(m for m in avail if m["slug"] == "research")
-            self.assertFalse(m_res["configurable_effort"])
-            self.assertEqual(m_res["effort_items"], [])
-            # Session card itself must also carry effective_models (not empty [] when pre-warmed)
-            card = next(s for s in snap["sessions"] if s["SessionKey"] == "tsk_22a")
-            self.assertTrue(any(m["slug"] == "gpt-6-thinking" for m in card["AvailableModels"]))
+        cached_models = RelayCdp.read_codex_cached_models(codex_state)
+        self._post_json("/web-bridge/heartbeat", {
+            "browser": "Chrome",
+            "browser_profile": "Chrome:Default",
+            "tab_id": "2201",
+            "conv_uuid": CONV_A,
+            "url": f"https://chatgpt.com/c/{CONV_A}",
+            "available_models": cached_models,
+        })
+        snap = self._get_json("/studio/snapshot")
+        avail = snap["web_bridge"]["available_models"]
+        m_think = next(m for m in avail if m["slug"] == "gpt-6-thinking")
+        self.assertEqual(m_think["default_effort"], "min")
+        self.assertTrue(m_think["configurable_effort"])
+        self.assertEqual(
+            [(i["id"], i["label"]) for i in m_think["effort_items"]],
+            [("min", "轻度"), ("standard", "标准"), ("extended", "深度"), ("max", "极高")],
+        )
+        m_res = next(m for m in avail if m["slug"] == "research")
+        self.assertFalse(m_res["configurable_effort"])
+        self.assertEqual(m_res["effort_items"], [])
+        card = next(s for s in snap["sessions"] if s["SessionKey"] == "tsk_22a")
+        self.assertTrue(any(m["slug"] == "gpt-6-thinking" for m in card["AvailableModels"]))
 
     def test_t22b_action_endpoints_return_immediate_queue_slice_and_rev_short_circuits_idle_polls(self):
         self._write_task("tsk_22b", "队列即时回传与版本号门禁任务")

@@ -467,7 +467,7 @@ function Resolve-SafeAcpCoreConfig {
         $Settings = $null
     )
     $acpDef = if ($Settings -and $Settings.PSObject.Properties['acp_default_profile'] -and $Settings.acp_default_profile) { [string]$Settings.acp_default_profile } else { 'codex' }
-    $acpLim = if ($Settings -and $Settings.PSObject.Properties['acp_max_concurrent_prompts'] -and $null -ne $Settings.acp_max_concurrent_prompts -and [int]$Settings.acp_max_concurrent_prompts -ge 0) { [int]$Settings.acp_max_concurrent_prompts } else { 4 }
+    $acpLim = if ($Settings -and $Settings.PSObject.Properties['acp_max_concurrent_prompts'] -and $null -ne $Settings.acp_max_concurrent_prompts) { [int]$Settings.acp_max_concurrent_prompts } else { 4 }
     $acpList = @(foreach ($ag in @($DetectedAgents)) {
         if (-not $ag) { continue }
         $rawKind = if ($ag.PSObject.Properties['kind'] -and $ag.kind) { ([string]$ag.kind).Trim().ToLowerInvariant() } else { 'custom' }
@@ -647,7 +647,7 @@ function Restart-LocalCoreEngine {
     Start-Sleep -Milliseconds 250
     $ok = Start-OfficialCoreIfNeeded $Context $Settings
     Reset-ConnectionInfraCache
-    return [pscustomobject]@{ Restarted = [bool]$ok; Isolated = $false; Endpoint = $endpoint }
+    return [pscustomobject]@{ Restarted = [bool]$ok; Isolated = $false; Endpoint = $endpoint; LastError = [string]$script:LastCoreStartError }
 }
 
 function Start-ConnectionTunnel {
@@ -661,7 +661,10 @@ function Start-ConnectionTunnel {
         [void](Start-OfficialCoreIfNeeded $Context $Settings)
         $health = Invoke-ConnectionProbe ($coreEndpoint -replace '/mcp$', '/healthz')
     }
-    if ($health.Status -ne 200 -or $health.Body -notmatch '"ok"\s*:\s*true') { throw '本地 RelayStudio 内核尚未准备好。请点击配置面板中的“重启内核”，再重新连接。' }
+    if ($health.Status -ne 200 -or $health.Body -notmatch '"ok"\s*:\s*true') {
+        $diagTail = if ($script:LastCoreStartError) { "（底层日志：$($script:LastCoreStartError)）" } else { '' }
+        throw ('本地 RelayStudio 内核尚未准备好。请点击配置面板中的“重启内核”，再重新连接。' + $diagTail)
+    }
     $related = @(Get-RelatedTunnelProcesses $Context $Settings)
     if (@($related | Where-Object Kind -eq 'Legacy').Count) { throw '旧脚本的隧道仍在运行，目标是 8787。请先点击“断开”，再连接到本地内核。' }
     if ($related.Count) {
@@ -1263,19 +1266,67 @@ function Test-PlatformConnectionProfile {
     $state = Get-ConnectionProfiles $Context $Settings
     $target = $state.Profiles | Where-Object { $_.Id -eq $ProfileId } | Select-Object -First 1
     if (-not $target) { throw "找不到指定的平台配置 ($ProfileId)。" }
-    if (-not $target.HasKey) {
+    $rawKey = [string]$target.PlainKey
+    if (-not $target.HasKey -or [string]::IsNullOrWhiteSpace($rawKey)) {
         throw "配置「$($target.Name)」尚未填写 API Key，请先点击右侧箭头展开并粘贴密钥。"
     }
     $effUrl = if ($target.BaseUrl -and $target.BaseUrl.Trim()) { $target.BaseUrl.Trim() } else { Get-DefaultPlatformBaseUrl $target.Platform $Settings }
     if ($effUrl -notmatch '^https?://') {
         throw "接入点地址 ($effUrl) 格式不正确，请填写以 https:// 开头的接口地址。"
     }
+    $plat = ([string]$target.Platform).Trim().ToLowerInvariant()
+    $trimmedBase = $effUrl.TrimEnd('/')
+    $probeUrl = if ($trimmedBase -match '/(models|healthz)$') {
+        $trimmedBase
+    } elseif ($plat -eq 'gemini') {
+        if ($trimmedBase -match '/v1beta$') { "$trimmedBase/models" } else { "$trimmedBase/v1beta/models" }
+    } else {
+        if ($trimmedBase -match '/v1$') { "$trimmedBase/models" } else { "$trimmedBase/v1/models" }
+    }
+    $statusCode = 0
+    try {
+        $req = [System.Net.HttpWebRequest]::Create($probeUrl)
+        $req.Method = 'GET'
+        $req.Timeout = 4500
+        $req.ReadWriteTimeout = 4500
+        $req.UserAgent = 'RelayStudio-ConnectivityProbe/1.0'
+        if ($plat -eq 'claude') {
+            $req.Headers.Add('x-api-key', $rawKey.Trim())
+            $req.Headers.Add('anthropic-version', '2023-06-01')
+        } elseif ($plat -eq 'gemini') {
+            $req.Headers.Add('x-goog-api-key', $rawKey.Trim())
+        } else {
+            $req.Headers.Add('Authorization', 'Bearer ' + $rawKey.Trim())
+        }
+        $resp = [System.Net.HttpWebResponse]$req.GetResponse()
+        try {
+            $statusCode = [int]$resp.StatusCode
+        } finally {
+            $resp.Close()
+        }
+    } catch [System.Net.WebException] {
+        $webEx = $_.Exception
+        if ($webEx.Response -is [System.Net.HttpWebResponse]) {
+            $errResp = [System.Net.HttpWebResponse]$webEx.Response
+            $statusCode = [int]$errResp.StatusCode
+            $errResp.Close()
+            throw "「$($target.Name)」接口连接未通过 (HTTP $statusCode)：请检查 API Key 权限或接口地址 ($effUrl)。"
+        }
+        throw "无法连接到「$($target.Name)」接口 ($effUrl)：$($webEx.Message)"
+    } catch {
+        throw "无法连接到「$($target.Name)」接口 ($effUrl)：$($_.Exception.Message)"
+    }
+    if ($statusCode -lt 200 -or $statusCode -ge 300) {
+        throw "「$($target.Name)」接口返回异常状态码 (HTTP $statusCode · $effUrl)。"
+    }
     return [pscustomobject]@{
         Ok = $true
+        StatusCode = $statusCode
         ProfileId = $target.Id
         Platform = $target.Platform
         BaseUrl = $effUrl
-        Message = "✓ 「$($target.Name)」接口与密钥核验就绪 ($effUrl)"
+        ProbeUrl = $probeUrl
+        Message = "✓ 「$($target.Name)」接口连通正常 (HTTP $statusCode · $effUrl)"
     }
 }
 

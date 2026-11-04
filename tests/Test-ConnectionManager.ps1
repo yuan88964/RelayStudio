@@ -438,7 +438,8 @@ try {
 
     $safeAcpCfg = Resolve-SafeAcpCoreConfig -DetectedAgents $addClaudeRes.Agents -Settings ([pscustomobject]@{ acp_default_profile = 'nonexistent-agent'; acp_max_concurrent_prompts = 99 })
     $safeAcpZero = Resolve-SafeAcpCoreConfig -DetectedAgents $addClaudeRes.Agents -Settings ([pscustomobject]@{ acp_default_profile = 'codex'; acp_max_concurrent_prompts = 0 })
-    Assert ($safeAcpCfg.AcpMaxConcurrentPrompts -eq 8 -and $safeAcpCfg.AcpDefaultProfile -eq $addClaudeRes.Agents[0].id -and $safeAcpCfg.AcpEnabled -eq 'true' -and $safeAcpZero.AcpEnabled -eq 'false') 'Hazard 1 & 2: Resolve-SafeAcpCoreConfig behaviorally clamps ACP concurrency to 1..8, falls back invalid default profile, and disables ACP when limit is 0'
+    $safeAcpNeg = Resolve-SafeAcpCoreConfig -DetectedAgents $addClaudeRes.Agents -Settings ([pscustomobject]@{ acp_default_profile = 'codex'; acp_max_concurrent_prompts = -2 })
+    Assert ($safeAcpCfg.AcpMaxConcurrentPrompts -eq 8 -and $safeAcpCfg.AcpDefaultProfile -eq $addClaudeRes.Agents[0].id -and $safeAcpCfg.AcpEnabled -eq 'true' -and $safeAcpZero.AcpEnabled -eq 'false' -and $safeAcpNeg.AcpEnabled -eq 'false') 'Hazard 1 & 2: Resolve-SafeAcpCoreConfig behaviorally clamps ACP concurrency to 1..8, falls back invalid default profile, and disables ACP when limit is <= 0'
 
     # Hazard 4: Non-destructive merge in Save-ConnectionSettings
     $diskPreMerge = [IO.File]::ReadAllText($context.SettingsPath, [Text.Encoding]::UTF8) | ConvertFrom-Json
@@ -464,7 +465,35 @@ try {
     $claudeDefProf = $capState1.Profiles | Where-Object { $_.Platform -eq 'claude' } | Select-Object -First 1
     Assert (($capState1.EnabledPlatforms -contains 'openai') -and ($capState1.EnabledPlatforms -contains 'claude') -and $null -ne $claudeDefProf -and $claudeDefProf.Name -eq '默认' -and $claudeDefProf.Kind -eq 'apikey' -and $claudeDefProf.TunnelId -eq '' -and $claudeDefProf.HasKey -eq $false -and $claudeDefProf.Enabled -eq $false) 'Hazard 3: Add-CapsulePlatform adds claude to EnabledPlatforms with a clean disabled default apikey profile'
     $claudeKey = 'sk-ant-api03-offline-test-key-123456'
-    $capState2 = Save-ConnectionProfile -Context $capCtx -Settings $capSettings -ProfileId $claudeDefProf.Id -Name 'Claude 个人 Pro' -TunnelId '' -ApiKey $claudeKey -Platform 'claude' -Kind 'apikey' -BaseUrl 'https://api.anthropic.com' -SetActive
+    $probeTcp = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+    $probeTcp.Start()
+    $probePort = ([System.Net.IPEndPoint]$probeTcp.LocalEndpoint).Port
+    $psBg = [powershell]::Create().AddScript({
+        param($listener)
+        try {
+            $client = $listener.AcceptTcpClient()
+            $stream = $client.GetStream()
+            $buf = New-Object byte[] 1024
+            [void]$stream.Read($buf, 0, $buf.Length)
+            $bodyBytes = [Text.Encoding]::UTF8.GetBytes('{"data":[]}')
+            $hdrBytes = [Text.Encoding]::ASCII.GetBytes("HTTP/1.1 200 OK`r`nContent-Type: application/json`r`nContent-Length: $($bodyBytes.Length)`r`nConnection: close`r`n`r`n")
+            $stream.Write($hdrBytes, 0, $hdrBytes.Length)
+            $stream.Write($bodyBytes, 0, $bodyBytes.Length)
+            $stream.Flush()
+            $client.Close()
+        } catch {}
+    }).AddArgument($probeTcp)
+    $probeAsync = $psBg.BeginInvoke()
+    try {
+        $capState2 = Save-ConnectionProfile -Context $capCtx -Settings $capSettings -ProfileId $claudeDefProf.Id -Name 'Claude 个人 Pro' -TunnelId '' -ApiKey $claudeKey -Platform 'claude' -Kind 'apikey' -BaseUrl "http://127.0.0.1:$probePort" -Enabled $false
+        $probeOkRes = Test-PlatformConnectionProfile -Context $capCtx -Settings $capSettings -ProfileId $claudeDefProf.Id
+        $afterProbeState = Get-ConnectionProfiles $capCtx $capSettings
+        $afterProbeClaude = $afterProbeState.Profiles | Where-Object { $_.Id -eq $claudeDefProf.Id } | Select-Object -First 1
+        Assert ($probeOkRes.Ok -eq $true -and $probeOkRes.StatusCode -eq 200 -and $afterProbeClaude.Enabled -eq $false) 'F1 & F2: Test-PlatformConnectionProfile performs real HTTP probe (HTTP 200) without mutating Enabled state'
+    } finally {
+        try { $probeTcp.Stop(); $psBg.Dispose() } catch {}
+    }
+    Assert-Throws { Test-PlatformConnectionProfile -Context $capCtx -Settings $capSettings -ProfileId $claudeDefProf.Id } 'F1: Test-PlatformConnectionProfile throws when endpoint is unreachable'
     $selClaudeRes = Select-ConnectionProfile -Context $capCtx -Settings $capSettings -ProfileId $claudeDefProf.Id
     $capSettingsAfter = Read-ConnectionSettings $capCtx
     $openaiKeyBytesAfter = [IO.File]::ReadAllText($capCtx.KeyPath)
