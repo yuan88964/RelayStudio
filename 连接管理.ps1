@@ -5470,7 +5470,7 @@ function Build-PlanBComposerPod($SessionObj = $null, [bool]$IsNarrow = $false, [
                     $st.DraftObj = $draftObj
                     $st.TargetMode = $curTargetMode
                     $st.ConnectedProviders = ,@($catalogState.connected_providers)
-                    $st.Provider = $(if ($curBinding) { Get-WebRoomProvider $curBinding } else { 'chatgpt' })
+                    $st.Provider = $(if ($SessionObj -and $SessionObj.PSObject.Properties['Provider'] -and $SessionObj.Provider) { ([string]$SessionObj.Provider).ToLowerInvariant() } elseif ($curBinding) { Get-WebRoomProvider $curBinding } else { 'chatgpt' })
                     $st.AvailableModelsByProvider = $catalogState.available_models_by_provider
                     $st.WebModel = $webModel
                     $st.WebEffort = $webEffort
@@ -5760,7 +5760,7 @@ function Build-PlanBComposerPod($SessionObj = $null, [bool]$IsNarrow = $false, [
         IsNarrow = $IsNarrow
         PodBorder = $composerPod
         LastCatalogSig = ''
-        Provider = $(if ($curBinding) { Get-WebRoomProvider $curBinding } else { 'chatgpt' })
+        Provider = $(if ($SessionObj -and $SessionObj.PSObject.Properties['Provider'] -and $SessionObj.Provider) { ([string]$SessionObj.Provider).ToLowerInvariant() } elseif ($curBinding) { Get-WebRoomProvider $curBinding } else { 'chatgpt' })
         ConnectedProviders = ,@($catalogState.connected_providers)
         AvailableModelsByProvider = $catalogState.available_models_by_provider
         AvailableModels = $availModels
