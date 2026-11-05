@@ -169,6 +169,13 @@ class ShieldHubSeamTests(unittest.TestCase):
             return json.loads(resp.read().decode("utf-8"))
 
     def test_multi_platform_routing_claim_and_receipt(self):
+        for origin in ["https://chatgpt.com", "https://gemini.google.com", "https://claude.ai"]:
+            req = urllib.request.Request(f"http://127.0.0.1:{self.shield_port}/web-bridge/state", headers={"Origin": origin})
+            with urllib.request.urlopen(req) as response:
+                self.assertEqual(response.headers.get("Access-Control-Allow-Origin"), origin)
+        req = urllib.request.Request(f"http://127.0.0.1:{self.shield_port}/web-bridge/state", headers={"Origin": "https://claude.ai.evil.invalid"})
+        with urllib.request.urlopen(req) as response:
+            self.assertNotEqual(response.headers.get("Access-Control-Allow-Origin"), "https://claude.ai.evil.invalid")
         for provider, root, room_path, room in [
             ("gemini", "https://gemini.google.com/app", "/", "abc123def456"),
             ("claude", "https://claude.ai/new", "https://claude.ai/chat/", "aaaaaaaa-1111-4111-8111-111111111111"),
@@ -183,6 +190,8 @@ class ShieldHubSeamTests(unittest.TestCase):
             url = root + "/" + room if provider == "gemini" else room_path + room
             claim = self._post_json("/web-bridge/poll", {"tab_id": provider, "provider": provider, "url": url, "conv_uuid": room, "handover_msg_id": mid})
             self.assertEqual(len(claim["messages"]), 1)
+            before_ack = self._get_json("/web-bridge/state")
+            self.assertFalse(before_ack["session_bindings"][task].get("conv_uuid"), "Claim is not room ownership")
             denied = self._post_json("/web-bridge/ack-deliver", {"msg_id": mid, "tab_id": provider, "provider": "chatgpt", "conv_uuid": room})
             self.assertFalse(denied["ok"])
             ack = self._post_json("/web-bridge/ack-deliver", {"msg_id": mid, "tab_id": provider, "provider": provider, "conv_uuid": room})

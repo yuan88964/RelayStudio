@@ -6564,7 +6564,7 @@ def _update_tab_and_bindings(state: dict, tab_payload: dict, default_browser: st
         _sync_conv_archived_flag(state, conv_uuid, bool(is_archived), now_iso)
 
     # Channel 1: Handover ?msg_id token transfer
-    if handover_msg_id:
+    if handover_msg_id and provider == "chatgpt":
         for msg in state["queue"]:
             if msg.get("id") == handover_msg_id and msg.get("session_key") and _platform(msg) == provider:
                 s_key = msg["session_key"]
@@ -6610,6 +6610,12 @@ def _update_tab_and_bindings(state: dict, tab_payload: dict, default_browser: st
             reverse=True,
         )
         primary_hint = sorted_hints[0]
+        if provider != "chatgpt" and any(
+            m.get("session_key") == primary_hint and m.get("mode") == "new_window_handover"
+            and m.get("status") in ("pending", "claimed", "unconfirmed") and _platform(m) == provider
+            for m in state["queue"] if isinstance(m, dict)
+        ):
+            return tab_record  # A candidate room is not ownership until successful receipt.
         raw_b = dict(state["session_bindings"].get(primary_hint) or {})
         if raw_b and _platform(raw_b) != provider:
             return tab_record
@@ -6929,7 +6935,7 @@ def handle_web_bridge_poll(wb_path: str, tasks_root: str, payload: dict) -> dict
                     if msg_session_key:
                         claimed_sessions.add(msg_session_key)
                     claimed_tabs.add(handover_tab["tab_id"])
-                    if handover_tab["conv_uuid"]:
+                    if handover_tab["conv_uuid"] and provider == "chatgpt":
                         _bind_conv_uuid(binding, handover_tab["conv_uuid"])
                         state["session_bindings"][msg_session_key] = binding
                     matched_messages.append(msg)
@@ -7345,11 +7351,13 @@ def _enqueue_web_bridge_message(wb_path: str, payload: dict, now_iso: str, tasks
                 },
             )
         binding = _ensure_binding_entry(state["session_bindings"].get(session_key), explicit_profile or None, default_cfg=ar_cfg)
+        provider = _platform(payload if payload.get("provider") else binding)
+        binding["provider"] = provider
         if not conv_uuid and binding.get("conv_uuid"):
             conv_uuid = binding["conv_uuid"]
         if not conv_uuid and not binding.get("retired_uuids") and session_key and session_key != "__new_task__" and not is_new_task:
             for t_val in state.get("tabs", {}).values():
-                if isinstance(t_val, dict) and t_val.get("conv_uuid") and session_key in (t_val.get("page_hints") or []):
+                if isinstance(t_val, dict) and _platform(t_val) == provider and t_val.get("conv_uuid") and session_key in (t_val.get("page_hints") or []):
                     conv_uuid = str(t_val["conv_uuid"]).strip()
                     break
             if not conv_uuid:
@@ -7365,8 +7373,6 @@ def _enqueue_web_bridge_message(wb_path: str, payload: dict, now_iso: str, tasks
             if conv_uuid:
                 _bind_conv_uuid(binding, conv_uuid)
                 state["session_bindings"][session_key] = binding
-        provider = _platform(payload if payload.get("provider") else binding)
-        binding["provider"] = provider
         project_prefix = _extract_project_prefix("", str(payload.get("project_prefix") or binding.get("project_prefix") or ""))
 
         browser_profile = _normalize_profile_spec(
