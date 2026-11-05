@@ -23,6 +23,8 @@
 - Code review: Standards 0 hard findings; Spec initial 3 findings fixed in 17e8c7e, re-review clear.
 - Sources verified 2026-11-05: https://developers.cloudflare.com/tunnel/get-started/ ; https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/configure-tunnels/run-parameters/ ; https://support.google.com/gemini/answer/17209137
 
+- 2026-11-05 live-run follow-up: cloudflared retains an open writer handle on its logfile, so ReadAllText silently left the shared tunnel in Connecting state. State polling now opens a read-only FileStream with FileShare.ReadWrite | FileShare.Delete, permitting concurrent logging and rotation; process lifecycle and settings are unchanged. Regression added at the existing PublicTunnelOnly public-interface seam with a genuinely held-open write handle: red before fix (specific online-status assertion failed), green after fix (17 checks, including 3 routing checks). No live tunnel restart or production settings change performed by this fix.
+
 ## Attempt Log & Quarantine Status
 
 - (If a subagent hits Two-Strike-Stop or Quarantined status, record: [1] approach tried, [2] falsifying error/evidence, [3] constraint for the next agent or user decision needed.)

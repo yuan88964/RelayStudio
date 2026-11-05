@@ -6083,7 +6083,16 @@ function Get-PublicMcpTunnelState {
             $result.StartedAt = $saved.StartTicks
             $result.Status = '连接中'
             $logPath = Join-Path $Context.DataRoot 'public-mcp-tunnel.log'
-            $log = if (Test-Path -LiteralPath $logPath) { [IO.File]::ReadAllText($logPath) } else { '' }
+            $log = ''
+            if (Test-Path -LiteralPath $logPath) {
+                # cloudflared holds this file open for writes; allow that writer and log rotation.
+                $logStream = [IO.File]::Open($logPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+                try {
+                    $logReader = [IO.StreamReader]::new($logStream, [Text.Encoding]::UTF8, $true)
+                    try { $log = $logReader.ReadToEnd() }
+                    finally { $logReader.Dispose() }
+                } finally { $logStream.Dispose() }
+            }
             $url = [string]$saved.FixedUrl
             if (-not $url -and $log -match 'https://[a-zA-Z0-9-]+\.trycloudflare\.com') { $url = ConvertTo-PublicMcpUrl $Matches[0] }
             if ($url -and $log -match 'Registered tunnel connection') {

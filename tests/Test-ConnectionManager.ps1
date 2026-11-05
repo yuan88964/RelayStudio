@@ -47,6 +47,12 @@ if ($PublicTunnelOnly) {
         $second = Start-PublicMcpTunnel -Context $ctx -ClientPath $exe
         Assert ($first.Running -and $first.Url -eq 'https://fixture.trycloudflare.com/mcp') 'quick tunnel yields MCP URL'
         Assert ($first.ProcessId -eq $second.ProcessId) 'second platform reuses same process'
+        # Real cloudflared keeps the logfile open for writes while state is polled.
+        $heldLog = [IO.File]::Open((Join-Path $ctx.DataRoot 'public-mcp-tunnel.log'), [IO.FileMode]::Open, [IO.FileAccess]::Write, ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+        try {
+            $whileWriting = Get-PublicMcpTunnelState $ctx
+            Assert ($whileWriting.Running -and $whileWriting.Status -eq '在线' -and $whileWriting.Url -eq 'https://fixture.trycloudflare.com/mcp') 'registered tunnel stays online while client holds logfile open for writes'
+        } finally { $heldLog.Dispose() }
     } finally { Stop-PublicMcpTunnel $ctx }
     Assert (-not (Get-PublicMcpTunnelState $ctx).Running) 'stop clears shared tunnel'
     try {
