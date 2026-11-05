@@ -638,7 +638,7 @@ process.stdout.write(JSON.stringify({ out, modelChangeCalls }));
         self.assertTrue(probe_res["out"]["filled"])
         self.assertEqual(probe_res["modelChangeCalls"], 0, "follow_window + inherit must make 0 onModelChange calls")
 
-        # 2b. Now report `has_error=True` on `conv_b` so guardian upgrades to `new_window_handover` ->
+        # 2b. Spec v4.7 Option A: report `has_load_error=True` on `conv_b` so guardian upgrades to `new_window_handover` ->
         #     Handover Dispatch MUST snapshot live `current_effort="xhigh"` & `current_model="gpt-5-pro"`!
         self._post_json(
             "/web-bridge/poll",
@@ -653,6 +653,7 @@ process.stdout.write(JSON.stringify({ out, modelChangeCalls }));
                         "is_generating": False,
                         "sse_active": False,
                         "has_error": True,
+                        "has_load_error": True,
                         "turn_seq": 6,
                         "current_model": "gpt-5-pro",
                         "current_effort": "xhigh",

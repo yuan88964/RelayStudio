@@ -464,6 +464,73 @@ def _extract_workspace_segment(raw_text: str, allow_punctuation: bool = True) ->
     return ""
 
 
+_WORKSPACE_ROOT_MARKERS = (".git", ".scratch", "pyproject.toml", "package.json")
+
+
+def _extract_workspace_root(raw_text: str) -> str:
+    """Spec v4.7 §2.2: locate the real business project root behind full drive paths in tool arguments.
+
+    Every drive-letter path candidate is walked upward until a directory holding `.git`, `.scratch`, `pyproject.toml`
+    or `package.json` is found. Read-only (`os.path` probes only); returns "" when nothing on disk matches.
+    """
+    text = str(raw_text or "")
+    if not text:
+        return ""
+    text = text.replace("\\\\", "\\")
+    seen: set[str] = set()
+    for m in re.finditer(r"[A-Za-z]:[\\/][^\"'<>|*?\r\n\t,;`]*", text):
+        full = m.group(0).rstrip()
+        cands = [full] + [full[:i] for i in range(len(full) - 1, 2, -1) if full[i] == " "]
+        for cand in cands:
+            cur = os.path.normpath(cand.strip().rstrip("\\/. ") or cand)
+            for _ in range(32):
+                key = os.path.normcase(cur)
+                if key in seen:
+                    break
+                seen.add(key)
+                parent = os.path.dirname(cur)
+                if not parent or parent == cur:
+                    break  # never accept a bare drive root
+                if os.path.isdir(cur) and any(os.path.exists(os.path.join(cur, mk)) for mk in _WORKSPACE_ROOT_MARKERS):
+                    return cur
+                cur = parent
+    return ""
+
+
+_PIPELINE_PROBE_CACHE: dict[str, tuple[float, float]] = {}
+PIPELINE_ACTIVE_WINDOW_SEC = 60.0
+
+
+def _probe_pipeline_state_mtime(workspace_root: str, now_epoch: float | None = None) -> float:
+    """Spec v4.7 §2.2: newest mtime of `<root>/.scratch/pipeline.state.json` or `<root>/engine-data/tmp/**/pipeline.state.json`."""
+    root = str(workspace_root or "").strip()
+    if not root:
+        return 0.0
+    now = now_epoch if now_epoch is not None else time.time()
+    key = os.path.normcase(os.path.abspath(root))
+    cached = _PIPELINE_PROBE_CACHE.get(key)
+    if cached and (now - cached[0]) < 5.0:
+        return cached[1]
+    best = 0.0
+    try:
+        if os.path.isdir(root):
+            cand_paths = [os.path.join(root, ".scratch", "pipeline.state.json")]
+            eng_tmp = os.path.join(root, "engine-data", "tmp")
+            if os.path.isdir(eng_tmp):
+                for dirpath, _dirs, files in os.walk(eng_tmp):
+                    if "pipeline.state.json" in files:
+                        cand_paths.append(os.path.join(dirpath, "pipeline.state.json"))
+            for p in cand_paths:
+                try:
+                    best = max(best, os.path.getmtime(p))
+                except OSError:
+                    pass
+    except Exception:
+        best = 0.0
+    _PIPELINE_PROBE_CACHE[key] = (now, best)
+    return best
+
+
 def _default_web_bridge_state() -> dict:
     now_iso = _utc_now_iso()
     return {
@@ -695,6 +762,35 @@ def _recent_manual_steer_delivered(state: dict, session_key: str, now_epoch: flo
 
 _UNATTRIBUTED_IN_FLIGHT_SENTINEL = "*"
 
+# Spec v4.7 §2.2: only long-running tools may legitimately stay in_flight for minutes; a fast tool whose response never
+# came back (ghost in_flight) must stop masking the session as LIVE after 45 seconds.
+LONG_RUNNING_TOOLS = {
+    "exec_command",
+    "shell_exec",
+    "run_command",
+    "run_process",
+    "desktop-commander:start_process",
+    "desktop-commander:interact_with_process",
+    "acp_dispatch",
+}
+FAST_TOOL_IN_FLIGHT_WINDOW_SEC = 45.0
+LONG_TOOL_IN_FLIGHT_WINDOW_SEC = 900.0
+# Spec v4.7 §2.2-§2.4 vital-sign thresholds
+DUAL_STREAM_WINDOW_SEC = 15.0
+TOOL_ACTIVITY_GRACE_SEC = 45
+AUTO_RESEND_TOOL_COOLDOWN_SEC = 60
+MAX_DISPATCHING_HOLD_SEC = 35
+OBSERVATION_LOCK_SEC = 90.0
+NETWORK_HOLD_MESSAGE = "检测到本机代理/隧道断网，暂缓派单并保留重试配额"
+
+
+def _in_flight_window_sec(c_meta: dict | None) -> float:
+    tool = str((c_meta or {}).get("tool") or "").strip()
+    # Unknown / legacy records without a tool name keep the historic 900s window.
+    if not tool or tool in LONG_RUNNING_TOOLS:
+        return LONG_TOOL_IN_FLIGHT_WINDOW_SEC
+    return FAST_TOOL_IN_FLIGHT_WINDOW_SEC
+
 
 def _is_task_or_unattributed_mcp_in_flight(session_key: str, in_flight_task_ids: set[str]) -> bool:
     sk = str(session_key or "").strip()
@@ -714,7 +810,7 @@ def _collect_in_flight_task_ids(wb_path: str, now_epoch: float, tasks_root: str 
             _parse_iso_epoch(str(c_meta.get("started_at") or "")),
             _parse_iso_epoch(str(c_meta.get("time") or "")),
         )
-        if c_ep > 0 and (now_epoch - c_ep) >= 900:
+        if c_ep > 0 and (now_epoch - c_ep) >= _in_flight_window_sec(c_meta):
             continue
         c_tid = str(c_meta.get("task_id") or "").strip()
         if c_tid:
@@ -1284,6 +1380,10 @@ def _compute_wb_logical_sig(state: dict, now_epoch: float | None = None) -> tupl
                     t.get("turn_seq"),
                     t.get("current_model"),
                     t.get("current_effort"),
+                    t.get("has_composer"),
+                    t.get("has_load_error"),
+                    t.get("turn_incomplete"),
+                    t.get("ui_error_text"),
                 ),
                 ensure_ascii=False,
             ).encode("utf-8", errors="replace")
@@ -2974,10 +3074,12 @@ def handle_native_task_manage(
         doc["phase"] = "execute"
         doc.pop("blocker", None)
 
-    note = str(args.get("summary") or "记录检查点").strip()
+    note = str(args.get("summary") or "记录检查点").strip() or "记录检查点"
     events.append({"type": "checkpoint", "summary": note, "created_at": now})
     doc["events"] = events
-    doc["summary"] = note
+    # Spec v4.7 §2.5: an empty / placeholder checkpoint must never overwrite the last real stage summary.
+    if note != "记录检查点" or not str(doc.get("summary") or "").strip():
+        doc["summary"] = note
     doc["updated_at"] = now
     _apply_one_step_auto_closeout(doc, now, note)
     _write_task_doc(tasks_root, doc)
@@ -3236,6 +3338,120 @@ def build_active_tasks_reminder(tasks_root: str, data_root: str, workspace_hint:
 # 【组块 M2】增量日志尾读、自动截断滚动与会话归属引擎
 # ============================================================================
 
+_TUNNEL_FORWARD_MARK = "dispatcher forwarded command to MCP server"
+_TUNNEL_NET_ERROR_MARKS = ("poll failed", "EOF", "context deadline exceeded", "tunnel metadata fetch failed")
+TUNNEL_NETWORK_HOLD_WINDOW_SEC = 20.0
+
+
+def _tunnel_line_epoch(line: str) -> float:
+    m_time = re.search(r'"time"\s*:\s*"([^"]+)"', line)
+    return _parse_iso_epoch(m_time.group(1)) if m_time else 0.0
+
+
+def _is_tunnel_drop_line(line: str) -> bool:
+    return ("failed to post response to control plane" in line and "EOF" in line) or ("command response deadline reached" in line)
+
+
+def _new_log_reader_state() -> dict:
+    return {
+        "byte_offset": 0,
+        "lines": [],
+        "evicted_valid_tool_count": 0,
+        "evicted_wfr_counts": {},
+        "evicted_slash_counts": {},
+        "evicted_subagent_count": 0,
+        "evicted_rpc_ids": [],
+        "last_tunnel_drop_epoch": 0.0,
+    }
+
+
+def _archive_evicted_tunnel_lines(state: dict, evicted: list[str]) -> None:
+    """Spec v4.7 §2.1: fold valid tool calls of lines about to be trimmed into the evicted_* accumulators.
+
+    Mirrors the classification of `build_studio_snapshot` so the window count + evicted base equals the full history.
+    """
+    wfr_counts = state.setdefault("evicted_wfr_counts", {})
+    slash_counts = state.setdefault("evicted_slash_counts", {})
+    rpc_ids = state.setdefault("evicted_rpc_ids", [])
+    for line in evicted:
+        if _TUNNEL_FORWARD_MARK not in line or "openai-mcp-discover" in line:
+            continue
+        m_cid = re.search(r'"cmd_request_id"\s*:\s*"([^"]+)"', line)
+        if not m_cid:
+            continue
+        cid = m_cid.group(1)
+        m_rpc_str = re.search(r'"rpc_request_id"\s*:\s*"([^"]+)"', line)
+        m_rpc_num = re.search(r'"rpc_request_id"\s*:\s*(\d+)', line)
+        rpc_id = m_rpc_str.group(1) if m_rpc_str else (m_rpc_num.group(1) if m_rpc_num else "")
+        m_wfr = re.match(r"^(wfr_[0-9a-zA-Z_]+)(?:/[a-z0-9]{3,6})?$", cid)
+        m_uuid_stream = (
+            re.match(r"^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$", cid)
+            if not (rpc_id and rpc_id.isdigit())
+            else None
+        )
+        if m_wfr or m_uuid_stream:
+            base = m_wfr.group(1) if m_wfr else m_uuid_stream.group(1)
+            state["evicted_valid_tool_count"] = int(state.get("evicted_valid_tool_count") or 0) + 1
+            wfr_counts[base] = int(wfr_counts.get(base) or 0) + 1
+            if rpc_id:
+                rpc_ids.append(rpc_id)
+            continue
+        m_slash = re.match(r"^([0-9a-fA-F-]{36})/[a-z0-9]{3,6}$", cid)
+        if m_slash:
+            conv = m_slash.group(1)
+            slash_counts[conv] = int(slash_counts.get(conv) or 0) + 1
+            if rpc_id:
+                rpc_ids.append(rpc_id)
+            continue
+        if re.search(r"/[a-z0-9]{3,6}$", cid) or (rpc_id and rpc_id.isdigit()):
+            continue
+        state["evicted_valid_tool_count"] = int(state.get("evicted_valid_tool_count") or 0) + 1
+        state["evicted_subagent_count"] = int(state.get("evicted_subagent_count") or 0) + 1
+    if len(rpc_ids) > 4000:
+        del rpc_ids[:-4000]
+
+
+def get_tunnel_log_reader_state(tunnel_log_path: str) -> dict:
+    """Return a detached copy of the evicted_* accumulators and drop probe for a tunnel log (no lines)."""
+    base = _new_log_reader_state()
+    base.pop("lines", None)
+    if not tunnel_log_path:
+        return base
+    with _LOG_READER_LOCK:
+        state = _LOG_READERS.get(os.path.abspath(tunnel_log_path))
+        if not isinstance(state, dict):
+            return base
+        return {
+            "byte_offset": int(state.get("byte_offset") or 0),
+            "evicted_valid_tool_count": int(state.get("evicted_valid_tool_count") or 0),
+            "evicted_wfr_counts": dict(state.get("evicted_wfr_counts") or {}),
+            "evicted_slash_counts": dict(state.get("evicted_slash_counts") or {}),
+            "evicted_subagent_count": int(state.get("evicted_subagent_count") or 0),
+            "evicted_rpc_ids": list(state.get("evicted_rpc_ids") or []),
+            "last_tunnel_drop_epoch": float(state.get("last_tunnel_drop_epoch") or 0.0),
+        }
+
+
+def compute_tunnel_network_hold(lines: list[str], now_epoch: float | None = None) -> bool:
+    """Spec v4.7 §2.1: >= 2 network errors within the last 20s and no successful forward after the last error."""
+    now = now_epoch if now_epoch is not None else time.time()
+    recent_errors = 0
+    for line in reversed(lines[-400:] if lines else []):
+        if _TUNNEL_FORWARD_MARK in line:
+            if recent_errors == 0:
+                return False  # newest relevant line is a healthy forward -> no storm after it
+            break
+        if not any(mark in line for mark in _TUNNEL_NET_ERROR_MARKS):
+            continue
+        ep = _tunnel_line_epoch(line)
+        if ep <= 0:
+            continue
+        if (now - ep) > TUNNEL_NETWORK_HOLD_WINDOW_SEC:
+            break
+        recent_errors += 1
+    return recent_errors >= 2
+
+
 def read_tunnel_log_incremental(tunnel_log_path: str) -> list[str]:
     """Read tunnel.out.log incrementally via byte_offset and atomically roll when > 2500 lines."""
     if not tunnel_log_path or not os.path.isfile(tunnel_log_path):
@@ -3244,7 +3460,7 @@ def read_tunnel_log_incremental(tunnel_log_path: str) -> list[str]:
     with _LOG_READER_LOCK:
         state = _LOG_READERS.get(abs_path)
         if state is None:
-            state = {"byte_offset": 0, "lines": []}
+            state = _new_log_reader_state()
             _LOG_READERS[abs_path] = state
 
         try:
@@ -3265,10 +3481,15 @@ def read_tunnel_log_incremental(tunnel_log_path: str) -> list[str]:
                 text = chunk.decode("utf-8", errors="replace")
                 new_lines = [ln for ln in text.splitlines() if ln.strip()]
                 state["lines"].extend(new_lines)
+                for ln in new_lines:
+                    if _is_tunnel_drop_line(ln):
+                        state["last_tunnel_drop_epoch"] = max(float(state.get("last_tunnel_drop_epoch") or 0.0), _tunnel_line_epoch(ln))
             except Exception:
                 pass
 
         if len(state["lines"]) > 2500:
+            # Spec v4.7 §2.1: archive the evicted head into cumulative counters before trimming (breaks the ~1007 cap).
+            _archive_evicted_tunnel_lines(state, state["lines"][:-2000])
             kept = state["lines"][-2000:]
             try:
                 tmp_path = f"{abs_path}.{threading.get_ident()}.tmp"
@@ -3326,6 +3547,10 @@ def extract_mcp_call_telemetry(raw_bytes: bytes) -> dict | None:
     cand_ws = _extract_workspace_segment(raw_args_text, allow_punctuation=True)
     if cand_ws:
         workspace_hint = cand_ws
+    prio_text = " \n ".join(
+        str(args.get(k)) for k in ("workdir", "cwd", "path", "file_path", "cmd", "command") if isinstance(args.get(k), str) and args.get(k)
+    )
+    workspace_root = _extract_workspace_root(prio_text) or _extract_workspace_root(raw_args_text)
 
     action = f"调用工具 {tool_name}"
     if tool_name in ("exec_command", "shell_exec", "run_command", "desktop-commander:start_process"):
@@ -3374,6 +3599,7 @@ def extract_mcp_call_telemetry(raw_bytes: bytes) -> dict | None:
         "task_id": task_id,
         "title_hint": title_hint,
         "workspace_hint": workspace_hint,
+        "workspace_root": workspace_root,
         "time": now_iso,
         "started_at": now_iso,
         "completed_at": "",
@@ -3443,6 +3669,21 @@ def record_shield_activity(activity_path: str, raw_bytes: bytes) -> dict | None:
             if not isinstance(calls, dict):
                 calls = {}
 
+            # Spec v4.7 §2.2: a new request of the same task proves earlier fast tools already returned -> close ghosts.
+            new_tid = str(entry.get("task_id") or "").strip()
+            if new_tid:
+                for old_c in calls.values():
+                    if (
+                        isinstance(old_c, dict)
+                        and old_c.get("in_flight")
+                        and str(old_c.get("task_id") or "").strip() == new_tid
+                        and str(old_c.get("tool") or "").strip()
+                        and str(old_c.get("tool") or "").strip() not in LONG_RUNNING_TOOLS
+                    ):
+                        old_c["in_flight"] = False
+                        old_c["completed_at"] = str(old_c.get("completed_at") or entry["time"])
+                        old_c["auto_closed"] = True
+
             calls[call_seq_id] = entry
             if len(calls) > 400:
                 sorted_keys = sorted(calls.keys(), key=lambda k: str(calls[k].get("time", "")))
@@ -3463,7 +3704,7 @@ def record_shield_activity(activity_path: str, raw_bytes: bytes) -> dict | None:
                 c for c in calls.values()
                 if isinstance(c, dict)
                 and c.get("in_flight")
-                and (now_ep - _parse_iso_epoch(str(c.get("started_at") or c.get("time") or ""))) < 900
+                and (now_ep - _parse_iso_epoch(str(c.get("started_at") or c.get("time") or ""))) < _in_flight_window_sec(c)
             ]
             existing["schema_version"] = 1
             existing["updated_at"] = _utc_now_iso()
@@ -3533,7 +3774,7 @@ def complete_shield_activity(activity_path: str, entry: dict | None, response_by
                 c for c in calls.values()
                 if isinstance(c, dict)
                 and c.get("in_flight")
-                and (now_ep - _parse_iso_epoch(str(c.get("started_at") or c.get("time") or ""))) < 900
+                and (now_ep - _parse_iso_epoch(str(c.get("started_at") or c.get("time") or ""))) < _in_flight_window_sec(c)
             ]
             existing["updated_at"] = completed_iso
             existing["in_flight_count"] = len(in_flight_list)
@@ -3620,7 +3861,8 @@ def format_readable_milestone(raw_summary: str, time_iso: str = "", steps: list 
     # Clean technical noise in unseparated checkpoint strings (paths, session IDs, raw SHAs)
     human_part = re.sub(r"[A-Za-z]:\\[^\s，。；、）)]+", "本地工作目录", human_part)
     human_part = re.sub(r"session-[0-9a-f-]{8,}", "单槽测试队列", human_part)
-    human_part = re.sub(r"(?<![A-Za-z0-9_])(?:SHA)?[0-9a-f]{7,40}(?![A-Za-z0-9_])", "", human_part)
+    # Spec v4.7 §2.5: only strip explicit `SHA<hex>` markers or full 40-hex hashes; keep 7~12 char git short hashes.
+    human_part = re.sub(r"(?<![A-Za-z0-9_])(?:SHA[0-9a-fA-F]{7,40}|[0-9a-f]{40})(?![A-Za-z0-9_])", "", human_part)
     human_part = human_part.replace("ACCEPTED", "已通过").replace("REJECTED", "已退回重测")
     human_part = re.sub(r"\s{2,}", " ", human_part).strip(" ，。；、/")
 
@@ -3686,6 +3928,37 @@ def _extract_workspace_name(title: str, goal: str, ws_hint: str) -> str:
     return "本机工作区"
 
 
+def _tab_is_dispatching_effective(t: dict, now_epoch: float) -> bool:
+    """Spec v4.7 §2.3: `is_dispatching` without SSE / generation may hold LIVE for at most MAX_DISPATCHING_HOLD_SEC."""
+    if not bool(t.get("is_dispatching")):
+        return False
+    if bool(t.get("sse_active") or t.get("is_generating")):
+        return True
+    since_ep = _parse_iso_epoch(str(t.get("dispatching_since") or ""))
+    return not (since_ep > 0 and (now_epoch - since_ep) > MAX_DISPATCHING_HOLD_SEC)
+
+
+def _observation_lock_anchor_epoch(brk: dict, queue_list: list | None, session_key: str) -> float:
+    """Spec v4.7 §2.4: anchor of the 90s post-dispatch observation lock (0.0 when no wakeup/handover is awaiting)."""
+    stage = str(brk.get("stage") or "")
+    if stage == "WakeupSent":
+        mid, mode, sent_key = str(brk.get("last_wakeup_msg_id") or ""), "in_place_wakeup", "wakeup_sent_at"
+    elif stage == "HandoverSent":
+        mid, mode, sent_key = str(brk.get("last_handover_msg_id") or ""), "new_window_handover", "handover_sent_at"
+    else:
+        return 0.0
+    msg = next(
+        (
+            m for m in reversed(queue_list or [])
+            if isinstance(m, dict)
+            and ((mid and m.get("id") == mid) or (not mid and m.get("session_key") == session_key and m.get("mode") == mode))
+        ),
+        None,
+    )
+    anchor_iso = str((msg or {}).get("delivered_at") or (msg or {}).get("unconfirmed_at") or brk.get(sent_key) or brk.get("last_sent_at") or "")
+    return _parse_iso_epoch(anchor_iso)
+
+
 def evaluate_session_vital_state(
     session_key: str,
     last_activity_epoch: float,
@@ -3696,8 +3969,16 @@ def evaluate_session_vital_state(
     queue_list: list,
     now_epoch: float | None = None,
     now_iso: str = "",
+    last_tool_epoch: float = 0.0,
+    tunnel_network_hold: bool = False,
+    dual_stream: bool = False,
+    stall_threshold_sec: int = 0,
 ) -> dict:
-    """Spec v4.2 VitalSignsAggregator: 4-probe arbitration (LIVE / UNKNOWN / STOPPED) & STOPPED-origin timer."""
+    """Spec v4.2 VitalSignsAggregator + v4.7 five-dimension VitalSubstate.
+
+    VitalState stays LIVE / UNKNOWN / STOPPED (backward compatible); VitalSubstate refines it into
+    LIVE / PSEUDO_STOPPED / DUAL_STREAM / WAITING_CONFIRM / NETWORK_HOLD / CONFIRMED_STOPPED.
+    """
     now = now_epoch if now_epoch is not None else time.time()
     eff_iso = now_iso or _utc_now_iso()
     bound_uuid = str(binding.get("conv_uuid") or "").strip()
@@ -3773,33 +4054,66 @@ def evaluate_session_vital_state(
 
     sse_active = any(bool(t.get("sse_active")) for t in fresh_known_tabs)
     dom_generating = any(bool(t.get("is_generating")) for t in fresh_known_tabs)
-    is_dispatching = any(bool(t.get("is_dispatching")) for t in fresh_known_tabs)
+    is_dispatching = any(_tab_is_dispatching_effective(t, now) for t in fresh_known_tabs)
     has_user_draft = any(bool(t.get("has_user_draft")) for t in fresh_known_tabs)
     has_error = any(bool(t.get("has_error")) for t in fresh_known_tabs) and not sse_active
     max_turn_seq = max([int(t.get("turn_seq") or 0) for t in fresh_known_tabs], default=0)
     max_tab_live_ep = max([_parse_iso_epoch(str(t.get("last_live_at") or "")) for t in fresh_known_tabs], default=0.0)
     brk_live_ep = _parse_iso_epoch(str(brk.get("last_live_at") or ""))
+    has_composer = all(t.get("has_composer", True) is not False for t in fresh_known_tabs)
+    has_load_error = any(bool(t.get("has_load_error")) for t in fresh_known_tabs)
+    detected_ui_error = next((str(t.get("ui_error_text") or "").strip() for t in fresh_known_tabs if str(t.get("ui_error_text") or "").strip()), "")
+    last_tool_ep = float(last_tool_epoch or 0.0)
+    last_tool_age_sec = max(0, int(now - last_tool_ep)) if last_tool_ep > 0 else -1
+    tool_recent = 0 <= last_tool_age_sec <= TOOL_ACTIVITY_GRACE_SEC
+    web_live = sse_active or dom_generating or is_dispatching
+    live_by_tool_grace = False
+    silence_countdown_sec = 0
 
-    if mcp_in_flight or sse_active or dom_generating or is_dispatching:
+    if mcp_in_flight or web_live or tool_recent:
         vital_state = "LIVE"
-        brk["last_live_at"] = eff_iso
+        live_by_tool_grace = not (mcp_in_flight or web_live)
+        if not live_by_tool_grace:
+            brk["last_live_at"] = eff_iso
         brk["last_vital_state"] = "LIVE"
         stopped_elapsed_sec = 0
         vital_hint = ""
+        if dual_stream:
+            vital_substate = "DUAL_STREAM"
+        elif web_live:
+            vital_substate = "LIVE"
+        elif has_error or bool(fresh_known_tabs):
+            vital_substate = "PSEUDO_STOPPED"  # page stopped / errored while local tools or pipeline keep running
+        else:
+            vital_substate = "LIVE"
     elif not fresh_known_tabs and (bool(bound_uuid) or bool(fresh_unknown_tabs) or has_opened_handover):
         vital_state = "UNKNOWN"
         brk["last_vital_state"] = "UNKNOWN"
         stopped_elapsed_sec = 0
         vital_hint = "正在核实网页运行状态"
+        vital_substate = "NETWORK_HOLD" if tunnel_network_hold else "WAITING_CONFIRM"
     else:
         vital_state = "STOPPED"
         brk["last_vital_state"] = "STOPPED"
-        origin_ep = max(float(last_activity_epoch or 0.0), brk_live_ep, max_tab_live_ep)
+        origin_ep = max(float(last_activity_epoch or 0.0), brk_live_ep, max_tab_live_ep, last_tool_ep)
         stopped_elapsed_sec = max(0, int(round(now - origin_ep))) if origin_ep > 0 else 0
         vital_hint = "检测到网页输入框有未发草稿，暂缓自动填入" if has_user_draft else ""
+        page_unusable = (not has_composer) or has_load_error
+        silence_left = (AUTO_RESEND_TOOL_COOLDOWN_SEC - last_tool_age_sec) if 0 <= last_tool_age_sec < AUTO_RESEND_TOOL_COOLDOWN_SEC else 0
+        stall_left = (int(stall_threshold_sec) - stopped_elapsed_sec) if (int(stall_threshold_sec or 0) > 0 and not has_error and not page_unusable) else 0
+        lock_ep = _observation_lock_anchor_epoch(brk, queue_list, session_key)
+        lock_left = int(OBSERVATION_LOCK_SEC - (now - lock_ep)) if (lock_ep > 0 and (now - lock_ep) < OBSERVATION_LOCK_SEC and not page_unusable) else 0
+        silence_countdown_sec = max(0, int(silence_left), int(stall_left), int(lock_left))
+        if tunnel_network_hold:
+            vital_substate = "NETWORK_HOLD"
+        elif silence_countdown_sec > 0:
+            vital_substate = "WAITING_CONFIRM"
+        else:
+            vital_substate = "CONFIRMED_STOPPED"
 
     return {
         "vital_state": vital_state,
+        "vital_substate": vital_substate,
         "stopped_elapsed_sec": stopped_elapsed_sec,
         "sse_active": sse_active,
         "dom_generating": dom_generating,
@@ -3807,6 +4121,14 @@ def evaluate_session_vital_state(
         "mcp_in_flight": bool(mcp_in_flight),
         "has_user_draft": has_user_draft,
         "has_error": has_error,
+        "has_composer": has_composer,
+        "has_load_error": has_load_error,
+        "detected_ui_error": detected_ui_error,
+        "network_hold": bool(tunnel_network_hold),
+        "dual_stream": bool(dual_stream),
+        "last_tool_age_sec": last_tool_age_sec,
+        "silence_countdown_sec": silence_countdown_sec,
+        "live_by_tool_grace": live_by_tool_grace,
         "turn_seq": max_turn_seq,
         "matching_tabs": fresh_known_tabs,
         "vital_hint_text": vital_hint,
@@ -4017,7 +4339,7 @@ def build_studio_snapshot(data_root: str, tasks_root: str, web_bridge_path: str 
                     _parse_iso_epoch(str(c.get("time") or "")),
                 )
             )
-            < 900
+            < _in_flight_window_sec(c)
         )
     else:
         in_flight_count = raw_in_flight
@@ -4054,9 +4376,13 @@ def build_studio_snapshot(data_root: str, tasks_root: str, web_bridge_path: str 
     wfr_streams: dict[str, dict] = {}
     slash_streams: dict[str, dict] = {}
     subagent_events: list[dict] = []
-    counted_tunnel_rpc_ids: set[str] = set()
+    # Spec v4.7 §2.1: seed counters with the evicted_* base archived before each 2500->2000 trim.
+    log_reader_state = get_tunnel_log_reader_state(tunnel_log_path)
+    tunnel_network_hold = compute_tunnel_network_hold(lines, now_epoch)
+    last_tunnel_drop_epoch = float(log_reader_state.get("last_tunnel_drop_epoch") or 0.0)
+    counted_tunnel_rpc_ids: set[str] = set(log_reader_state.get("evicted_rpc_ids") or [])
     recent_minute_count = 0
-    valid_tool_count = 0
+    valid_tool_count = int(log_reader_state.get("evicted_valid_tool_count") or 0)
 
     for line in lines:
         if "dispatcher forwarded command to MCP server" not in line:
@@ -4128,7 +4454,9 @@ def build_studio_snapshot(data_root: str, tasks_root: str, web_bridge_path: str 
                 if meta_epoch > entry["LastEpoch"]:
                     entry["LastEpoch"] = meta_epoch
                     entry["LastIso"] = str(meta.get("completed_at") or meta.get("time") or entry["LastIso"])
-                if meta.get("in_flight") and (now_epoch - meta_epoch) < 900:
+                if meta.get("workspace_root"):
+                    entry["WorkspaceRoot"] = str(meta["workspace_root"])
+                if meta.get("in_flight") and (now_epoch - meta_epoch) < _in_flight_window_sec(meta):
                     entry["InFlight"] = True
             continue
 
@@ -4174,6 +4502,8 @@ def build_studio_snapshot(data_root: str, tasks_root: str, web_bridge_path: str 
                     s_entry["WorkspaceHint"] = str(meta["workspace_hint"])
                 if meta.get("action"):
                     s_entry["LastAction"] = str(meta["action"])
+                if meta.get("workspace_root"):
+                    s_entry["WorkspaceRoot"] = str(meta["workspace_root"])
                 if meta.get("in_flight"):
                     s_entry["InFlight"] = True
             continue
@@ -4190,6 +4520,25 @@ def build_studio_snapshot(data_root: str, tasks_root: str, web_bridge_path: str 
             sub_act = str(calls_by_rpc_id[rpc_id].get("action") or "")
         subagent_events.append({"Cid": cid, "Epoch": t_epoch, "Iso": t_iso, "Action": sub_act})
 
+    for ev_wfr, ev_cnt in (log_reader_state.get("evicted_wfr_counts") or {}).items():
+        w_entry = wfr_streams.get(ev_wfr)
+        if not w_entry:
+            w_entry = {
+                "WfrId": ev_wfr, "FirstEpoch": 0.0, "LastEpoch": 0.0, "LastIso": "", "Count": 0, "TaskId": "",
+                "TitleHint": "", "WorkspaceHint": "", "WorkspaceRoot": "", "LastAction": "", "InFlight": False,
+            }
+            wfr_streams[ev_wfr] = w_entry
+        w_entry["Count"] += int(ev_cnt or 0)
+    for ev_conv, ev_cnt in (log_reader_state.get("evicted_slash_counts") or {}).items():
+        s_entry = slash_streams.get(ev_conv)
+        if not s_entry:
+            s_entry = {
+                "WfrId": ev_conv, "FirstEpoch": 0.0, "LastEpoch": 0.0, "LastIso": "", "Count": 0, "RecentMinuteCount": 0,
+                "TaskId": "", "TitleHint": "", "WorkspaceHint": "", "WorkspaceRoot": "", "LastAction": "通过 MCP 转发本机工具指令",
+                "HasRealCall": False, "InFlight": False,
+            }
+            slash_streams[ev_conv] = s_entry
+        s_entry["Count"] += int(ev_cnt or 0)
     grouped: dict[str, dict] = {}
     non_task_tool_count = 0
     non_task_last_epoch = 0.0
@@ -4210,7 +4559,21 @@ def build_studio_snapshot(data_root: str, tasks_root: str, web_bridge_path: str 
             "LastAction": str(t.get("summary") or "任务待命中"),
             "WorkspaceHint": _extract_workspace_name(str(t.get("title") or ""), str(t.get("goal") or ""), ""),
             "InFlight": False,
+            "LastToolEpoch": 0.0,
+            "WorkspaceRoot": "",
+            "_WsRootEpoch": -1.0,
+            "_RecentStreams": set(),
         }
+
+    def _note_tool_activity(g: dict, ep: float, ws_root: str = "", stream_id: str = "") -> None:
+        """Spec v4.7 §2.2: per-session tool pulse, latest real WorkspaceRoot and 15s distinct-stream window."""
+        if ep > float(g.get("LastToolEpoch") or 0.0):
+            g["LastToolEpoch"] = ep
+        if ws_root and ep >= float(g.get("_WsRootEpoch") or -1.0):
+            g["WorkspaceRoot"] = ws_root
+            g["_WsRootEpoch"] = ep
+        if stream_id and ep > 0 and (now_epoch - ep) <= DUAL_STREAM_WINDOW_SEC:
+            g["_RecentStreams"].add(stream_id)
 
     def _match_task_id_for_stream(explicit_tid: str, stream_wfr_id: str, ws_hint: str) -> str:
         if explicit_tid and explicit_tid in grouped:
@@ -4250,6 +4613,7 @@ def build_studio_snapshot(data_root: str, tasks_root: str, web_bridge_path: str 
                 existing["InFlight"] = True
             if wfr.get("WorkspaceHint") and not existing.get("WorkspaceHint"):
                 existing["WorkspaceHint"] = wfr["WorkspaceHint"]
+            _note_tool_activity(existing, float(wfr["LastEpoch"] or 0.0), str(wfr.get("WorkspaceRoot") or ""), str(wfr["WfrId"]))
         else:
             non_task_tool_count += wfr["Count"]
             if wfr["LastEpoch"] > non_task_last_epoch:
@@ -4284,6 +4648,7 @@ def build_studio_snapshot(data_root: str, tasks_root: str, web_bridge_path: str 
                 g["LastIso"] = slash["LastIso"] or g["LastIso"]
             if slash.get("InFlight"):
                 g["InFlight"] = True
+            _note_tool_activity(g, float(slash["LastEpoch"] or 0.0), str(slash.get("WorkspaceRoot") or ""), str(slash["WfrId"]))
         else:
             non_task_tool_count += slash["Count"]
             if slash["LastEpoch"] > non_task_last_epoch:
@@ -4305,7 +4670,7 @@ def build_studio_snapshot(data_root: str, tasks_root: str, web_bridge_path: str 
             _parse_iso_epoch(str(c_meta.get("started_at") or "")),
             _parse_iso_epoch(str(c_meta.get("time") or "")),
         )
-        is_c_inflight = bool(c_meta.get("in_flight") and (now_epoch - c_epoch) < 900)
+        is_c_inflight = bool(c_meta.get("in_flight") and (now_epoch - c_epoch) < _in_flight_window_sec(c_meta))
         if matched_tid and matched_tid in grouped:
             g = grouped[matched_tid]
             if c_epoch > g["LastEpoch"]:
@@ -4315,6 +4680,7 @@ def build_studio_snapshot(data_root: str, tasks_root: str, web_bridge_path: str 
                     g["LastAction"] = str(c_meta["action"])
             if is_c_inflight:
                 g["InFlight"] = True
+            _note_tool_activity(g, c_epoch, str(c_meta.get("workspace_root") or ""))
             if not c_rpc or c_rpc not in counted_tunnel_rpc_ids:
                 uncounted_calls_by_tid[matched_tid] = uncounted_calls_by_tid.get(matched_tid, 0) + 1
                 valid_tool_count += 1
@@ -4332,8 +4698,8 @@ def build_studio_snapshot(data_root: str, tasks_root: str, web_bridge_path: str 
         seed = 1 if (t_cnt == 0 and tid_k not in has_create_call_by_tid) else 0
         g["Count"] = max(1, t_cnt + seed + u_cnt)
 
-    subagent_total = len(subagent_events)
-    if grouped and subagent_events:
+    subagent_total = len(subagent_events) + int(log_reader_state.get("evicted_subagent_count") or 0)
+    if grouped and subagent_total:
         first_group = next(iter(grouped.values()))
         first_group["SubagentCount"] += subagent_total
 
@@ -4488,6 +4854,15 @@ def build_studio_snapshot(data_root: str, tasks_root: str, web_bridge_path: str 
             })
 
         raw_latest_summary = str(t_obj.get("summary") or item["LastAction"]) if isinstance(t_obj, dict) else str(item["LastAction"] or "已连接 MCP 通道")
+        if isinstance(t_obj, dict) and str(t_obj.get("summary") or "").strip() in ("", "记录检查点"):
+            # Spec v4.7 §2.5: fall back to the newest real checkpoint summary, else the current step title.
+            fallback_sum = ""
+            for ev in reversed(t_obj.get("events") if isinstance(t_obj.get("events"), list) else []):
+                ev_sum = str(ev.get("summary") or "").strip() if isinstance(ev, dict) else ""
+                if ev_sum and ev_sum != "记录检查点" and str(ev.get("type") or "checkpoint") == "checkpoint":
+                    fallback_sum = ev_sum
+                    break
+            raw_latest_summary = fallback_sum or current_step_title or raw_latest_summary
         latest_fmt = format_readable_milestone(raw_latest_summary, item["LastIso"], raw_steps)
         clean_latest = latest_fmt["CleanSummary"]
         if not milestones and clean_latest:
@@ -4553,6 +4928,13 @@ def build_studio_snapshot(data_root: str, tasks_root: str, web_bridge_path: str 
             web_cur_effort = _normalize_raw_effort_id(web_cur_effort, session_models, web_cur_model)
 
         brk_entry = _ensure_breaker_entry(breakers_map.get(key), item["Count"], session_key=key)
+        ws_root_val = str(item.get("WorkspaceRoot") or "")
+        last_tool_epoch = float(item.get("LastToolEpoch") or 0.0)
+        if ws_root_val:
+            pipe_mtime = _probe_pipeline_state_mtime(ws_root_val, now_epoch)
+            if pipe_mtime > 0 and (now_epoch - pipe_mtime) <= PIPELINE_ACTIVE_WINDOW_SEC:
+                last_tool_epoch = max(last_tool_epoch, min(pipe_mtime, now_epoch))
+        dual_stream_active = len(item.get("_RecentStreams") or ()) >= 2
         vital = evaluate_session_vital_state(
             key,
             item["LastEpoch"],
@@ -4563,6 +4945,10 @@ def build_studio_snapshot(data_root: str, tasks_root: str, web_bridge_path: str 
             queue_list,
             now_epoch=now_epoch,
             now_iso=now_iso,
+            last_tool_epoch=last_tool_epoch,
+            tunnel_network_hold=tunnel_network_hold,
+            dual_stream=dual_stream_active,
+            stall_threshold_sec=task_stall_threshold_sec,
         )
         vital_state = vital["vital_state"]
         stopped_elapsed_sec = vital["stopped_elapsed_sec"]
@@ -4646,7 +5032,7 @@ def build_studio_snapshot(data_root: str, tasks_root: str, web_bridge_path: str 
             else f"累计转发 {item['Count']} 次本机工具调用（含 {item['SubagentCount']} 次子代理）"
         )
         human_diag = (
-            f"结论：该对话正在持续活跃工作（{ago_text}刚调用过本机工具）。当前正处于【{current_step_title}】，整体已完成 {done_steps} / {len(ui_steps)} 个阶段（{prog_pct}%）。"
+            f"结论：该对话正在持续活跃工作（{ago_text}{'' if ago_text == '刚刚' else '刚'}调用过本机工具）。当前正处于【{current_step_title}】，整体已完成 {done_steps} / {len(ui_steps)} 个阶段（{prog_pct}%）。"
             if not is_stalled
             else f"结论：距上次本机活动已过 {ago_text}。当前处于【{current_step_title}】，若网页端已停止生成可发起唤醒或新窗口交接。"
         )
@@ -4697,6 +5083,16 @@ def build_studio_snapshot(data_root: str, tasks_root: str, web_bridge_path: str 
             "McpInFlight": vital["mcp_in_flight"],
             "TurnSeq": vital["turn_seq"],
             "VitalHintText": vital["vital_hint_text"],
+            "VitalSubstate": vital["vital_substate"],
+            "LastToolAgeSec": vital["last_tool_age_sec"],
+            "SilenceCountdownSec": vital["silence_countdown_sec"],
+            "DetectedUiError": vital["detected_ui_error"],
+            "NetworkHold": bool(vital["network_hold"]),
+            "HasComposer": bool(vital["has_composer"]),
+            "HasLoadError": bool(vital["has_load_error"]),
+            "WorkspaceRoot": ws_root_val,
+            "DualStream": bool(vital["dual_stream"]),
+            "LiveByToolGrace": bool(vital["live_by_tool_grace"]),
             "PendingQueue": pending_queue_out,
             "PendingQueueCount": len(pending_queue_out),
             "Steps": ui_steps,
@@ -4795,6 +5191,8 @@ def build_studio_snapshot(data_root: str, tasks_root: str, web_bridge_path: str 
         "command_count": valid_tool_count,
         "subagent_call_count": subagent_total,
         "in_flight_count": in_flight_count,
+        "tunnel_network_hold": bool(tunnel_network_hold),
+        "last_tunnel_drop_epoch": last_tunnel_drop_epoch,
         "non_task_heartbeat": {
             "count": non_task_tool_count,
             "ago_text": hb_ago,
@@ -4964,6 +5362,14 @@ def run_guardian_tick(data_root: str, tasks_root: str, web_bridge_path: str = ""
             sse_active = bool(sess.get("SseActive")) or any(bool(t.get("sse_active")) for t in known_tabs)
             is_generating = sse_active or any(bool(t.get("is_generating")) for t in known_tabs)
             has_error = any(bool(t.get("has_error")) for t in known_tabs) and not sse_active
+            # Spec v4.7 §2.4: the page is unusable (handover-worthy) only when the composer is gone or the room failed to load.
+            if known_tabs:
+                has_composer = all(t.get("has_composer", True) is not False for t in known_tabs)
+                has_load_error = any(bool(t.get("has_load_error")) for t in known_tabs)
+            else:
+                has_composer = sess.get("HasComposer", True) is not False
+                has_load_error = bool(sess.get("HasLoadError"))
+            page_unusable = (not has_composer) or has_load_error
             vital_state = str(sess.get("VitalState") or ("LIVE" if is_generating else "STOPPED"))
             has_user_draft = bool(sess.get("HasUserDraft")) or any(bool(t.get("has_user_draft")) for t in known_tabs)
             current_cmd_cnt = int(sess["CommandCount"])
@@ -5044,10 +5450,32 @@ def run_guardian_tick(data_root: str, tasks_root: str, web_bridge_path: str = ""
             if brk.get("tripped") or brk.get("stage") == "Tripped":
                 continue
 
+            # Spec v4.7 §2.4: Network Hold Gate — freeze dispatch and preserve retry/breaker quotas during local proxy EOF storms.
+            if bool(snap.get("tunnel_network_hold")) or bool(sess.get("NetworkHold")):
+                if brk.get("last_message") != NETWORK_HOLD_MESSAGE:
+                    brk["last_message"] = NETWORK_HOLD_MESSAGE
+                    brk["message"] = NETWORK_HOLD_MESSAGE
+                    brk["updated_at"] = now_iso
+                    dirty = True
+                continue
+
+            # Spec v4.7 §2.4: 60s Local Tool Silence Gate — wait until local tools / test pipelines have been silent for >= 60s.
+            last_tool_age_sec = int(sess.get("LastToolAgeSec") if sess.get("LastToolAgeSec") is not None else -1)
+            if 0 <= last_tool_age_sec < AUTO_RESEND_TOOL_COOLDOWN_SEC:
+                continue
+
             fingerprint = f"{s_key}|{current_cmd_cnt}|{sess.get('CompletedStepCount', 0)}|{bound_uuid}"
             brk["fingerprint"] = fingerprint
 
+            can_upgrade_pending = (
+                page_unusable
+                or binding.get("target_mode") == "new_window"
+                or (not bound_uuid and bool(binding.get("retired_uuids")))
+            )
+
             # Single-Flight In-Flight Gate: cover BOTH 'pending' AND 'claimed' messages (blocks 3.14s double-fire!)
+            # Spec v4.7 §2.4: NEVER rewrite a message that has already been 'claimed' by a tab; only upgrade an unclaimed
+            # 'pending' in_place_wakeup when the page has become unusable (missing composer / load error) or requires new_window.
             in_flight_msgs = [
                 m for m in queue
                 if isinstance(m, dict) and m.get("session_key") == s_key and m.get("status") in ("pending", "claimed")
@@ -5055,9 +5483,9 @@ def run_guardian_tick(data_root: str, tasks_root: str, web_bridge_path: str = ""
             if any(m.get("manual_send") or m.get("mode") == "custom_message" for m in in_flight_msgs):
                 continue
             if in_flight_msgs:
-                if has_error and brk.get("stage") != "HandoverSent":
+                if can_upgrade_pending and brk.get("stage") != "HandoverSent":
                     for pm in in_flight_msgs:
-                        if pm.get("status") in ("pending", "claimed") and pm.get("mode") == "in_place_wakeup":
+                        if pm.get("status") == "pending" and pm.get("mode") == "in_place_wakeup":
                             res_m, res_e = _resolve_dispatch_model_and_effort(
                                 state,
                                 s_key,
@@ -5111,13 +5539,13 @@ def run_guardian_tick(data_root: str, tasks_root: str, web_bridge_path: str = ""
                             break
                 continue
 
-            # AWAITING_WAKEUP 90s post-delivery observation lock
+            # AWAITING_WAKEUP 90s post-delivery observation lock (pierced only when page_unusable is True)
             if brk.get("stage") == "WakeupSent":
                 w_mid = str(brk.get("last_wakeup_msg_id") or "")
                 w_msg = next((m for m in reversed(queue) if isinstance(m, dict) and ((w_mid and m.get("id") == w_mid) or (not w_mid and m.get("session_key") == s_key and m.get("mode") == "in_place_wakeup"))), None)
                 w_anchor_iso = str((w_msg or {}).get("delivered_at") or (w_msg or {}).get("unconfirmed_at") or brk.get("wakeup_sent_at") or brk.get("last_sent_at") or "")
                 w_anchor_ep = _parse_iso_epoch(w_anchor_iso)
-                if not has_error and w_anchor_ep > 0 and (now_epoch - w_anchor_ep) < 90.0:
+                if not page_unusable and w_anchor_ep > 0 and (now_epoch - w_anchor_ep) < OBSERVATION_LOCK_SEC:
                     continue
 
             # AWAITING_HANDOVER 90s post-delivery observation lock & 2-dead-window Circuit Breaker
@@ -5126,7 +5554,7 @@ def run_guardian_tick(data_root: str, tasks_root: str, web_bridge_path: str = ""
                 h_msg = next((m for m in reversed(queue) if isinstance(m, dict) and ((h_mid and m.get("id") == h_mid) or (not h_mid and m.get("session_key") == s_key and m.get("mode") == "new_window_handover"))), None)
                 h_anchor_iso = str((h_msg or {}).get("delivered_at") or (h_msg or {}).get("unconfirmed_at") or brk.get("handover_sent_at") or brk.get("last_sent_at") or "")
                 h_anchor_ep = _parse_iso_epoch(h_anchor_iso)
-                if not has_error and h_anchor_ep > 0 and (now_epoch - h_anchor_ep) < 90.0:
+                if not page_unusable and h_anchor_ep > 0 and (now_epoch - h_anchor_ep) < OBSERVATION_LOCK_SEC:
                     continue
                 if int(brk.get("consecutive_dead_handovers") or 0) >= 2:
                     brk["tripped"] = True
@@ -5142,8 +5570,9 @@ def run_guardian_tick(data_root: str, tasks_root: str, web_bridge_path: str = ""
             if not is_stalled and not has_error:
                 continue
 
+            # Spec v4.7 §2.4 Option A Retry Ladder: prefer in_place_wakeup up to task_max_retries when the composer is intact.
             need_handover = (
-                has_error
+                page_unusable
                 or brk.get("stage") == "HandoverSent"
                 or int(brk.get("retry_count") or 0) >= task_max_retries
                 or binding.get("target_mode") == "new_window"
@@ -5617,6 +6046,11 @@ class DesktopAppBridge:
                         "turn_seq": int(page_state.get("turn_seq") or 0),
                         "has_user_draft": bool(page_state.get("has_user_draft")),
                         "has_error": bool(page_state.get("has_error")),
+                        "has_composer": page_state.get("has_composer", True) is not False,
+                        "turn_incomplete": bool(page_state.get("turn_incomplete")),
+                        "stream_incomplete": bool(page_state.get("stream_incomplete")),
+                        "has_load_error": bool(page_state.get("has_load_error")),
+                        "ui_error_text": str(page_state.get("ui_error_text") or ""),
                         "can_steer_live": bool(page_state.get("can_steer")),
                         "current_model": page_state.get("current_model", ""),
                         "current_effort": page_state.get("current_effort", ""),
@@ -5992,12 +6426,30 @@ def _update_tab_and_bindings(state: dict, tab_payload: dict, default_browser: st
         current_effort = str(existing_rec.get("current_effort") or "")
         is_archived = bool(existing_rec.get("is_archived", False))
         can_steer_live = bool(existing_rec.get("can_steer_live", False))
+        dispatching_since = str(existing_rec.get("dispatching_since") or "")
+        raw_is_dispatching = bool(existing_rec.get("raw_is_dispatching", existing_rec.get("is_dispatching", False)))
+        has_composer = existing_rec.get("has_composer", True) is not False
+        turn_incomplete = bool(existing_rec.get("turn_incomplete", False))
+        stream_incomplete = bool(existing_rec.get("stream_incomplete", False))
+        has_load_error = bool(existing_rec.get("has_load_error", False))
+        ui_error_text = str(existing_rec.get("ui_error_text") or "")
     else:
         is_archived = bool(tab_payload.get("is_archived", False))
         can_steer_live = bool(tab_payload.get("can_steer_live", False))
         sse_active = bool(tab_payload.get("sse_active", False))
         is_dispatching = bool(tab_payload.get("is_dispatching", False))
         is_generating = bool(tab_payload.get("is_generating", False) or sse_active)
+        # Spec v4.7 §2.3: `is_dispatching` without any SSE / generation may keep the tab LIVE for at most 35 seconds.
+        dispatching_since = ""
+        if is_dispatching and not sse_active and not is_generating:
+            prev_since = str(existing_rec.get("dispatching_since") or "") if isinstance(existing_rec, dict) else ""
+            prev_was_dispatching = isinstance(existing_rec, dict) and bool(existing_rec.get("raw_is_dispatching", existing_rec.get("is_dispatching")))
+            dispatching_since = prev_since if (prev_since and prev_was_dispatching) else now_iso
+            since_ep = _parse_iso_epoch(dispatching_since)
+            now_ep_tab = _parse_iso_epoch(now_iso) or time.time()
+            if since_ep > 0 and (now_ep_tab - since_ep) > MAX_DISPATCHING_HOLD_SEC:
+                is_dispatching = False
+        raw_is_dispatching = bool(tab_payload.get("is_dispatching", False))
         has_user_draft = bool(tab_payload.get("has_user_draft", False))
         prev_turn_seq = int(existing_rec.get("turn_seq") or 0) if isinstance(existing_rec, dict) else 0
         raw_turn_seq = tab_payload.get("turn_seq")
@@ -6005,7 +6457,13 @@ def _update_tab_and_bindings(state: dict, tab_payload: dict, default_browser: st
         turn_just_advanced = isinstance(existing_rec, dict) and turn_seq > prev_turn_seq
         prev_live_at = str(existing_rec.get("last_live_at") or "") if isinstance(existing_rec, dict) else ""
         last_live_at = now_iso if (state_known is not False and (sse_active or is_generating or is_dispatching or turn_just_advanced)) else prev_live_at
-        has_error = bool(tab_payload.get("has_error", False))
+        # Spec v4.7 §2.3: universal one-question-one-answer closure probes (web tab & DesktopAppBridge)
+        has_composer = tab_payload.get("has_composer", True) is not False
+        turn_incomplete = bool(tab_payload.get("turn_incomplete", False))
+        stream_incomplete = bool(tab_payload.get("stream_incomplete", False))
+        has_load_error = bool(tab_payload.get("has_load_error", False))
+        ui_error_text = str(tab_payload.get("ui_error_text") or "").strip()[:240]
+        has_error = bool(tab_payload.get("has_error", False)) or has_load_error or turn_incomplete or stream_incomplete or bool(ui_error_text)
         page_hints = tab_payload.get("page_hints")
         if not isinstance(page_hints, list):
             page_hints = []
@@ -6043,11 +6501,18 @@ def _update_tab_and_bindings(state: dict, tab_payload: dict, default_browser: st
         "page_hints": page_hints,
         "sse_active": sse_active,
         "is_dispatching": is_dispatching,
+        "raw_is_dispatching": raw_is_dispatching,
+        "dispatching_since": dispatching_since,
         "is_generating": is_generating,
         "has_user_draft": has_user_draft,
         "turn_seq": turn_seq,
         "last_live_at": last_live_at,
         "has_error": has_error,
+        "has_composer": has_composer,
+        "turn_incomplete": turn_incomplete,
+        "stream_incomplete": stream_incomplete,
+        "has_load_error": has_load_error,
+        "ui_error_text": ui_error_text,
         "current_model": current_model,
         "current_effort": current_effort,
         "is_archived": is_archived,
@@ -6542,7 +7007,10 @@ def handle_web_bridge_poll(wb_path: str, tasks_root: str, payload: dict) -> dict
                 )
                 tab_dispatching = any(bool(t.get("is_dispatching")) for t in same_conv_tabs)
                 tab_draft = any(bool(t.get("has_user_draft")) for t in same_conv_tabs)
-                tab_error = any(bool(t.get("has_error")) for t in same_conv_tabs)
+                tab_unusable = any(
+                    (t.get("has_composer", True) is False) or bool(t.get("has_load_error"))
+                    for t in same_conv_tabs
+                )
                 # Spec v4.3 Q1/Q3: a manual follow-window instruction may steer a running conversation live (queue head only) and
                 # takes priority over a hand-typed draft. Everything else keeps the original idle-only single-flight rules.
                 manual_steer = bool(msg.get("manual_send")) and msg_mode == "custom_message"
@@ -6558,7 +7026,7 @@ def handle_web_bridge_poll(wb_path: str, tasks_root: str, payload: dict) -> dict
                     or tab_dispatching
                     or (tab_live and not manual_steer)
                     or (tab_draft and not manual_steer)
-                    or (tab_error and msg_mode == "in_place_wakeup")
+                    or (tab_unusable and msg_mode == "in_place_wakeup")
                 ):
                     continue
                 if not manual_steer and max_live_ep > 0 and (now_epoch - max_live_ep) < 3.0:
