@@ -188,3 +188,10 @@ Assert-Case ($resolved.connected_providers -contains 'gemini' -and $resolved.con
 $session = [pscustomobject]@{AvailableModelsByProvider=$multi.AvailableModelsByProvider;ConnectedProviders=@('claude')}
 $resolvedSession = Resolve-ComposerCatalogState $session $null
 Assert-Case ($resolvedSession.connected_providers -contains 'claude' -and $resolvedSession.available_models_by_provider.gemini.Count -eq 1) 'Task production extraction uses snapshot session model and availability metadata'
+
+$productionState = Make-State 'production-shaped'
+$productionState | Add-Member ProfilesState ([pscustomobject]@{EnabledPlatforms=@('openai','gemini','claude');Profiles=@()})
+$productionState | Add-Member AvailableModelsByProvider $resolved.available_models_by_provider
+$productionState | Add-Member ConnectedProviders @($resolved.connected_providers)
+Sync-Test $productionState $catalog 'inherit' 'inherit'
+Assert-Case (@(Get-Tags $productionState.ModelCombo) -contains 'gemini-pro') 'Production extracted and constructed connected Gemini keeps its model visible'

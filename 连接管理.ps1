@@ -5001,7 +5001,8 @@ function Sync-ComposerModelAndEffortCombos($StateInfo, $AvailModels, [string]$Cu
     try {
     $modelsArr = @(if ($AvailModels) { $AvailModels })
     $providerCatalogs = if ($StateInfo.PSObject.Properties['AvailableModelsByProvider']) { $StateInfo.AvailableModelsByProvider } else { $null }
-    $connectedProviders = if ($StateInfo.PSObject.Properties['ConnectedProviders']) { ,@($StateInfo.ConnectedProviders) } else { $null }
+    $connectedProviders = $null
+    if ($StateInfo.PSObject.Properties['ConnectedProviders']) { $connectedProviders = @($StateInfo.ConnectedProviders) }
     $connectedSig = @($connectedProviders) -join ','
     $catalogsSig = if ($providerCatalogs) { $providerCatalogs | ConvertTo-Json -Depth 12 -Compress } else { '' }
     $modelSlugsSig = (@($modelsArr | ForEach-Object {
@@ -5469,7 +5470,7 @@ function Build-PlanBComposerPod($SessionObj = $null, [bool]$IsNarrow = $false, [
                     $st.Session = $SessionObj
                     $st.DraftObj = $draftObj
                     $st.TargetMode = $curTargetMode
-                    $st.ConnectedProviders = ,@($catalogState.connected_providers)
+                    $st.ConnectedProviders = @($catalogState.connected_providers)
                     $st.Provider = $(if ($SessionObj -and $SessionObj.PSObject.Properties['Provider'] -and $SessionObj.Provider) { ([string]$SessionObj.Provider).ToLowerInvariant() } elseif ($curBinding) { Get-WebRoomProvider $curBinding } else { 'chatgpt' })
                     $st.AvailableModelsByProvider = $catalogState.available_models_by_provider
                     $st.WebModel = $webModel
@@ -5761,7 +5762,7 @@ function Build-PlanBComposerPod($SessionObj = $null, [bool]$IsNarrow = $false, [
         PodBorder = $composerPod
         LastCatalogSig = ''
         Provider = $(if ($SessionObj -and $SessionObj.PSObject.Properties['Provider'] -and $SessionObj.Provider) { ([string]$SessionObj.Provider).ToLowerInvariant() } elseif ($curBinding) { Get-WebRoomProvider $curBinding } else { 'chatgpt' })
-        ConnectedProviders = ,@($catalogState.connected_providers)
+        ConnectedProviders = @($catalogState.connected_providers)
         AvailableModelsByProvider = $catalogState.available_models_by_provider
         AvailableModels = $availModels
         WebModel = $webModel
