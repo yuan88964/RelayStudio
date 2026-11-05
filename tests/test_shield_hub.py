@@ -540,7 +540,8 @@ class ShieldHubSeamTests(unittest.TestCase):
         })
         self.assertEqual(len(blank_poll["messages"]), 0)
 
-        # Now report has_error=True on bound tab -> guardian upgrades to new_window_handover ONCE (Single-Flight lock)
+        # Spec v4.7 Option A: when has_error=True with usable composer, pending in_place_wakeup is preserved;
+        # when the page becomes unusable (has_load_error=True / has_composer=False), guardian upgrades to new_window_handover ONCE (Single-Flight lock)
         self._post_json("/web-bridge/poll", {
             "browser": "Chrome",
             "browser_profile": "Chrome:Profile 1",
@@ -554,6 +555,7 @@ class ShieldHubSeamTests(unittest.TestCase):
                     "page_hints": ["tsk_guard_1"],
                     "is_generating": False,
                     "has_error": True,
+                    "has_load_error": True,
                 }
             ],
         })
@@ -573,6 +575,7 @@ class ShieldHubSeamTests(unittest.TestCase):
                     "page_hints": ["tsk_guard_1"],
                     "is_generating": False,
                     "has_error": True,
+                    "has_load_error": True,
                 }
             ],
         })
