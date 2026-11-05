@@ -1,4 +1,4 @@
-﻿param([string]$EvidenceRoot = (Join-Path ([IO.Path]::GetTempPath()) 'relaystudio-test-outputs'))
+﻿param([string]$EvidenceRoot = (Join-Path ([IO.Path]::GetTempPath()) 'relaystudio-test-outputs'), [switch]$PublicTunnelOnly)
 
 $ErrorActionPreference='Stop'
 
@@ -17,6 +17,41 @@ $script:passed=0
 function Assert([bool]$Condition,[string]$Message) { if (-not $Condition) { throw "FAIL: $Message" }; $script:passed++ }
 
 function Assert-Throws([scriptblock]$Action,[string]$Message) { $thrown=$false;try { & $Action | Out-Null }catch { $thrown=$true }; Assert $thrown $Message }
+
+if ($PublicTunnelOnly) {
+    $ctx = New-ConnectionContext -DataRoot (Join-Path $testRoot 'public') -Isolated
+    Assert-Throws { Add-CapsulePlatform $ctx 'deepseek' } 'deprecated platform rejected'
+    $state = Add-CapsulePlatform $ctx 'gemini'
+    Assert (($state.Profiles | Where-Object Platform -eq 'gemini').Kind -eq 'public_tunnel') 'Gemini is a public tunnel'
+    Assert ((ConvertTo-PublicMcpUrl 'https://example.com/') -eq 'https://example.com/mcp') 'fixed URL normalized'
+    Assert-Throws { ConvertTo-PublicMcpUrl 'http://example.com' } 'HTTPS required'
+    Assert (-not (Get-PublicMcpTunnelState $ctx).Running) 'cold start offline'
+    $exe = Join-Path $testRoot 'fake-cloudflared.exe'
+    Add-Type -TypeDefinition 'using System; class FakeTunnel { static void Main(string[] args) { var i = Array.IndexOf(args, "--logfile"); System.IO.File.AppendAllText(args[i+1], "https://fixture.trycloudflare.com\nRegistered tunnel connection"); System.Threading.Thread.Sleep(60000); } }' -OutputAssembly $exe -OutputType ConsoleApplication
+    try {
+        $first = Start-PublicMcpTunnel -Context $ctx -ClientPath $exe
+        $second = Start-PublicMcpTunnel -Context $ctx -ClientPath $exe
+        Assert ($first.Running -and $first.Url -eq 'https://fixture.trycloudflare.com/mcp') 'quick tunnel yields MCP URL'
+        Assert ($first.ProcessId -eq $second.ProcessId) 'second platform reuses same process'
+    } finally { Stop-PublicMcpTunnel $ctx }
+    Assert (-not (Get-PublicMcpTunnelState $ctx).Running) 'stop clears shared tunnel'
+    try {
+        $fixed = Start-PublicMcpTunnel -Context $ctx -ClientPath $exe -FixedDomain 'https://fixed.example/' -Token 'fixture-token'
+        Assert ($fixed.Running -and $fixed.Url -eq 'https://fixed.example/mcp') 'fixed domain is used instead of temporary URL'
+    } finally { Stop-PublicMcpTunnel $ctx }
+    $before = Get-ConnectionProfiles $ctx
+    $storePath = Join-Path $ctx.DataRoot 'credential-profiles.json'
+    $store = [IO.File]::ReadAllText($storePath) | ConvertFrom-Json
+    $store.enabled_platforms += 'deepseek'
+    $store.profiles += [pscustomobject]@{ id='obsolete'; platform='deepseek'; kind='apikey' }
+    [IO.File]::WriteAllText($storePath, ($store | ConvertTo-Json -Depth 8))
+    $clean = Get-ConnectionProfiles $ctx
+    Assert ($clean.EnabledPlatforms -notcontains 'deepseek' -and @($clean.Profiles | Where-Object Platform -eq 'deepseek').Count -eq 0) 'legacy platform filtered'
+    Assert (([IO.File]::ReadAllText($storePath) | ConvertFrom-Json).enabled_platforms -notcontains 'deepseek') 'legacy cleanup persisted'
+
+    Write-Output "PASS public tunnel: $script:passed"
+    return
+}
 
 try {
 
@@ -463,7 +498,7 @@ try {
     $openaiKeyBytesBefore = [IO.File]::ReadAllText($capCtx.KeyPath)
     $capState1 = Add-CapsulePlatform -Context $capCtx -Platform 'claude'
     $claudeDefProf = $capState1.Profiles | Where-Object { $_.Platform -eq 'claude' } | Select-Object -First 1
-    Assert (($capState1.EnabledPlatforms -contains 'openai') -and ($capState1.EnabledPlatforms -contains 'claude') -and $null -ne $claudeDefProf -and $claudeDefProf.Name -eq '默认' -and $claudeDefProf.Kind -eq 'apikey' -and $claudeDefProf.TunnelId -eq '' -and $claudeDefProf.HasKey -eq $false -and $claudeDefProf.Enabled -eq $false) 'Hazard 3: Add-CapsulePlatform adds claude to EnabledPlatforms with a clean disabled default apikey profile'
+    Assert (($capState1.EnabledPlatforms -contains 'openai') -and ($capState1.EnabledPlatforms -contains 'claude') -and $null -ne $claudeDefProf -and $claudeDefProf.Name -eq '默认' -and $claudeDefProf.Kind -eq 'public_tunnel' -and $claudeDefProf.TunnelId -eq '' -and $claudeDefProf.HasKey -eq $false -and $claudeDefProf.Enabled -eq $false) 'Hazard 3: Add-CapsulePlatform adds claude to EnabledPlatforms with a clean disabled default apikey profile'
     $claudeKey = 'sk-ant-api03-offline-test-key-123456'
     $probeTcp = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
     $probeTcp.Start()
@@ -952,9 +987,9 @@ try {
     $footerLinksStack = $script:controls.ApiKeysButton.Parent
     Assert ($footerLinksStack.Children.IndexOf($script:controls.ApiKeysButton) -eq 0 -and $footerLinksStack.Children.IndexOf($script:controls.PlatformButton) -eq 1) 'KeyPopoverBorder footer places ApiKeysButton on the left and PlatformButton on the right'
     $script:controls.AddPlatformCellButton.RaiseEvent((New-Object Windows.RoutedEventArgs([Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
-    Assert ($script:controls.KeyPopoverBorder.Visibility -eq 'Visible' -and $script:controls.AddPlatformPanelBorder.Visibility -eq 'Visible' -and $script:controls.AddPlatformListPanel.Children.Count -eq 5 -and $script:controls.PopoverHeaderTitle.Text -eq '添加平台隧道或密钥' -and $script:controls.ProfilesListScroll.Visibility -eq 'Collapsed' -and $script:controls.PopoverFooterBorder.Visibility -eq 'Collapsed' -and $script:controls.AddProfileButton.Visibility -eq 'Collapsed') 'Clicking AddPlatformCellButton (+) opens standalone 添加平台隧道或密钥 panel and hides OpenAI profile list, + 新增配置, and footer bar'
+    Assert ($script:controls.KeyPopoverBorder.Visibility -eq 'Visible' -and $script:controls.AddPlatformPanelBorder.Visibility -eq 'Visible' -and $script:controls.AddPlatformListPanel.Children.Count -eq 3 -and $script:controls.PopoverHeaderTitle.Text -eq '添加平台通道' -and $script:controls.ProfilesListScroll.Visibility -eq 'Collapsed' -and $script:controls.PopoverFooterBorder.Visibility -eq 'Collapsed' -and $script:controls.AddProfileButton.Visibility -eq 'Collapsed') 'Clicking AddPlatformCellButton (+) opens standalone 添加平台通道 panel and hides OpenAI profile list, + 新增配置, and footer bar'
     Invoke-SelectOrAddCapsulePlatform 'claude'
-    Assert ($script:activeCapsulePlatform -eq 'claude' -and $script:controls.PopoverHeaderTitle.Text -match '^Claude 接入配置' -and [string]$script:controls.PlatformButton.Content -eq '网页端 Connectors ↗' -and [string]$script:controls.QuickConnectButton.Content -eq '✓ 测试连接' -and [string]$script:controls.DisconnectButton.Content -in @('启用', '停用') -and $script:controls.CapsuleExtraSegmentsPanel.Children.Count -ge 2) 'Selecting Claude from + panel grows capsule segment and switches KeyPopoverBorder to Claude apikey config with ✓ 测试连接 and 启用/停用'
+    Assert ($script:activeCapsulePlatform -eq 'claude' -and $script:controls.PopoverHeaderTitle.Text -match '^Claude 接入配置' -and [string]$script:controls.PlatformButton.Content -eq '网页端 Connectors ↗' -and [string]$script:controls.QuickConnectButton.Content -eq '▶ 启动 HTTPS 隧道' -and [string]$script:controls.DisconnectButton.Content -eq '断开共享隧道' -and $script:controls.CapsuleExtraSegmentsPanel.Children.Count -ge 2) 'Selecting Claude from + panel grows capsule segment and switches KeyPopoverBorder to Claude apikey config with ✓ 测试连接 and 启用/停用'
     $script:controls.DismissKeyPopoverButton.RaiseEvent((New-Object Windows.RoutedEventArgs([Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
     Assert ($script:controls.KeyPopoverBorder.Visibility -eq 'Collapsed' -and (-not $script:popoverOpen)) 'Clicking top-right × DismissKeyPopoverButton closes non-OpenAI popover'
     Select-CapsulePlatform 'claude'
