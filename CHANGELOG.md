@@ -4,6 +4,21 @@
 
 ---
 
+## [v1.2.0] - 2026-11-05
+
+### 新增与增强（Added & Changed）
+- **五维生命体征引擎与通用断流自愈闭环（Spec v4.7）**：
+  - **一问一答正向闭环与正文隔离提错**：`bridge-page-hook.js` 全程覆盖 `/sentinel/`、`/prepare` 与 `/conversation` 请求，校验真实 SSE 事件流是否收到 `[DONE]` / `message_stream_complete`；`bridge-content.js` 与 `RelayCdp.py` 在剔除 `.markdown, pre, code` 及用户消息气泡后提取外围报错文案 `ui_error_text`，并在输入框卸载（如“无法加载此对话”）时回退扫描主时间线 Fiber。
+  - **扩展后台双白名单全量透传**：补齐 `background.js` 在 `upsertTabStateCache` 与 `collectOpenChatGptTabs` 中对 `is_archived`、`can_steer_live`、`has_composer`、`turn_incomplete`、`stream_incomplete`、`has_load_error`、`ui_error_text` 共 7 个关键状态字段的同步透传。
+  - **防 Chrome 后台节流死锁与防双份草稿**：发信确认轮询引入 25s / 6.5s 物理时钟上限与 30s `isBusySending` 看门狗复位，大管家对无流生成的 `is_dispatching` 施加 35s 硬上限，彻底消除后台标签页因每分钟 1 次唤醒节流导致的数小时假在线死锁；禁止在输入框非空时二次补填，发送未确认时仅清理机器注入的草稿。
+  - **六态生命体征、断网保号（`NETWORK_HOLD`）与“选项 A”原页重试阶梯**：新增 `VitalSubstate`（`LIVE / PSEUDO_STOPPED / DUAL_STREAM / WAITING_CONFIRM / NETWORK_HOLD / CONFIRMED_STOPPED`）与业务目录 `pipeline.state.json` 探针；当 `tunnel.out.log` 检测到代理连续 `EOF` 断网风暴时自动冻结派单并保留重试配额；严禁篡改已被标签页认领（`claimed`）的消息；后台工具静默满 60s 后，只要底部输入框完好且未达重试上限，优先发送原页催工单（`in_place_wakeup`），耗尽配额或页面崩溃时才升级新窗交接（`new_window_handover`）。
+  - **跨截断累加计数与详情弹窗全链路校准**：在隧道日志 `2500 -> 2000` 行裁剪前归档累加淘汰行调用数，破除长任务 ~1007 次计数封顶；按会话提取真实业务工程根目录（`WorkspaceRoot`）并优先读取对应仓库 `.git\logs\HEAD`；扩展详情弹窗 `$panelSig` 动态指纹消除 12 条检查点冻结，固定 `× 关闭详情` 等 4 个头部按钮高度为 `28` 且垂直居中，保护非空战报摘要不被 `"记录检查点"` 覆盖，保留 7~12 位 Git 短哈希并消除 `"刚刚刚"` 叠字。
+- **顶栏双组纯图标分段胶囊与多平台契约防崩**：
+  - 顶栏收敛为左侧紧凑双组纯图标与一体式分段生长胶囊，支持动态添加平台分栏并与下方模型下拉框分组呼吸灯同频呼应；冷启动未连接网页前严格只展示 `默认 (跟随网页)`。
+  - 隔离 OpenAI 隧道（`tunnel`）与多平台密钥（`apikey`）配置读写，加固 ACP Profile 双向校验与 `settings.json` 非破坏性合并写盘。
+
+---
+
 ## [v1.1.0] - 2026-11-02
 
 ### 新增与增强（Added & Changed）

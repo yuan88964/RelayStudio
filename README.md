@@ -4,7 +4,7 @@
 
 **面向 ChatGPT 桌面端与网页端的本地长程开发接力工作台**
 
-[![Release](https://img.shields.io/badge/Release-v1.1.0%20Portable-2563EB?style=flat-square)](https://huggingface.co/datasets/yuan88964/RelayStudio-Releases/tree/main)
+[![Release](https://img.shields.io/badge/Release-v1.2.0%20Portable-2563EB?style=flat-square)](https://huggingface.co/datasets/yuan88964/RelayStudio-Releases/tree/main)
 [![Platform](https://img.shields.io/badge/Platform-Windows%2010%2F11%20x64-0078D6?style=flat-square)](#快速开始quickstart)
 [![Architecture](https://img.shields.io/badge/Engine-Loopback%20MCP%20%2B%20CDP%20%2B%20MV3-16A34A?style=flat-square)](docs/architecture.md)
 [![License](https://img.shields.io/badge/License-MIT-F59E0B?style=flat-square)](LICENSE)
@@ -32,11 +32,11 @@
 
 RelayStudio 将**会话窗口视为随时可替换的临时执行器，将本地磁盘上的规格书（`SPEC.md`）、Git 提交历史与任务账本（`tsk_*.json`）作为唯一持久状态**，通过以下核心机制构成闭环：
 
-| 模块维度 | 常规 MCP 挂载模式 | RelayStudio 工作台机制（v1.1.0） |
+| 模块维度 | 常规 MCP 挂载模式 | RelayStudio 工作台机制（v1.2.0） |
 | :--- | :--- | :--- |
 | **本地网关与免确认执行** | 写文件与执行命令频繁触发确认弹窗；多 MCP 服务需分别暴露隧道 | **单隧道回环网关（`127.0.0.1:8766`）**：统一重写 `readOnlyHint: true` 实现零审批弹窗调用，集中收敛内置工具与 `engine-data/mcp` 扩展；仅在当前任务开启自动重发时动态注入免确认连跑尾注，日间手动问答不受干扰 |
 | **原生单步任务账本**<br>（Spec v4.6） | 缺少持久化步骤状态，或受制于繁琐的多步复盘结单校验 | **`:8766` 原生 `task_manage` 引擎**：精简为 `create / update / checkpoint / list / get / block / resume` 7 个动作，支持 `pending`、`in_progress`、`completed`、`quarantined` 四态；所有步骤进入终态后一步自动结单并关停催工，无需额外的 `final_review` 往返 |
-| **解耦式停顿守护与熔断** | 超时后需人工输入“继续”，或因盲目定时重发打断慢测试与深度思考 | **独立停顿时长 × 重试上限**：支持按任务配置停顿阈值（`停顿 30 秒 (测试)` / `停顿 3 分钟` / `停顿 5 分钟`，默认 `3 分钟`）与上限（`重试 1 次` / `2 次` / `3 次`，默认 `1 次`）；全工具在途计数（含无 `task_id` 的文件与终端调用）自动冻结计时，且仅在检测到步骤推进、新 Git 提交或真实工具执行后才重置重试计数 |
+| **解耦式停顿守护与五维自愈**<br>（Spec v4.7） | 超时后需人工输入“继续”、后台标签页遭 Chrome 5 分钟休眠断流，或因盲目定时重发打断慢测试与深度思考 | **独立停顿时长 × 重试上限 + 五维生命体征自愈**：支持按任务配置停顿阈值与重试上限；内置 DOM 报错雷达与后台保活信号、全工具在途冻结计时，并在任务卡片直观展示「网关 · 宿主 · 页面 · 模型 · 步进」五维状态，遇流式断流或连接异常自动先原窗唤醒再升级接力 |
 | **跨窗口交接与档位继承** | 上下文膨胀后需手动整理进度重开会话，易丢失当前模型与思考力度 | **两阶段账本交接与旧窗归档**：自动提取本地 `tsk_*.json` 进度与规格指针拉起新会话；默认 `inherit` 模式在原窗唤醒时不触碰模型设置，升级新窗交接时自动快照并还原原窗口的模型与思考强度，随后对旧窗口执行停止生成与归档 |
 | **多栏工作区与三态主题** | 命令行滚动原始 JSON 日志，多任务并行时难以直观追踪进度与提交 | **GPU 加速 4 分栏工作台 + 三态主题记忆**：右侧支持最多 4 分栏并列监控与平滑过渡动画；内置 `跟随系统 / 浅色 / 深色` 三态主题记忆（支持顶栏 `☀/🌙` 一键切换、`Ctrl+Shift+D` 快捷键，右键点击图标恢复跟随系统） |
 | **规则与工程技能路由** | 每次开新窗需重复粘贴开发规范，网页端无法直接复用本地 `SKILL.md` | **开局自动注入 `AGENTS.md` + 内置 13 项工程技能**：启动时自动挂载 `builtin-skills/` 至 `engine-data/`（支持 NTFS 软链接路由至本地 Obsidian 知识库），按需加载技能正文，平时不额外占用上下文 |
@@ -82,7 +82,7 @@ RelayStudio 将**会话窗口视为随时可替换的临时执行器，将本地
 - **基础依赖**：
   - **Python 3.11+**（必需，用于运行本地 `:8766` 桥接中枢 `McpReadOnlyShield.py`，仅依赖标准库）。
   - **Node.js 20+**（可选，仅在本地调用 `@agentclientprotocol/codex-acp` 或 `@agentclientprotocol/claude-agent-acp` 子代理时需要）。
-- **下载解压**：点击直接下载最新绿色便携包 [**`RelayStudio-v1.1.0-win-x64-portable.zip`（免登录直链，18.9 MB）**](https://huggingface.co/datasets/yuan88964/RelayStudio-Releases/resolve/main/RelayStudio-v1.1.0-win-x64-portable.zip?download=true)（或浏览 [Hugging Face 发行文件列表](https://huggingface.co/datasets/yuan88964/RelayStudio-Releases/tree/main)，`SHA256: 044661be8ca985e758eb4bd1a8804ded1690b91a22b7c6d8a9d5832d0a3b2670`；也可直接克隆本纯源码仓库），解压至普通读写权限目录。启动时程序会自动将 [`builtin-skills/`](builtin-skills) 下的 `AGENTS.md` 与 13 项技能同步至 `engine-data/`；如需链接外部 Obsidian 知识库或自定义第三方 MCP，可参考 [`docs/architecture.md`](docs/architecture.md) 配置 `data/settings.json` 与 `engine-data/mcp/`。
+- **下载解压**：点击直接下载最新绿色便携包 [**`RelayStudio-v1.2.0-win-x64-portable.zip`（免登录直链，19.0 MB）**](https://huggingface.co/datasets/yuan88964/RelayStudio-Releases/resolve/main/RelayStudio-v1.2.0-win-x64-portable.zip?download=true)（或浏览 [Hugging Face 发行文件列表](https://huggingface.co/datasets/yuan88964/RelayStudio-Releases/tree/main)，`SHA256: fbefeef8083daa80574c0c1abac78ffede4e87056e2ed0ea980b13ef4b317d63`；也可直接克隆本纯源码仓库），解压至普通读写权限目录。启动时程序会自动将 [`builtin-skills/`](builtin-skills) 下的 `AGENTS.md` 与 13 项技能同步至 `engine-data/`；如需链接外部 Obsidian 知识库或自定义第三方 MCP，可参考 [`docs/architecture.md`](docs/architecture.md) 配置 `data/settings.json` 与 `engine-data/mcp/`。
 
 ### 2. 配置隧道凭据与外观主题
 
@@ -97,7 +97,7 @@ RelayStudio 将**会话窗口视为随时可替换的临时执行器，将本地
 ### 3. 关联对话宿主与连接器
 
 - **使用 ChatGPT 桌面端（默认）**：无需额外插件，首次点击「打开宿主窗口」或发起任务时，RelayStudio 会通过桌面包身份自动携带调试端口拉起客户端。
-- **使用 Chrome / Edge 浏览器**：打开 `chrome://extensions` 或 `edge://extensions` 开启「开发者模式」，点击「加载已解压的扩展程序」并选择目录内的 **`browser-bridge`** 文件夹（或下载独立扩展包 [`relaystudio-browser-bridge-v1.1.0.zip`](https://huggingface.co/datasets/yuan88964/RelayStudio-Releases/resolve/main/relaystudio-browser-bridge-v1.1.0.zip?download=true) 解压加载），随后刷新 [`https://chatgpt.com/`](https://chatgpt.com/) 页面即可在宿主下拉列表中看到对应浏览器配置。
+- **使用 Chrome / Edge 浏览器**：打开 `chrome://extensions` 或 `edge://extensions` 开启「开发者模式」，点击「加载已解压的扩展程序」并选择目录内的 **`browser-bridge`** 文件夹（或下载独立扩展包 [`relaystudio-browser-bridge-v1.2.0.zip`](https://huggingface.co/datasets/yuan88964/RelayStudio-Releases/resolve/main/relaystudio-browser-bridge-v1.2.0.zip?download=true) 解压加载），随后刷新 [`https://chatgpt.com/`](https://chatgpt.com/) 页面即可在宿主下拉列表中看到对应浏览器配置。
 - **启用 MCP 连接器**：在 ChatGPT 设置（Settings → Connectors / Developer mode）中绑定前面创建的隧道，并在会话输入框工具菜单中勾选启用。
 
 ### 4. 启动长程任务
@@ -123,7 +123,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build-launcher.ps1
 #    - bin\relaystudio-core.exe : 由 Apache-2.0 开源仓库 uvwt/agentdock 执行 cargo build --release 编译放入
 
 # （可选）一键生成与官方一致的便携发行包与 SHA256SUMS.txt
-powershell -ExecutionPolicy Bypass -File .\scripts\build-release.ps1 -Version "1.1.0"
+powershell -ExecutionPolicy Bypass -File .\scripts\build-release.ps1 -Version "1.2.0"
 ```
 
 ---
@@ -136,7 +136,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build-release.ps1 -Version "1
 | **[`docs/architecture.md`](docs/architecture.md)** | 系统架构与模块契约：C2 容器边界图、跨窗口交接时序图、各深模块职责与 `data/settings.json` 软路由字段说明 |
 | **[`docs/troubleshooting.md`](docs/troubleshooting.md)** | 故障排查手册：端口与回环健康自检、桌面端 CDP 重连、编码规范检查与离线隔离回归测试命令 |
 | **[`GLOSSARY.md`](GLOSSARY.md)** | 领域术语表：会话绑定簿、两阶段交接过户、多抽屉转正、全工具在途门禁等统一术语定义 |
-| **[`SPEC.md`](SPEC.md) & [`docs/adr/`](docs/adr/)** | 系统演进规格书与架构决策记录（ADR），涵盖至 Spec v4.6 原生单步账本与守护隔离设计 |
+| **[`SPEC.md`](SPEC.md) & [`docs/specs/`](docs/specs/)** | 系统演进规格书与架构决策记录（ADR），涵盖至 Spec v4.7 五维生命体征与通用异常自愈协议 |
 
 ---
 
