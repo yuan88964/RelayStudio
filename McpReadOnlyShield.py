@@ -8696,7 +8696,7 @@ class ShieldHandler(BaseHTTPRequestHandler):
         wb_path = getattr(self.server, "web_bridge_path", "")
         now_iso = _utc_now_iso()
 
-        if self.path.startswith("/web-bridge/poll"):
+        if self.path.startswith(("/web-bridge/poll", "/web-bridge/heartbeat")):
             res = handle_web_bridge_poll(wb_path, self.server.tasks_root, payload)
             self._send_json(200, res)
             return
