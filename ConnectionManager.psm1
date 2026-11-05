@@ -748,8 +748,8 @@ function Get-DefaultPlatformBaseUrl {
     $plat = if ($Platform) { $Platform.Trim().ToLowerInvariant() } else { 'openai' }
     switch ($plat) {
         'openai'   { return $(if ($Settings -and $Settings.PSObject.Properties['api_base_url'] -and $Settings.api_base_url) { [string]$Settings.api_base_url } else { 'https://api.openai.com' }) }
-        'claude'   { return 'https://api.anthropic.com' }
-        'gemini'   { return 'https://generativelanguage.googleapis.com' }
+        'claude'   { return '' }
+        'gemini'   { return '' }
         'deepseek' { return 'https://api.deepseek.com' }
         'opencode' { return 'https://api.opencode.ai/v1' }
         default    { return 'https://api.openai.com' }
@@ -768,6 +768,7 @@ function Get-ConnectionProfiles {
     $rawItems = @()
     $enabledPlatforms = New-Object 'System.Collections.Generic.List[string]'
     $activeByPlatform = [ordered]@{}
+    $storeObj = $null
     $hasExplicitProfilesStore = $false
     if (Test-Path -LiteralPath $storePath) {
         try {
@@ -781,14 +782,14 @@ function Get-ConnectionProfiles {
             if ($storeObj.PSObject.Properties.Name -contains 'enabled_platforms' -and $storeObj.enabled_platforms) {
                 foreach ($ep in @($storeObj.enabled_platforms)) {
                     $epNorm = ([string]$ep).Trim().ToLowerInvariant()
-                    if ($epNorm -and -not $enabledPlatforms.Contains($epNorm)) {
+                    if ($epNorm -in @('openai','gemini','claude') -and -not $enabledPlatforms.Contains($epNorm)) {
                         [void]$enabledPlatforms.Add($epNorm)
                     }
                 }
             }
             if ($storeObj.PSObject.Properties.Name -contains 'active_profile_by_platform' -and $storeObj.active_profile_by_platform) {
                 foreach ($prop in $storeObj.active_profile_by_platform.PSObject.Properties) {
-                    if ($prop.Name -and $prop.Value) {
+                    if ($prop.Name -in @('openai','gemini','claude') -and $prop.Value) {
                         $activeByPlatform[$prop.Name.ToLowerInvariant()] = [string]$prop.Value
                     }
                 }
@@ -802,7 +803,7 @@ function Get-ConnectionProfiles {
         if ($Settings -and $Settings.PSObject.Properties.Name -contains 'enabled_platforms' -and $Settings.enabled_platforms) {
             foreach ($ep in @($Settings.enabled_platforms)) {
                 $epNorm = ([string]$ep).Trim().ToLowerInvariant()
-                if ($epNorm -and -not $enabledPlatforms.Contains($epNorm)) {
+                if ($epNorm -in @('openai','gemini','claude') -and -not $enabledPlatforms.Contains($epNorm)) {
                     [void]$enabledPlatforms.Add($epNorm)
                 }
             }
@@ -838,7 +839,8 @@ function Get-ConnectionProfiles {
     $profiles = @(foreach ($item in $rawItems) {
         $pidStr = [string]$item.id
         $plat = if ($item.PSObject.Properties.Name -contains 'platform' -and $item.platform) { ([string]$item.platform).Trim().ToLowerInvariant() } else { 'openai' }
-        $kind = if ($item.PSObject.Properties.Name -contains 'kind' -and $item.kind) { ([string]$item.kind).Trim().ToLowerInvariant() } elseif ($plat -eq 'openai') { 'tunnel' } else { 'apikey' }
+        if ($plat -notin @('openai','gemini','claude')) { continue }
+        $kind = if ($plat -ne 'openai') { 'public_tunnel' } elseif ($item.PSObject.Properties.Name -contains 'kind' -and $item.kind) { ([string]$item.kind).Trim().ToLowerInvariant() } elseif ($plat -eq 'openai') { 'tunnel' } else { 'public_tunnel' }
         $defaultKeyFile = if ($plat -eq 'openai') { "openai-key-$pidStr.dpapi" } else { "credential-$pidStr.dpapi" }
         $keyFile = if ($item.PSObject.Properties.Name -contains 'key_file' -and $item.key_file) { [string]$item.key_file } else { $defaultKeyFile }
         $keyFullPath = Join-Path $Context.DataRoot $keyFile
@@ -859,6 +861,10 @@ function Get-ConnectionProfiles {
             [string]$item.api_base_url
         } else {
             Get-DefaultPlatformBaseUrl $plat $Settings
+        }
+        if ($plat -ne 'openai' -and $item.PSObject.Properties['kind'] -and $item.kind -eq 'apikey') {
+            # Platform API credentials are not Cloudflare credentials; upgrade to quick mode.
+            $plain = ''; $baseUrl = ''; $keyFile = "public-tunnel-$pidStr.dpapi"
         }
         $enabledFlag = if ($item.PSObject.Properties.Name -contains 'enabled' -and $null -ne $item.enabled) { [bool]$item.enabled } else { $true }
         if ($pidStr -eq 'prof_business' -and [string]$item.name -eq 'Business 席位号' -and (-not $tunId) -and (-not $plain) -and ($pidStr -ne $activeId)) {
@@ -885,6 +891,10 @@ function Get-ConnectionProfiles {
             IsActive = [bool]$isAct
         }
     })
+    if (@($rawItems | Where-Object { $_.PSObject.Properties['kind'] -and $_.kind -eq 'apikey' -and $_.platform -in @('gemini','claude') }).Count -gt 0 -or @($rawItems | Where-Object { $_.platform -and $_.platform -notin @('openai','gemini','claude') }).Count -gt 0 -or
+        ($storeObj -and @($storeObj.enabled_platforms | Where-Object { $_ -notin @('openai','gemini','claude') }).Count -gt 0)) {
+        Write-ConnectionProfilesStorePayload -Context $Context -ActiveProfileId $activeId -EnabledPlatforms $enabledPlatforms.ToArray() -ActiveProfileByPlatform $activeByPlatform -SerializedProfiles @(foreach ($profile in $profiles) { ConvertTo-SerializedProfileEntry $profile })
+    }
     return [pscustomobject]@{
         ActiveProfileId = $activeId
         EnabledPlatforms = @($enabledPlatforms.ToArray())
@@ -969,9 +979,11 @@ function Save-ConnectionProfile {
     } else {
         'apikey'
     }
+    if ($effPlatform -notin @('openai','gemini','claude')) { throw '不支持的平台标识。' }
+    if ($effPlatform -ne 'openai') { $effKind = 'public_tunnel' }
     $cleanTun = if ($effKind -eq 'tunnel' -and $TunnelId.Trim()) { ConvertTo-TunnelId $TunnelId } else { '' }
     $cleanKey = $ApiKey.Trim()
-    if ($cleanKey -and ($cleanKey -match '^[a-z]+://' -or $cleanKey -match '\s' -or $cleanKey.Length -lt 12)) {
+    if ($effPlatform -eq 'openai' -and $cleanKey -and ($cleanKey -match '^[a-z]+://' -or $cleanKey -match '\s' -or $cleanKey.Length -lt 12)) {
         throw 'API Key 栏请粘贴密钥本身，不是网页链接；密钥中不能有空格或换行。'
     }
     $activeId = $state.ActiveProfileId
@@ -996,13 +1008,13 @@ function Save-ConnectionProfile {
         if ($p.Id -eq $ProfileId) {
             $found = $true
             $origPlat = if ($p.PSObject.Properties['Platform'] -and $p.Platform) { ([string]$p.Platform).ToLowerInvariant() } else { 'openai' }
-            $origKind = if ($p.PSObject.Properties['Kind'] -and $p.Kind) { ([string]$p.Kind).ToLowerInvariant() } elseif ($origPlat -eq 'openai') { 'tunnel' } else { 'apikey' }
+            $origKind = if ($p.PSObject.Properties['Kind'] -and $p.Kind) { ([string]$p.Kind).ToLowerInvariant() } elseif ($origPlat -eq 'openai') { 'tunnel' } else { 'public_tunnel' }
             if ($origPlat -eq 'openai' -and $origKind -eq 'tunnel' -and ($effPlatform -ne 'openai' -or $effKind -ne 'tunnel')) {
                 throw "不能将现有的 OpenAI 隧道配置 ($ProfileId) 变更为其他平台类型。"
             }
             $newName = if ($Name.Trim()) { $Name.Trim() } else { $p.Name }
             $newTun = if ($effKind -eq 'tunnel') { $(if ($cleanTun) { $cleanTun } else { $p.TunnelId }) } else { '' }
-            $newBaseUrl = if ($BaseUrl -and $BaseUrl.Trim()) { $BaseUrl.Trim() } elseif ($p.BaseUrl) { $p.BaseUrl } else { Get-DefaultPlatformBaseUrl $effPlatform $Settings }
+            $newBaseUrl = if ($effPlatform -ne 'openai') { $BaseUrl.Trim() } elseif ($BaseUrl -and $BaseUrl.Trim()) { $BaseUrl.Trim() } elseif ($p.BaseUrl) { $p.BaseUrl } else { Get-DefaultPlatformBaseUrl $effPlatform $Settings }
             $newEnabled = if ($null -ne $Enabled) { [bool]$Enabled } else { [bool]$p.Enabled }
             $keyFile = if ($effPlatform -eq 'openai' -and $effKind -eq 'tunnel') {
                 if ($p.KeyFile) { $p.KeyFile } else { "openai-key-$($p.Id).dpapi" }
@@ -1119,7 +1131,7 @@ function Select-ConnectionProfile {
     $target = $state.Profiles | Where-Object { $_.Id -eq $ProfileId } | Select-Object -First 1
     if (-not $target) { throw "找不到指定的连接配置 ($ProfileId)。" }
     $targetPlat = if ($target.PSObject.Properties['Platform'] -and $target.Platform) { ([string]$target.Platform).ToLowerInvariant() } else { 'openai' }
-    $targetKind = if ($target.PSObject.Properties['Kind'] -and $target.Kind) { ([string]$target.Kind).ToLowerInvariant() } elseif ($targetPlat -eq 'openai') { 'tunnel' } else { 'apikey' }
+    $targetKind = if ($target.PSObject.Properties['Kind'] -and $target.Kind) { ([string]$target.Kind).ToLowerInvariant() } elseif ($targetPlat -eq 'openai') { 'tunnel' } else { 'public_tunnel' }
 
     $activeByPlat = [ordered]@{}
     if ($state.PSObject.Properties['ActiveProfileByPlatform'] -and $state.ActiveProfileByPlatform) {
@@ -1129,7 +1141,7 @@ function Select-ConnectionProfile {
     }
 
     if (-not ($targetPlat -eq 'openai' -and $targetKind -eq 'tunnel')) {
-        if (-not $target.HasKey) {
+        if ($targetKind -ne 'public_tunnel' -and -not $target.HasKey) {
             throw "配置「$($target.Name)」尚未填写 API Key，请先点击修改并粘贴凭据。"
         }
         $activeByPlat[$targetPlat] = $ProfileId
@@ -1185,7 +1197,7 @@ function Add-CapsulePlatform {
     )
     if (-not $Settings) { $Settings = Read-ConnectionSettings $Context }
     $plat = if ($Platform) { $Platform.Trim().ToLowerInvariant() } else { '' }
-    if ($plat -notin @('openai', 'claude', 'gemini', 'deepseek', 'opencode')) {
+    if ($plat -notin @('openai', 'claude', 'gemini')) {
         throw "不支持的平台标识：$Platform"
     }
     $state = Get-ConnectionProfiles $Context $Settings
@@ -1211,7 +1223,7 @@ function Add-CapsulePlatform {
     if ($platProfiles.Count -eq 0) {
         $newId = "prof_${plat}_default"
         $defUrl = Get-DefaultPlatformBaseUrl $plat $Settings
-        $defKind = if ($plat -eq 'openai') { 'tunnel' } else { 'apikey' }
+        $defKind = if ($plat -eq 'openai') { 'tunnel' } else { 'public_tunnel' }
         $defKeyFile = if ($plat -eq 'openai') { "openai-key-$newId.dpapi" } else { "credential-$newId.dpapi" }
         $rawProfiles.Add([pscustomobject]@{
             id = $newId
@@ -5997,6 +6009,102 @@ function Resolve-ThemeColorHex {
         }
         return $trimmed
     }
+}
+
+
+function ConvertTo-PublicMcpUrl {
+    param([string]$Url)
+    $uri = $null
+    if (-not [Uri]::TryCreate($Url.Trim(), [UriKind]::Absolute, [ref]$uri) -or $uri.Scheme -ne 'https' -or $uri.UserInfo -or $uri.Query -or $uri.Fragment) {
+        throw '固定域名必须是 HTTPS 网址，且不能包含凭证、查询参数或片段。'
+    }
+    if ($uri.AbsolutePath -notin @('/','/mcp','/mcp/')) { throw '请输入域名或 /mcp 挂载网址。' }
+    return $uri.GetLeftPart([UriPartial]::Authority) + '/mcp'
+}
+
+function Get-PublicMcpTunnelState {
+    param($Context)
+    $path = Join-Path $Context.DataRoot 'public-mcp-tunnel.json'
+    $result = [pscustomobject]@{ Running = $false; Url = ''; ProcessId = 0; StartedAt = ''; Status = '未启动' }
+    if (Test-Path -LiteralPath $path) {
+        try {
+            $saved = [IO.File]::ReadAllText($path) | ConvertFrom-Json
+            $proc = Get-Process -Id $saved.ProcessId -ErrorAction Stop
+            if ($proc.StartTime.ToUniversalTime().Ticks -ne [long]$saved.StartTicks) { return $result }
+            $result.ProcessId = $proc.Id
+            $result.StartedAt = $saved.StartTicks
+            $result.Status = '连接中'
+            $logPath = Join-Path $Context.DataRoot 'public-mcp-tunnel.log'
+            $log = if (Test-Path -LiteralPath $logPath) { [IO.File]::ReadAllText($logPath) } else { '' }
+            $url = [string]$saved.FixedUrl
+            if (-not $url -and $log -match 'https://[a-zA-Z0-9-]+\.trycloudflare\.com') { $url = ConvertTo-PublicMcpUrl $Matches[0] }
+            if ($url -and $log -match 'Registered tunnel connection') {
+                $result.Running = $true; $result.Url = $url; $result.Status = '在线'
+            }
+        } catch { }
+    }
+    return $result
+}
+
+function Start-PublicMcpTunnel {
+    param($Context, [string]$FixedDomain = '', [string]$Token = '', [string]$ClientPath = '', [int]$Port = 8766)
+    $lockPath = Join-Path $Context.DataRoot 'public-mcp-tunnel.lock'
+    $lock = $null
+    try {
+        $deadline = [DateTime]::UtcNow.AddSeconds(5)
+        while (-not $lock) {
+            try { $lock = [IO.File]::Open($lockPath, 'OpenOrCreate', 'ReadWrite', 'None') }
+            catch { if ([DateTime]::UtcNow -gt $deadline) { throw '公网隧道正在操作，请稍后重试。' }; Start-Sleep -Milliseconds 50 }
+        }
+        $state = Get-PublicMcpTunnelState $Context
+        if ($state.ProcessId) { return $state }
+        $fixedUrl = if ($FixedDomain.Trim()) { ConvertTo-PublicMcpUrl $FixedDomain } else { '' }
+        if (-not $ClientPath) {
+            $cmd = Get-Command cloudflared.exe -ErrorAction SilentlyContinue
+            if ($cmd) { $ClientPath = $cmd.Source }
+            else {
+                foreach ($folder in @(${env:ProgramFiles}, ${env:ProgramFiles(x86)})) {
+                    if ($folder -and (Test-Path (Join-Path $folder 'cloudflared/cloudflared.exe'))) { $ClientPath = Join-Path $folder 'cloudflared/cloudflared.exe'; break }
+                }
+            }
+        }
+        if (-not $ClientPath -or -not (Test-Path -LiteralPath $ClientPath)) { throw '未找到 cloudflared.exe，请先安装 Cloudflare Tunnel。' }
+        $info = New-Object Diagnostics.ProcessStartInfo
+        $info.FileName = $ClientPath
+        $info.UseShellExecute = $false; $info.CreateNoWindow = $true
+        # cloudflared writes its own logfile, avoiding pipe-buffer deadlocks.
+        $logPath = Join-Path $Context.DataRoot 'public-mcp-tunnel.log'
+        [IO.File]::WriteAllText($logPath, '')
+        if ($fixedUrl -and $Token) {
+            $info.Arguments = 'tunnel --no-autoupdate --logfile "' + $logPath + '" run'
+            $info.EnvironmentVariables['TUNNEL_TOKEN'] = $Token
+        } elseif ($fixedUrl) {
+            $hostname = ([Uri]$fixedUrl).Host
+            $info.Arguments = 'tunnel --no-autoupdate --logfile "' + $logPath + '" --hostname ' + $hostname + ' --url http://127.0.0.1:' + $Port
+        } else {
+            $info.Arguments = 'tunnel --no-autoupdate --logfile "' + $logPath + '" --url http://127.0.0.1:' + $Port
+        }
+        $proc = [Diagnostics.Process]::Start($info)
+        Write-AtomicConnectionText (Join-Path $Context.DataRoot 'public-mcp-tunnel.json') (@{ ProcessId = $proc.Id; StartTicks = $proc.StartTime.ToUniversalTime().Ticks; FixedUrl = $fixedUrl } | ConvertTo-Json)
+        $deadline = [DateTime]::UtcNow.AddSeconds(12)
+        do {
+            Start-Sleep -Milliseconds 150
+            $state = Get-PublicMcpTunnelState $Context
+        } while ($state.ProcessId -and -not $state.Running -and [DateTime]::UtcNow -lt $deadline)
+        if (-not $state.ProcessId) { throw '公网隧道启动失败，请检查 public-mcp-tunnel.log。' }
+        return $state
+    } finally { if ($lock) { $lock.Dispose() } }
+}
+
+function Stop-PublicMcpTunnel {
+    param($Context)
+    $lock = [IO.File]::Open((Join-Path $Context.DataRoot 'public-mcp-tunnel.lock'), 'OpenOrCreate', 'ReadWrite', 'None')
+    try {
+        $state = Get-PublicMcpTunnelState $Context
+        if ($state.ProcessId) { Stop-Process -Id $state.ProcessId -ErrorAction SilentlyContinue }
+        $path = Join-Path $Context.DataRoot 'public-mcp-tunnel.json'
+        if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force }
+    } finally { $lock.Dispose() }
 }
 
 Export-ModuleMember -Function *-* -Alias *

@@ -1691,42 +1691,22 @@ function Get-CapsulePlatformMeta([string]$Platform = 'openai') {
     switch ($p) {
         'claude' {
             return [pscustomobject]@{
-                Code = 'claude'; Title = 'Claude'; Kind = 'apikey'
-                DefaultUrl = 'https://api.anthropic.com'
-                PurposeDesc = 'Anthropic 官方密钥与自定义接口 · 供本地 Claude CLI 智能体使用'
-                SecondLabel = 'Base URL / 接入点'; KeyLabel = 'Anthropic API Key'
-                ApiKeysUrl = 'https://console.anthropic.com/settings/keys'
+                Code = 'claude'; Title = 'Claude'; Kind = 'public_tunnel'
+                DefaultUrl = ''
+                PurposeDesc = '共享公网 MCP 隧道 · 连接 Claude 云端会话房间'
+                SecondLabel = '固定 HTTPS 域名（选填，留空使用临时隧道）'; KeyLabel = 'Cloudflare 隧道凭证（选填）'
+                ApiKeysUrl = 'https://developers.cloudflare.com/tunnel/get-started/'
                 PlatText = '网页端 Connectors ↗'; PlatUrl = 'https://claude.ai/settings/connectors'
             }
         }
         'gemini' {
             return [pscustomobject]@{
-                Code = 'gemini'; Title = 'Gemini'; Kind = 'apikey'
-                DefaultUrl = 'https://generativelanguage.googleapis.com'
-                PurposeDesc = 'Google AI Studio 密钥与接口 · 供本地工具与多模态脚本调用'
-                SecondLabel = 'Base URL / 接入点'; KeyLabel = 'Gemini API Key'
-                ApiKeysUrl = 'https://aistudio.google.com/app/apikey'
-                PlatText = '打开 Google AI Studio ↗'; PlatUrl = 'https://aistudio.google.com/'
-            }
-        }
-        'deepseek' {
-            return [pscustomobject]@{
-                Code = 'deepseek'; Title = 'DeepSeek'; Kind = 'apikey'
-                DefaultUrl = 'https://api.deepseek.com'
-                PurposeDesc = 'DeepSeek 开放平台密钥与接口 · 供本地推理与编码工具调用'
-                SecondLabel = 'Base URL / 接入点'; KeyLabel = 'DeepSeek API Key'
-                ApiKeysUrl = 'https://platform.deepseek.com/api_keys'
-                PlatText = '开放平台文档 ↗'; PlatUrl = 'https://api-docs.deepseek.com/'
-            }
-        }
-        'opencode' {
-            return [pscustomobject]@{
-                Code = 'opencode'; Title = 'OpenCode'; Kind = 'apikey'
-                DefaultUrl = 'https://api.opencode.ai/v1'
-                PurposeDesc = 'OpenCode 聚合接口与密钥 · 供本地 OpenCode CLI 智能体使用'
-                SecondLabel = 'Base URL / 接入点'; KeyLabel = 'OpenCode API Key'
-                ApiKeysUrl = 'https://opencode.ai/'
-                PlatText = 'OpenCode 官方文档 ↗'; PlatUrl = 'https://opencode.ai/docs'
+                Code = 'gemini'; Title = 'Gemini'; Kind = 'public_tunnel'
+                DefaultUrl = ''
+                PurposeDesc = '共享公网 MCP 隧道 · 连接 Gemini 云端会话房间'
+                SecondLabel = '固定 HTTPS 域名（选填，留空使用临时隧道）'; KeyLabel = 'Cloudflare 隧道凭证（选填）'
+                ApiKeysUrl = 'https://developers.cloudflare.com/tunnel/get-started/'
+                PlatText = '已关联的应用 ↗'; PlatUrl = 'https://gemini.google.com/extensions'
             }
         }
         default {
@@ -1839,6 +1819,7 @@ function Refresh-ProfilePopoverState {
         $script:activeCapsulePlatform = 'openai'
     }
     $curPlat = $script:activeCapsulePlatform
+    $publicTunnel = Get-PublicMcpTunnelState $script:context
     $platMeta = Get-CapsulePlatformMeta $curPlat
 
     $openaiProfs = @($allProfs | Where-Object { (-not $_.PSObject.Properties['Platform']) -or (-not $_.Platform) -or ([string]$_.Platform).ToLowerInvariant() -eq 'openai' })
@@ -1883,7 +1864,7 @@ function Refresh-ProfilePopoverState {
                 $epAct = $allProfs | Where-Object { ([string]$_.Platform).ToLowerInvariant() -eq $ep } | Select-Object -First 1
             }
             $epShort = if ($epAct -and $epAct.Name) { [string]$epAct.Name } else { '默认' }
-            $epReady = [bool]($epAct -and $epAct.Enabled -and $epAct.HasKey)
+            $epReady = [bool](Get-PublicMcpTunnelState $script:context).Running
             $segBtn = New-Object Windows.Controls.Button
             $segBtn.Padding = [Windows.Thickness]::new(8, 2, 8, 2)
             $segBtn.MinHeight = 24
@@ -1920,7 +1901,7 @@ function Refresh-ProfilePopoverState {
     if ($script:controls.AddPlatformPanelBorder -and $script:controls.AddPlatformListPanel) {
         $script:controls.AddPlatformPanelBorder.Visibility = $(if ($script:addPlatformPickerOpen) { 'Visible' } else { 'Collapsed' })
         $script:controls.AddPlatformListPanel.Children.Clear()
-        foreach ($presetCode in @('openai', 'claude', 'gemini', 'deepseek', 'opencode')) {
+        foreach ($presetCode in @('openai', 'gemini', 'claude')) {
             $pm = Get-CapsulePlatformMeta $presetCode
             $isAdded = ($enabledPlats -contains $presetCode)
             $pBtn = New-Object Windows.Controls.Button
@@ -1970,7 +1951,7 @@ function Refresh-ProfilePopoverState {
     }
 
     if ($script:addPlatformPickerOpen) {
-        if ($script:controls.PopoverHeaderTitle) { $script:controls.PopoverHeaderTitle.Text = '添加平台隧道或密钥' }
+        if ($script:controls.PopoverHeaderTitle) { $script:controls.PopoverHeaderTitle.Text = '添加平台通道' }
         if ($script:controls.RemoveCapsulePlatformButton) { $script:controls.RemoveCapsulePlatformButton.Visibility = 'Collapsed' }
         if ($script:controls.AddProfileButton) { $script:controls.AddProfileButton.Visibility = 'Collapsed' }
         if ($script:controls.TogglePopoverEditButton) { $script:controls.TogglePopoverEditButton.Visibility = 'Collapsed' }
@@ -2001,10 +1982,14 @@ function Refresh-ProfilePopoverState {
     if ($script:controls.KeyInputLabel) {
         $script:controls.KeyInputLabel.Text = $platMeta.KeyLabel
     }
+    $script:controls.ApiKeysButton.Content = $(if ($curPlat -eq 'openai') { '获取或管理 API Key ↗' } else { '公网隧道设置帮助 ↗' })
     if ($script:controls.PlatformButton) {
         $script:controls.PlatformButton.Content = $platMeta.PlatText
     }
 
+    foreach ($legacyControl in @('MaskedKeyText','ToggleKeyMaskButton','CopyApiKeyButton')) {
+        if ($script:controls[$legacyControl]) { $script:controls[$legacyControl].Visibility = $(if ($curPlat -eq 'openai') { 'Visible' } else { 'Collapsed' }) }
+    }
     # Detach FormScroll before rebuilding ProfilesListPanel so it can be embedded inline inside the expanded strip
     if ($script:controls.FormScroll -and $script:controls.FormScroll.Parent) {
         try { [void]$script:controls.FormScroll.Parent.Children.Remove($script:controls.FormScroll) } catch { }
@@ -2130,7 +2115,7 @@ function Refresh-ProfilePopoverState {
             $expandBtn.MinHeight = 20
             $expandBtn.Margin = [Windows.Thickness]::new(4, 0, 0, 0)
             $expandBtn.Foreground = ConvertTo-Brush $(if ($isProfActive) { '#15803D' } elseif ($isProfViewing) { '#2563EB' } else { '#71717A' })
-            $expandBtn.ToolTip = $(if ($isProfExpanded) { '收起编辑框' } else { '展开修改配置名称、接入点与 API Key' })
+            $expandBtn.ToolTip = $(if ($isProfExpanded) { '收起编辑框' } else { '展开修改配置名称、固定域名与隧道凭证' })
             $expandBtn.Tag = $prof.Id
             $expandBtn.Add_Click({
                 param($s, $e)
@@ -2145,7 +2130,7 @@ function Refresh-ProfilePopoverState {
 
             # Line 2: Small Font Masked Endpoint/Tunnel ID + API Key + Inline Copy Links
             $rawEndpointOrTid = if ($curPlat -ne 'openai') {
-                $(if ($prof.BaseUrl) { [string]$prof.BaseUrl } else { $platMeta.DefaultUrl })
+                [string]$publicTunnel.Url
             } else {
                 [string]$prof.TunnelId
             }
@@ -2173,7 +2158,7 @@ function Refresh-ProfilePopoverState {
             $subRow.Margin = [Windows.Thickness]::new(14, 3, 0, 0)
 
             $tunLbl = New-Object Windows.Controls.TextBlock
-            $tunLbl.Text = $(if ($curPlat -ne 'openai') { "接口: $shortEndpointOrTid " } else { "隧道: $shortEndpointOrTid " })
+            $tunLbl.Text = $(if ($curPlat -ne 'openai') { "公网 MCP ($($publicTunnel.Status)): $rawEndpointOrTid " } else { "隧道: $shortEndpointOrTid " })
             $tunLbl.FontSize = 10.5
             $tunLbl.Foreground = ConvertTo-Brush '#71717A'
             $tunLbl.FontFamily = New-Object Windows.Media.FontFamily('Consolas, Cascadia Mono, Microsoft YaHei UI')
@@ -2211,7 +2196,7 @@ function Refresh-ProfilePopoverState {
             $sepLbl.Foreground = ConvertTo-Brush '#71717A'
             $sepLbl.FontFamily = New-Object Windows.Media.FontFamily('Consolas, Cascadia Mono, Microsoft YaHei UI')
             $sepLbl.VerticalAlignment = 'Center'
-            [void]$subRow.Children.Add($sepLbl)
+            if ($curPlat -eq 'openai') { [void]$subRow.Children.Add($sepLbl) }
 
             $copyKeyBtn = New-Object Windows.Controls.Button
             $copyKeyBtn.Style = $script:window.Resources['LinkButton']
@@ -2234,7 +2219,7 @@ function Refresh-ProfilePopoverState {
                     Show-QuickToast '当前配置尚未保存 API Key'
                 }
             })
-            [void]$subRow.Children.Add($copyKeyBtn)
+            if ($curPlat -eq 'openai') { [void]$subRow.Children.Add($copyKeyBtn) }
             [void]$cardStack.Children.Add($subRow)
 
             # Inline Accordion Edit Box directly below this strip when expanded
@@ -2263,12 +2248,7 @@ function Refresh-ProfilePopoverState {
     # Bottom Start / Reconnect / Test / Disable Button State
     if ($script:controls.QuickConnectButton) {
         if ($curPlat -ne 'openai') {
-            $curProfTestSig = if ($viewProf) { "$($viewProf.Id)|$($viewProf.BaseUrl)|$($viewProf.PlainKey)" } else { '' }
-            $testedOk = ($viewProf -and $viewProf.HasKey -and [bool]$script:lastTestedApiKeyProfileSig -and $script:lastTestedApiKeyProfileSig -eq $curProfTestSig)
-            $script:controls.QuickConnectButton.Content = $(if ($testedOk) { '✓ 接口连通正常' } else { '✓ 测试连接' })
-            $script:controls.QuickConnectButton.Background = ConvertTo-Brush $(if ($testedOk) { '#16A34A' } else { '#2563EB' })
-            $script:controls.QuickConnectButton.BorderBrush = ConvertTo-Brush $(if ($testedOk) { '#16A34A' } else { '#2563EB' })
-            $script:controls.QuickConnectButton.Foreground = ConvertTo-Brush '#FEFEFF'
+            $script:controls.QuickConnectButton.Content = $(if ($publicTunnel.Running) { '复制 MCP 网址' } elseif ($publicTunnel.ProcessId) { '↻ 查看连接状态' } else { '▶ 启动 HTTPS 隧道' })
         } elseif ($viewProf -and $activeProf -and $viewProf.Id -ne $activeProf.Id) {
             $script:controls.QuickConnectButton.Content = "▶ 启动此隧道"
             $script:controls.QuickConnectButton.Background = ConvertTo-Brush '#2563EB'
@@ -2289,8 +2269,8 @@ function Refresh-ProfilePopoverState {
     if ($script:controls.DisconnectButton) {
         if ($curPlat -ne 'openai') {
             $script:controls.DisconnectButton.Visibility = 'Visible'
-            $script:controls.DisconnectButton.Content = $(if ($viewProf -and $viewProf.Enabled -and $viewProf.HasKey) { '停用' } else { '启用' })
-            $script:controls.DisconnectButton.IsEnabled = [bool]($viewProf -and $viewProf.HasKey)
+            $script:controls.DisconnectButton.Content = '断开共享隧道'
+            $script:controls.DisconnectButton.IsEnabled = [bool]$publicTunnel.ProcessId
         } else {
             $coreReady = ($script:display -and $script:display.Core -eq '已准备好')
             $legacy = ($script:display -and $script:display.Tunnel -eq '旧脚本连接仍在运行')
@@ -2565,19 +2545,25 @@ function Invoke-PopoverQuickConnect {
         $script:popoverExpandedProfileId = ''
         $script:popoverEditMode = $false
         if ($curPlat -ne 'openai') {
-            $script:lastTestedApiKeyProfileId = ''
-            $script:lastTestedApiKeyProfileSig = ''
-            $probeRes = Test-PlatformConnectionProfile -Context $script:context -Settings $script:settings -ProfileId $script:viewingProfileId
-            $freshState = Get-ConnectionProfiles $script:context $script:settings
-            $freshProf = $freshState.Profiles | Where-Object { $_.Id -eq $script:viewingProfileId } | Select-Object -First 1
-            if ($probeRes -and $probeRes.Ok -and $freshProf) {
-                $script:lastTestedApiKeyProfileId = $script:viewingProfileId
-                $script:lastTestedApiKeyProfileSig = "$($freshProf.Id)|$($freshProf.BaseUrl)|$($freshProf.PlainKey)"
+            $prof = $script:profilesState.Profiles | Where-Object Id -eq $script:viewingProfileId | Select-Object -First 1
+            $current = Get-PublicMcpTunnelState $script:context
+            if ($current.Running) {
+                [Windows.Clipboard]::SetText($current.Url)
+                Show-QuickToast '已复制公网 MCP 网址'
+                return
             }
+            if (-not $script:context.Isolated) {
+                $port = [int]$script:settings.shield_port
+                $probe = Invoke-ConnectionProbe "http://127.0.0.1:$port/shieldz"
+                if ($probe.Status -ne 200 -or $probe.Body -notmatch '"ok"\s*:\s*true') {
+                    if (Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction SilentlyContinue) { throw '本地桥接服务未就绪，请检查连接状态。' }
+                    [void](Start-ReadOnlyShield $script:context $script:settings (Get-OfficialCoreEndpoint $script:settings))
+                }
+            }
+            $state = Start-PublicMcpTunnel -Context $script:context -FixedDomain $prof.BaseUrl -Token $prof.PlainKey -Port $script:settings.shield_port
+            if ($state.Running -and $state.Url) { [Windows.Clipboard]::SetText($state.Url) }
             Refresh-ProfilePopoverState
-            Update-SessionCards
-            Show-Feedback $probeRes.Message
-            Show-QuickToast $probeRes.Message
+            Show-QuickToast $(if ($state.Running) { '已复制公网 MCP 网址' } else { '隧道正在连接，再次点击查看状态' })
             return
         }
         $res = Select-ConnectionProfile -Context $script:context -Settings $script:settings -ProfileId $script:viewingProfileId -AutoReconnect:(-not $script:context.Isolated)
@@ -6872,7 +6858,8 @@ function Save-Form {
         $existingTarget = $platProfs | Where-Object { $_.Id -eq $targetProfId } | Select-Object -First 1
         $preserveEnabled = if ($existingTarget) { [bool]$existingTarget.Enabled } else { $false }
         $isEditingActive = (-not $activeProf) -or ($targetProfId -eq $activeProf.Id) -or ($platProfs.Count -le 1 -and $targetProfId -ne 'new')
-        $savedState = Save-ConnectionProfile -Context $script:context -Settings $script:settings -ProfileId $targetProfId -Name $enteredName -TunnelId '' -ApiKey $enteredKey -Platform $curPlat -Kind 'apikey' -BaseUrl $script:controls.TunnelInput.Text -Enabled $preserveEnabled -SetActive:$isEditingActive
+        if ($script:controls.TunnelInput.Text.Trim()) { [void](ConvertTo-PublicMcpUrl $script:controls.TunnelInput.Text) }
+        $savedState = Save-ConnectionProfile -Context $script:context -Settings $script:settings -ProfileId $targetProfId -Name $enteredName -TunnelId '' -ApiKey $enteredKey -Platform $curPlat -Kind 'public_tunnel' -BaseUrl $script:controls.TunnelInput.Text -Enabled $preserveEnabled -SetActive:$isEditingActive
         if ($savedState -and $savedState.PSObject.Properties['LastSavedProfileId'] -and $savedState.LastSavedProfileId) {
             $script:viewingProfileId = $savedState.LastSavedProfileId
         }
@@ -7461,19 +7448,9 @@ $script:controls.DisconnectButton.Add_Click({
     Invoke-FormAction {
         $curPlat = if ($script:activeCapsulePlatform) { $script:activeCapsulePlatform.Trim().ToLowerInvariant() } else { 'openai' }
         if ($curPlat -ne 'openai') {
-            $viewProf = $script:profilesState.Profiles | Where-Object { $_.Id -eq $script:viewingProfileId } | Select-Object -First 1
-            if ($viewProf) {
-                $nextEn = -not [bool]$viewProf.Enabled
-                $script:profilesState = Set-ConnectionProfileEnabled -Context $script:context -Settings $script:settings -ProfileId $viewProf.Id -Enabled $nextEn
-                if (-not $nextEn -and $script:lastTestedApiKeyProfileId -eq $viewProf.Id) {
-                    $script:lastTestedApiKeyProfileId = ''
-                }
-                Refresh-ProfilePopoverState
-                Update-SessionCards
-                $msg = if ($nextEn) { "已启用「$($viewProf.Name)」配置。" } else { "已停用「$($viewProf.Name)」配置。" }
-                Show-Feedback $msg
-                Show-QuickToast $msg
-            }
+            Stop-PublicMcpTunnel $script:context
+            Refresh-ProfilePopoverState
+            Show-QuickToast '已断开 Gemini 与 Claude 共享的公网隧道'
             return
         }
         Show-Feedback (Stop-ConnectionTunnel $script:context $script:settings)
