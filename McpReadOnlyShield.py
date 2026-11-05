@@ -239,6 +239,27 @@ def _get_effective_available_models(wb_state: dict) -> list[dict]:
     return []
 
 
+def _provider_models(state: dict, provider: str = "chatgpt", profile: str = "") -> list[dict]:
+    provider = _platform({"provider": provider})
+    cache = state.get("models_cache") or {}
+    carrier = (cache.get("by_carrier") or {}).get(f"{provider}|{profile}") if profile else None
+    catalogs = state.get("available_models_by_provider") or {}
+    return carrier or catalogs.get(provider) or (state.get("available_models") or [] if provider == "chatgpt" else [])
+
+
+def _store_provider_models(state: dict, provider: str, models: list, profile: str = "") -> None:
+    provider = _platform({"provider": provider})
+    state.setdefault("available_models_by_provider", {})[provider] = models
+    cache = state.setdefault("models_cache", {})
+    cache.setdefault("by_provider", {})[provider] = models
+    if profile:
+        cache.setdefault("by_carrier", {})[f"{provider}|{profile}"] = models
+    if provider == "chatgpt":
+        state["available_models"] = models
+        if profile:
+            state.setdefault("available_models_by_profile", {})[profile] = models
+
+
 def _normalize_raw_effort_id(raw_effort: str, available_models: list | None = None, current_model: str = "") -> str:
     """Resolve any UI/legacy effort text (or raw English ID) into its canonical raw official English ID."""
     clean = str(raw_effort or "").strip()
@@ -1180,6 +1201,15 @@ def _ensure_web_bridge_schema(state: dict) -> dict:
     if not isinstance(state.get("retire_actions"), list):
         state["retire_actions"] = []
     state["available_models"] = _normalize_available_models(state.get("available_models"))
+    catalogs = state.get("available_models_by_provider")
+    catalogs = catalogs if isinstance(catalogs, dict) else {}
+    state["available_models_by_provider"] = {
+        provider: _normalize_available_models(catalogs.get(provider))
+        for provider in ("chatgpt", "gemini", "claude")
+    }
+    if not state["available_models_by_provider"]["chatgpt"]:
+        state["available_models_by_provider"]["chatgpt"] = state["available_models"]
+    state["available_models"] = state["available_models_by_provider"]["chatgpt"]
     raw_by_prof = state.get("available_models_by_profile")
     norm_by_prof: dict[str, list[dict]] = {}
     if isinstance(raw_by_prof, dict):
@@ -1253,7 +1283,7 @@ def _ensure_web_bridge_schema(state: dict) -> dict:
     for k, v in list(state["session_bindings"].items()):
         sb = _ensure_binding_entry(v, default_cfg=state["auto_resend_config"])
         sb_prof = str(sb.get("browser_profile") or "").strip()
-        sb_models = norm_by_prof.get(sb_prof) or state.get("available_models")
+        sb_models = _provider_models(state, sb.get("provider"), sb_prof)
         if sb.get("reasoning_effort") and sb["reasoning_effort"] != "inherit":
             sb["reasoning_effort"] = _normalize_raw_effort_id(
                 sb["reasoning_effort"], sb_models, str(sb.get("target_model") or "")
@@ -1439,6 +1469,7 @@ def _compute_wb_logical_sig(state: dict, now_epoch: float | None = None) -> tupl
             ensure_ascii=False,
         ).encode("utf-8", errors="replace")
     )
+    h.update(json.dumps(state.get("available_models_by_provider") or {}, sort_keys=True).encode("utf-8"))
     by_prof = state.get("available_models_by_profile") if isinstance(state.get("available_models_by_profile"), dict) else {}
     for pk in sorted(by_prof.keys()):
         plist = by_prof.get(pk) if isinstance(by_prof.get(pk), list) else []
@@ -3139,6 +3170,7 @@ def handle_task_manage_update(
 
 
 _BINDING_PRESET_FIELDS = (
+    "provider",
     "browser",
     "browser_profile",
     "user_locked_browser",
@@ -4930,10 +4962,12 @@ def build_studio_snapshot(data_root: str, tasks_root: str, web_bridge_path: str 
         bound_conv = b_entry.get("conv_uuid", "")
         bound_prof = str(b_entry.get("browser_profile") or "").strip()
         by_prof_models = wb_state.get("available_models_by_profile") if isinstance(wb_state.get("available_models_by_profile"), dict) else {}
-        session_models = by_prof_models.get(bound_prof) if (bound_prof and by_prof_models.get(bound_prof)) else effective_models
+        session_models = _provider_models(wb_state, b_entry.get("provider"), bound_prof)
         tabs_dict = wb_state.get("tabs") or {}
         for t_rec in tabs_dict.values():
             if not isinstance(t_rec, dict):
+                continue
+            if _platform(t_rec) != _platform(b_entry):
                 continue
             t_hints = t_rec.get("page_hints") if isinstance(t_rec.get("page_hints"), list) else []
             if (bound_conv and t_rec.get("conv_uuid") == bound_conv) or (key in t_hints):
@@ -4943,14 +4977,14 @@ def build_studio_snapshot(data_root: str, tasks_root: str, web_bridge_path: str 
                     web_cur_effort = str(t_rec["current_effort"])
         if not web_cur_model and bound_prof:
             for t_rec in tabs_dict.values():
-                if isinstance(t_rec, dict) and str(t_rec.get("browser_profile") or "").strip() == bound_prof and t_rec.get("current_model"):
+                if isinstance(t_rec, dict) and _platform(t_rec) == _platform(b_entry) and str(t_rec.get("browser_profile") or "").strip() == bound_prof and t_rec.get("current_model"):
                     web_cur_model = str(t_rec["current_model"])
                     if not web_cur_effort and t_rec.get("current_effort"):
                         web_cur_effort = str(t_rec["current_effort"])
                     break
         if not web_cur_model:
             for t_rec in tabs_dict.values():
-                if isinstance(t_rec, dict) and t_rec.get("current_model"):
+                if isinstance(t_rec, dict) and _platform(t_rec) == _platform(b_entry) and t_rec.get("current_model"):
                     web_cur_model = str(t_rec["current_model"])
                     if not web_cur_effort and t_rec.get("current_effort"):
                         web_cur_effort = str(t_rec["current_effort"])
@@ -5236,6 +5270,8 @@ def build_studio_snapshot(data_root: str, tasks_root: str, web_bridge_path: str 
             "auto_resend_config": ar_cfg,
             "available_models": effective_models,
             "AvailableModels": effective_models,
+            "available_models_by_provider": wb_state.get("available_models_by_provider", {}),
+            "AvailableModelsByProvider": wb_state.get("available_models_by_provider", {}),
             "desktop_app_online": desktop_online,
             "DesktopAppOnline": desktop_online,
         },
@@ -6507,19 +6543,8 @@ def _update_tab_and_bindings(state: dict, tab_payload: dict, default_browser: st
 
     tab_models = _normalize_available_models(tab_payload.get("available_models"))
     if tab_models:
-        state["available_models"] = tab_models
-        if browser_profile:
-            state.setdefault("available_models_by_profile", {})[browser_profile] = tab_models
-        m_cache = state.setdefault("models_cache", {"by_provider": {}, "by_carrier": {}})
-        if isinstance(m_cache, dict):
-            m_cache.setdefault("by_provider", {})["chatgpt"] = tab_models
-            if browser_profile:
-                m_cache.setdefault("by_carrier", {})[f"chatgpt|{browser_profile}"] = tab_models
-    eff_catalog = (
-        tab_models
-        or (state.get("available_models_by_profile") or {}).get(browser_profile)
-        or state.get("available_models")
-    )
+        _store_provider_models(state, provider, tab_models, browser_profile)
+    eff_catalog = tab_models or _provider_models(state, provider, browser_profile)
     if current_effort:
         current_effort = _normalize_raw_effort_id(current_effort, eff_catalog, current_model)
 
@@ -6774,7 +6799,13 @@ def handle_web_bridge_poll(wb_path: str, tasks_root: str, payload: dict) -> dict
 
         top_models = _normalize_available_models(payload.get("available_models"))
         if top_models:
-            state["available_models"] = top_models
+            _store_provider_models(state, _platform(payload), top_models)
+        top_catalogs = payload.get("available_models_by_provider")
+        if isinstance(top_catalogs, dict):
+            for top_provider in ("chatgpt", "gemini", "claude"):
+                models = _normalize_available_models(top_catalogs.get(top_provider))
+                if models:
+                    _store_provider_models(state, top_provider, models)
 
         is_batch = isinstance(payload.get("tabs"), list)
         raw_tabs_list = payload["tabs"] if is_batch else [payload]
@@ -7258,7 +7289,7 @@ def cold_start_pending_hosts(wb_path: str, only_msg_id: str = "", tasks_root: st
             base = _platform_base(m, str(m.get("project_prefix") or "").strip()).rstrip("/")
             prof_qs = f"relay_profile={urllib.parse.quote(profile)}"
             if mode == "new_window_handover":
-                slug = _model_to_url_slug(str(m.get("target_model") or "inherit"), state.get("available_models"))
+                slug = _model_to_url_slug(str(m.get("target_model") or "inherit"), _provider_models(state, _platform(m), str(m.get("browser_profile") or "")))
                 model_qs = f"&model={slug}" if slug else ""
                 url = f"{base}/?relay_handover=1&msg_id={m.get('id')}{model_qs}&{prof_qs}"
             else:
@@ -7476,7 +7507,7 @@ def _enqueue_web_bridge_message(wb_path: str, payload: dict, now_iso: str, tasks
                 if not defer_until_stopped and existing_pioneer.get("defer_until_stopped"):
                     existing_pioneer["defer_until_stopped"] = False
                     _save_web_bridge_state(wb_path, state)
-                avail_models = list(state.get("available_models") or [])
+                avail_models = list(_provider_models(state, binding.get("provider"), browser_profile))
                 q_slice = _build_session_queue_slice(state.get("queue"), session_key)
                 pioneer_id = str(existing_pioneer.get("id") or "")
                 base_url = _platform_base(binding, project_prefix)
@@ -7648,7 +7679,7 @@ def _enqueue_web_bridge_message(wb_path: str, payload: dict, now_iso: str, tasks
             brk["updated_at"] = now_iso
             state["breakers"][session_key] = brk
 
-        avail_models = list(state.get("available_models") or [])
+        avail_models = list(_provider_models(state, binding.get("provider"), browser_profile))
         _save_web_bridge_state(wb_path, state)
         q_slice = _build_session_queue_slice(state.get("queue"), session_key)
 

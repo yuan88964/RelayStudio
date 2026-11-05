@@ -75,7 +75,7 @@ function fakeEl({parts = [], excluded = false, role = '', hidden = false} = {}) 
 }
 
 function makeEnv({clickFetch = false, streamChunks = null, streamFail = false, origOverride = null,
-  site = null, rich = false, generating = false, acceptedText = null, sendButton = true, clock = null, holdSleep120 = false, errorNodes = [], messageNodes = []} = {}) {
+  site = null, rich = false, generating = false, acceptedText = null, sendButton = true, clock = null, holdSleep120 = false, errorNodes = [], messageNodes = [], modelNodes = []} = {}) {
   const dataset = {};
   const sent = [];
   const winListeners = new Map();
@@ -113,6 +113,7 @@ function makeEnv({clickFetch = false, streamChunks = null, streamFail = false, o
     querySelectorAll(sel) {
       if (sel === (site === 'gemini' ? 'rich-textarea [contenteditable="true"]' : site === 'claude' ? 'div.ProseMirror[contenteditable="true"]' : '#prompt-textarea')) return [textarea];
       if (sel === 'user-query, [data-testid="user-query"]' || sel === '[data-testid="user-message"]') return messageNodes;
+      if (sel.includes('data-model-id')) return modelNodes;
       if (generating && sel.includes('Stop response')) return [{disabled:false, getAttribute(){return null}, getBoundingClientRect(){return {width:20,height:20}}}];
       if (/conversation-error/.test(sel)) return errorNodes;
       if (sel === '[data-message-author-role]') return messageNodes;
@@ -182,6 +183,10 @@ async function main() {
     const e = makeEnv({site, rich:site === 'claude', acceptedText: 'cross-site fixture'});
     const st = await e.collect();
     check(st.provider === site && st.conv_uuid === (site === 'gemini' ? 'abc123xy' : convId), site + ' reports provider and native room ID');
+    const modelPage=makeEnv({site,modelNodes:[{innerText:site === 'gemini' ? 'Gemini 3 Pro' : 'Claude Sonnet',getAttribute(name){return name === 'data-model-id' ? site+'-observed' : null}}]});
+    const catalogState=await modelPage.collect();
+    check(catalogState.available_models[0]?.slug === site+'-observed',site+' reports observed model option');
+    check((await makeEnv({site}).collect()).available_models.length === 0,site+' cold page invents no models');
     check(!e.ctx.window.__RELAYSTUDIO_PAGE_HOOK_INSTALLED__, site + ' never installs ChatGPT API hook');
     const delivered = await e.dispatch({id:'cross-'+site, provider:site, text:'cross-site fixture'});
     check(delivered.ok && delivered.provider === site && e.clicks === 1, site + ' confirms a rendered outgoing turn after send');
@@ -432,6 +437,20 @@ async function main() {
       const nativeTabs = await bg.collectOpenChatGptTabs();
       check(nativeTabs[0].provider === provider && nativeTabs[0].conv_uuid === room, provider+' survives background tab aggregation');
     }
+    const gptModels = [{slug:'gpt-real',title:'GPT Real'}];
+    const gemModels = [{slug:'gemini-real',title:'Gemini Real'}];
+    bg.upsertTabStateCache('31',{available_models:gptModels},{url:'https://chatgpt.com/'});
+    bg.upsertTabStateCache('32',{available_models:gemModels},{url:'https://gemini.google.com/app'});
+    const gemCache=bg.upsertTabStateCache('33',{}, {url:'https://gemini.google.com/app'});
+    check(gemCache.available_models[0]?.slug === 'gemini-real','Gemini catalog retained in own platform cache');
+    const claudeCold=bg.upsertTabStateCache('34',{}, {url:'https://claude.ai/new'});
+    check(claudeCold.available_models.length === 0,'unseen Claude never borrows another platform catalog');
+    const gptCache=bg.upsertTabStateCache('35',{}, {url:'https://chatgpt.com/'});
+    check(gptCache.available_models[0]?.slug === 'gpt-real','OpenAI cache never replaced by Gemini');
+    let reportedCatalog = null;
+    bg.fetch=async (_url, opts) => {reportedCatalog=JSON.parse(opts.body);return {ok:true,async json(){return {}}}};
+    await bg.runShuttleTick();
+    check(reportedCatalog.available_models[0]?.slug === 'gpt-real' && reportedCatalog.available_models_by_provider.gemini[0]?.slug === 'gemini-real','poll envelope exposes isolated catalogs and OpenAI legacy alias');
     const sparse = bg.upsertTabStateCache('8', {conv_uuid: convId}, {});
     check(sparse.has_composer === true && sparse.turn_incomplete === false && sparse.ui_error_text === '' && sparse.is_archived === false,
       'missing fields default safely (has_composer defaults true)');

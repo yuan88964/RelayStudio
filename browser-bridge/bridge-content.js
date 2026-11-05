@@ -343,6 +343,23 @@
   }
 
   function readAvailableModelsCatalog() {
+    if (PROVIDER !== "chatgpt") {
+      // Only observed model-picker options qualify; never infer a catalog from chat text.
+      const models = [];
+      const seen = new Set();
+      const selectors = '[role="option"][data-model-id], [role="menuitemradio"], button[data-model-id], [data-testid*="model-selector"] [role="option"], model-selector [role="option"]';
+      for (const node of document.querySelectorAll(selectors)) {
+        if (!isVisibleDomElement(node)) continue;
+        const title = String(node.innerText || node.textContent || '').trim();
+        const declared = String(node.getAttribute('data-model-id') || '').trim();
+        if (!title || title.length > 120 || (!declared && !/^(?:Gemini|Claude|Sonnet|Opus|Haiku|Pro|Flash|Fast|Thinking)\b/i.test(title))) continue;
+        const slug = declared || title;
+        if (seen.has(slug)) continue;
+        seen.add(slug);
+        models.push({slug, title});
+      }
+      return models;
+    }
     try {
       const dsRaw =
         document.documentElement && document.documentElement.dataset

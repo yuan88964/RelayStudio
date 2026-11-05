@@ -162,3 +162,10 @@ Assert-Case (($offlineContents -join '|') -match '⚪ OpenAI · 主力隧道') '
 $script:profilesState = $null
 
 Write-Output ('{"result":"PASS","assertions":' + $script:passed + ',"network":"OFFLINE_FAKE_ONLY","production_config_written":false}')
+
+$multi = Make-State 'multi'
+$multi | Add-Member ProfilesState ([pscustomobject]@{EnabledPlatforms=@('openai','gemini','claude');Profiles=@()})
+$multi | Add-Member AvailableModelsByProvider ([pscustomobject]@{chatgpt=$catalog;gemini=@([pscustomobject]@{slug='gemini-pro';title='Gemini Pro';efforts=@()});claude=@()})
+Sync-Test $multi $catalog 'inherit' 'inherit'
+Assert-Case (@(Get-Tags $multi.ModelCombo) -contains 'gemini-pro') 'Gemini group exposes its reported model'
+Assert-Case (@($multi.ModelCombo.Items | Where-Object {$_.ToolTip -eq 'claude' -and $_.Tag -eq 'inherit'}).Count -eq 1) 'Disconnected Claude has exactly one default'

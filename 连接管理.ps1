@@ -5000,6 +5000,8 @@ function Sync-ComposerModelAndEffortCombos($StateInfo, $AvailModels, [string]$Cu
     $script:suppressComposerEvents = $true
     try {
     $modelsArr = @(if ($AvailModels) { $AvailModels })
+    $providerCatalogs = if ($StateInfo.PSObject.Properties['AvailableModelsByProvider']) { $StateInfo.AvailableModelsByProvider } else { $null }
+    $catalogsSig = if ($providerCatalogs) { $providerCatalogs | ConvertTo-Json -Depth 12 -Compress } else { '' }
     $modelSlugsSig = (@($modelsArr | ForEach-Object {
         $s = if ($_.PSObject.Properties['slug']) { [string]$_.slug } else { '' }
         $t = if ($_.PSObject.Properties['title']) { [string]$_.title } else { $s }
@@ -5070,7 +5072,7 @@ function Sync-ComposerModelAndEffortCombos($StateInfo, $AvailModels, [string]$Cu
     }
     $platsSig = (@($enabledPlats | ForEach-Object { (& $resolvePlatGroupSummary $_).Sig }) -join '|')
     $isColdStartNoWebModel = ($modelsArr.Count -eq 0) -and [string]::IsNullOrWhiteSpace($WebModel) -and ([string]::IsNullOrWhiteSpace($CurModel) -or $CurModel -eq 'inherit') -and [string]::IsNullOrWhiteSpace($WebEffort)
-    $catalogSig = "$modelSlugsSig||webM=$WebModel||webE=$WebEffort||curM=$CurModel||plats=$platsSig||cold=$isColdStartNoWebModel"
+    $catalogSig = "$catalogsSig||$modelSlugsSig||webM=$WebModel||webE=$WebEffort||curM=$CurModel||plats=$platsSig||cold=$isColdStartNoWebModel"
 
     $modelCombo = $StateInfo.ModelCombo
     $effortCombo = $StateInfo.EffortCombo
@@ -5223,42 +5225,28 @@ function Sync-ComposerModelAndEffortCombos($StateInfo, $AvailModels, [string]$Cu
         $defaultModelItem.Tag = 'inherit'
         [void]$modelCombo.Items.Add($defaultModelItem)
 
-        if ($enabledPlats.Count -gt 1) {
-            [void]$modelCombo.Items.Add((& $buildPlatGroupHeader $enabledPlats[0]))
-        }
-
         $seenModelTags = @{ 'inherit' = $true }
-        foreach ($m in $modelsArr) {
-            $mSlug = if ($m.PSObject.Properties['slug'] -and $m.slug) { [string]$m.slug } else { '' }
-            $mTitle = if ($m.PSObject.Properties['title'] -and $m.title) { [string]$m.title } else { $mSlug }
-            if (-not $mSlug -or $seenModelTags.ContainsKey($mSlug)) { continue }
-            $seenModelTags[$mSlug] = $true
-            $displayLabel = if ($mSlug -and $mTitle.IndexOf("($mSlug)", [StringComparison]::OrdinalIgnoreCase) -lt 0) {
-                "🤖 $mTitle ($mSlug)"
-            } else {
-                "🤖 $mTitle"
-            }
-            $cbItem = New-Object Windows.Controls.ComboBoxItem
-            $cbItem.Content = $displayLabel
-            $cbItem.Tag = $mSlug
-            [void]$modelCombo.Items.Add($cbItem)
-        }
-        if ($CurModel -and $CurModel -ne 'inherit' -and -not $seenModelTags.ContainsKey($CurModel)) {
-            $seenModelTags[$CurModel] = $true
-            $extraItem = New-Object Windows.Controls.ComboBoxItem
-            $extraItem.Content = "🤖 $CurModel"
-            $extraItem.Tag = $CurModel
-            [void]$modelCombo.Items.Add($extraItem)
-        }
-
-        if ($enabledPlats.Count -gt 1) {
-            for ($pi = 1; $pi -lt $enabledPlats.Count; $pi++) {
-                $pCode = $enabledPlats[$pi]
-                [void]$modelCombo.Items.Add((& $buildPlatGroupHeader $pCode))
+        for ($pi = 0; $pi -lt $enabledPlats.Count; $pi++) {
+            $pCode = $enabledPlats[$pi]
+            $provider = if ($pCode -eq 'openai') { 'chatgpt' } else { $pCode }
+            $pModels = @(if ($providerCatalogs -and $providerCatalogs.PSObject.Properties[$provider]) { $providerCatalogs.$provider } elseif ($provider -eq 'chatgpt') { $modelsArr })
+            if ($enabledPlats.Count -gt 1) { [void]$modelCombo.Items.Add((& $buildPlatGroupHeader $pCode)) }
+            if ($pi -gt 0) {
                 $pDefItem = New-Object Windows.Controls.ComboBoxItem
-                $pDefItem.Content = $(if ($IsNarrow) { '🤖 默认' } else { '🤖 默认 (跟随网页)' })
+                $pDefItem.Content = '🤖 默认 (跟随网页)'
                 $pDefItem.Tag = 'inherit'
+                $pDefItem.ToolTip = $provider
                 [void]$modelCombo.Items.Add($pDefItem)
+            } else { $defaultModelItem.ToolTip = $provider }
+            foreach ($m in $pModels) {
+                $slug = [string]$m.slug
+                if (-not $slug) { continue }
+                $item = New-Object Windows.Controls.ComboBoxItem
+                $item.Content = "🤖 $($m.title) ($slug)"
+                $item.Tag = $slug
+                $item.ToolTip = $provider
+                [void]$modelCombo.Items.Add($item)
+                $seenModelTags[$slug] = $true
             }
         }
 
@@ -5334,7 +5322,7 @@ function Sync-ComposerModelAndEffortCombos($StateInfo, $AvailModels, [string]$Cu
         $targetMIdx = 0
         for ($i = 0; $i -lt $modelCombo.Items.Count; $i++) {
             $it = $modelCombo.Items[$i]
-            if ($it -and ([string]$it.Tag -eq $CurModel -or [string]$it.Content -eq "🤖 $CurModel")) {
+            if ($it -and (-not $StateInfo.PSObject.Properties['Provider'] -or -not $StateInfo.Provider -or [string]$it.ToolTip -eq [string]$StateInfo.Provider) -and ([string]$it.Tag -eq $CurModel -or [string]$it.Content -eq "🤖 $CurModel")) {
                 $targetMIdx = $i
                 break
             }
@@ -5458,6 +5446,8 @@ function Build-PlanBComposerPod($SessionObj = $null, [bool]$IsNarrow = $false, [
                     $st.Session = $SessionObj
                     $st.DraftObj = $draftObj
                     $st.TargetMode = $curTargetMode
+                    $st.Provider = $(if ($curBinding) { Get-WebRoomProvider $curBinding } else { 'chatgpt' })
+                    $st.AvailableModelsByProvider = $(if ($wbState -and $wbState.PSObject.Properties['available_models_by_provider']) { $wbState.available_models_by_provider } elseif ($SessionObj -and $SessionObj.PSObject.Properties['AvailableModelsByProvider']) { $SessionObj.AvailableModelsByProvider } else { $null })
                     $st.WebModel = $webModel
                     $st.WebEffort = $webEffort
                     if ($st.IsNarrow -ne $IsNarrow) {
@@ -5746,6 +5736,8 @@ function Build-PlanBComposerPod($SessionObj = $null, [bool]$IsNarrow = $false, [
         IsNarrow = $IsNarrow
         PodBorder = $composerPod
         LastCatalogSig = ''
+        Provider = $(if ($curBinding) { Get-WebRoomProvider $curBinding } else { 'chatgpt' })
+        AvailableModelsByProvider = $(if ($wbState -and $wbState.PSObject.Properties['available_models_by_provider']) { $wbState.available_models_by_provider } elseif ($SessionObj -and $SessionObj.PSObject.Properties['AvailableModelsByProvider']) { $SessionObj.AvailableModelsByProvider } else { $null })
         AvailableModels = $availModels
         WebModel = $webModel
         WebEffort = $webEffort
@@ -5762,7 +5754,10 @@ function Build-PlanBComposerPod($SessionObj = $null, [bool]$IsNarrow = $false, [
         $sel = $sender.SelectedItem
         if ($info -and $info.TaskKey -and $sel -and $sel.Tag) {
             $newModelVal = [string]$sel.Tag
-            [void](Set-TaskComposerConfig -Context $script:context -SessionKey $info.TaskKey -TargetModel $newModelVal)
+            $selectedProvider = [string]$sel.ToolTip
+            $info.Provider = $selectedProvider
+            if ($info.AvailableModelsByProvider -and $info.AvailableModelsByProvider.PSObject.Properties[$selectedProvider]) { $info.AvailableModels = @($info.AvailableModelsByProvider.$selectedProvider) }
+            [void](Set-TaskComposerConfig -Context $script:context -SessionKey $info.TaskKey -TargetModel $newModelVal -Provider ([string]$sel.ToolTip))
             if ($info.Session) { Set-SessionPropSafe $info.Session 'TargetModel' $newModelVal }
             $curEffVal = if ($newModelVal -match '-instant$') {
                 'none'

@@ -218,6 +218,29 @@ class ShieldHubSeamTests(unittest.TestCase):
         with open(os.path.join(self.tasks_root, f"{task_id}.json"), "w", encoding="utf-8") as fh:
             json.dump(doc, fh, ensure_ascii=False)
 
+    def test_platform_catalogs_are_isolated_in_snapshot(self):
+        for provider, url, slug in [
+            ("chatgpt", "https://chatgpt.com/c/11111111-1111-4111-8111-111111111111", "openai-observed"),
+            ("gemini", "https://gemini.google.com/app/abcd1234", "gemini-observed"),
+            ("claude", "https://claude.ai/chat/22222222-2222-4222-8222-222222222222", "claude-observed"),
+        ]:
+            response = self._post_json("/web-bridge/poll", {
+                "browser": "Chrome", "browser_profile": "Chrome:Shared",
+                "tabs": [{"tab_id": provider, "provider": provider, "url": url,
+                          "available_models": [{"slug": slug, "title": slug, "efforts": []}]}],
+            })
+            self.assertTrue(response["ok"])
+        self._post_json("/studio/action", {"action": "set_task_composer_config", "session_key": "__new_task__", "provider": "gemini", "target_model": "gemini-observed"})
+        queued = self._post_json("/studio/action", {"action": "enqueue_message", "session_key": "__new_task__", "user_text": "hello"})
+        self.assertEqual(queued["message"]["provider"], "gemini")
+        self.assertTrue(queued["handover_url"].startswith("https://gemini.google.com/app/"))
+        bridge = self._get_json("/studio/snapshot")["web_bridge"]
+        catalogs = bridge["available_models_by_provider"]
+        self.assertEqual([m["slug"] for m in catalogs["chatgpt"]], ["openai-observed"])
+        self.assertEqual([m["slug"] for m in catalogs["gemini"]], ["gemini-observed"])
+        self.assertEqual([m["slug"] for m in catalogs["claude"]], ["claude-observed"])
+        self.assertEqual(bridge["AvailableModels"], catalogs["chatgpt"])
+
     def test_t1_anti_duplicate_task_and_context_injection(self):
         self._write_task("tsk_19283093310b828b", "ProjectAlpha C4 三层重构：工单 06–21")
 
