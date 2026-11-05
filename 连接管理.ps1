@@ -5003,7 +5003,7 @@ function Sync-ComposerModelAndEffortCombos($StateInfo, $AvailModels, [string]$Cu
     $providerCatalogs = if ($StateInfo.PSObject.Properties['AvailableModelsByProvider']) { $StateInfo.AvailableModelsByProvider } else { $null }
     $connectedProviders = $null
     if ($StateInfo.PSObject.Properties['ConnectedProviders'] -and $null -ne $StateInfo.ConnectedProviders) { $connectedProviders = @($StateInfo.ConnectedProviders) }
-    $connectedSig = @($connectedProviders) -join ','
+    $connectedSig = if ($null -eq $connectedProviders) { 'unknown' } else { 'known:' + (@($connectedProviders) -join ',') }
     $catalogsSig = if ($providerCatalogs) { $providerCatalogs | ConvertTo-Json -Depth 12 -Compress } else { '' }
     $modelSlugsSig = (@($modelsArr | ForEach-Object {
         $s = if ($_.PSObject.Properties['slug']) { [string]$_.slug } else { '' }

@@ -202,3 +202,7 @@ $productionState.AvailableModelsByProvider = $legacyCatalog.available_models_by_
 $productionState.ConnectedProviders = $legacyCatalog.connected_providers
 Sync-Test $productionState $catalog 'inherit' 'inherit'
 Assert-Case ($null -eq $legacyCatalog.connected_providers -and @(Get-Tags $productionState.ModelCombo) -contains 'gpt-6-thinking') 'Legacy snapshots without availability metadata retain OpenAI catalog compatibility'
+
+$productionState.ConnectedProviders = @()
+Sync-Test $productionState $catalog 'inherit' 'inherit'
+Assert-Case (@(Get-Tags $productionState.ModelCombo) -notcontains 'gpt-6-thinking') 'Unknown to explicitly disconnected transition invalidates model display cache'
