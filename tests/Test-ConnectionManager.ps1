@@ -48,6 +48,15 @@ if ($PublicTunnelOnly) {
     $clean = Get-ConnectionProfiles $ctx
     Assert ($clean.EnabledPlatforms -notcontains 'deepseek' -and @($clean.Profiles | Where-Object Platform -eq 'deepseek').Count -eq 0) 'legacy platform filtered'
     Assert (([IO.File]::ReadAllText($storePath) | ConvertFrom-Json).enabled_platforms -notcontains 'deepseek') 'legacy cleanup persisted'
+    $store = [IO.File]::ReadAllText($storePath) | ConvertFrom-Json
+    $old = $store.profiles | Where-Object platform -eq 'gemini'
+    $old.kind = 'apikey'; $old.base_url = 'https://generativelanguage.googleapis.com'
+    [IO.File]::WriteAllText($storePath, ($store | ConvertTo-Json -Depth 8))
+    $migrated = (Get-ConnectionProfiles $ctx).Profiles | Where-Object Platform -eq 'gemini'
+    Assert ($migrated.Kind -eq 'public_tunnel' -and $migrated.BaseUrl -eq '' -and -not $migrated.HasKey) 'old API profile migrates to quick mode without API credential reuse'
+    $again = (Get-ConnectionProfiles $ctx).Profiles | Where-Object Platform -eq 'gemini'
+    Assert ($again.BaseUrl -eq '' -and -not $again.HasKey) 'quick-mode migration survives reload'
+
 
     Write-Output "PASS public tunnel: $script:passed"
     return

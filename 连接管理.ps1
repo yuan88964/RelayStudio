@@ -1695,7 +1695,7 @@ function Get-CapsulePlatformMeta([string]$Platform = 'openai') {
                 DefaultUrl = ''
                 PurposeDesc = '共享公网 MCP 隧道 · 连接 Claude 云端会话房间'
                 SecondLabel = '固定 HTTPS 域名（选填，留空使用临时隧道）'; KeyLabel = 'Cloudflare 隧道凭证（选填）'
-                ApiKeysUrl = 'https://console.anthropic.com/settings/keys'
+                ApiKeysUrl = 'https://developers.cloudflare.com/tunnel/get-started/'
                 PlatText = '网页端 Connectors ↗'; PlatUrl = 'https://claude.ai/settings/connectors'
             }
         }
@@ -1705,7 +1705,7 @@ function Get-CapsulePlatformMeta([string]$Platform = 'openai') {
                 DefaultUrl = ''
                 PurposeDesc = '共享公网 MCP 隧道 · 连接 Gemini 云端会话房间'
                 SecondLabel = '固定 HTTPS 域名（选填，留空使用临时隧道）'; KeyLabel = 'Cloudflare 隧道凭证（选填）'
-                ApiKeysUrl = 'https://aistudio.google.com/app/apikey'
+                ApiKeysUrl = 'https://developers.cloudflare.com/tunnel/get-started/'
                 PlatText = '已关联的应用 ↗'; PlatUrl = 'https://gemini.google.com/extensions'
             }
         }
@@ -1982,6 +1982,7 @@ function Refresh-ProfilePopoverState {
     if ($script:controls.KeyInputLabel) {
         $script:controls.KeyInputLabel.Text = $platMeta.KeyLabel
     }
+    $script:controls.ApiKeysButton.Content = $(if ($curPlat -eq 'openai') { '获取或管理 API Key ↗' } else { '公网隧道设置帮助 ↗' })
     if ($script:controls.PlatformButton) {
         $script:controls.PlatformButton.Content = $platMeta.PlatText
     }
@@ -2545,8 +2546,19 @@ function Invoke-PopoverQuickConnect {
         $script:popoverEditMode = $false
         if ($curPlat -ne 'openai') {
             $prof = $script:profilesState.Profiles | Where-Object Id -eq $script:viewingProfileId | Select-Object -First 1
+            $current = Get-PublicMcpTunnelState $script:context
+            if ($current.Running) {
+                [Windows.Clipboard]::SetText($current.Url)
+                Show-QuickToast '已复制公网 MCP 网址'
+                return
+            }
             if (-not $script:context.Isolated) {
-                [void](Start-ReadOnlyShield $script:context $script:settings)
+                $port = [int]$script:settings.shield_port
+                $probe = Invoke-ConnectionProbe "http://127.0.0.1:$port/shieldz"
+                if ($probe.Status -ne 200 -or $probe.Body -notmatch '"ok"\s*:\s*true') {
+                    if (Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction SilentlyContinue) { throw '本地桥接服务未就绪，请检查连接状态。' }
+                    [void](Start-ReadOnlyShield $script:context $script:settings (Get-OfficialCoreEndpoint $script:settings))
+                }
             }
             $state = Start-PublicMcpTunnel -Context $script:context -FixedDomain $prof.BaseUrl -Token $prof.PlainKey -Port $script:settings.shield_port
             if ($state.Running -and $state.Url) { [Windows.Clipboard]::SetText($state.Url) }

@@ -862,6 +862,10 @@ function Get-ConnectionProfiles {
         } else {
             Get-DefaultPlatformBaseUrl $plat $Settings
         }
+        if ($plat -ne 'openai' -and $item.PSObject.Properties['kind'] -and $item.kind -eq 'apikey') {
+            # Platform API credentials are not Cloudflare credentials; upgrade to quick mode.
+            $plain = ''; $baseUrl = ''; $keyFile = "public-tunnel-$pidStr.dpapi"
+        }
         $enabledFlag = if ($item.PSObject.Properties.Name -contains 'enabled' -and $null -ne $item.enabled) { [bool]$item.enabled } else { $true }
         if ($pidStr -eq 'prof_business' -and [string]$item.name -eq 'Business 席位号' -and (-not $tunId) -and (-not $plain) -and ($pidStr -ne $activeId)) {
             continue
@@ -887,7 +891,7 @@ function Get-ConnectionProfiles {
             IsActive = [bool]$isAct
         }
     })
-    if (@($rawItems | Where-Object { $_.platform -and $_.platform -notin @('openai','gemini','claude') }).Count -gt 0 -or
+    if (@($rawItems | Where-Object { $_.PSObject.Properties['kind'] -and $_.kind -eq 'apikey' -and $_.platform -in @('gemini','claude') }).Count -gt 0 -or @($rawItems | Where-Object { $_.platform -and $_.platform -notin @('openai','gemini','claude') }).Count -gt 0 -or
         ($storeObj -and @($storeObj.enabled_platforms | Where-Object { $_ -notin @('openai','gemini','claude') }).Count -gt 0)) {
         Write-ConnectionProfilesStorePayload -Context $Context -ActiveProfileId $activeId -EnabledPlatforms $enabledPlatforms.ToArray() -ActiveProfileByPlatform $activeByPlatform -SerializedProfiles @(foreach ($profile in $profiles) { ConvertTo-SerializedProfileEntry $profile })
     }
