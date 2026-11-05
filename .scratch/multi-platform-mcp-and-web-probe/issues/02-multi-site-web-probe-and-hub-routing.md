@@ -15,7 +15,9 @@
 
 ## Accepted Amendments & Internal Adaptations
 
-- (Append user-approved adjustments or non-breaking internal/blast-radius adaptations that preserve user-visible behaviour and acceptance criteria.)
+- Native room identity is provider-qualified: Gemini IDs are not coerced into ChatGPT UUIDs; desktop ChatGPT UUID rules remain unchanged. Public routes and provider checks extend existing poll/receipt seams.
+- Non-ChatGPT retirement closes the local retired tab without invoking ChatGPT-specific cloud archive APIs; no cloud archive success is fabricated. Model catalogs remain ticket03 responsibility.
+- The ChatGPT page-hook fixture now supplies an explicit official page URL to exercise the real site guard; assertions unchanged.
 
 ## Attempt Log & Quarantine Status
 

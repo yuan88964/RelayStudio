@@ -18,6 +18,10 @@ function Assert([bool]$Condition,[string]$Message) { if (-not $Condition) { thro
 
 function Assert-Throws([scriptblock]$Action,[string]$Message) { $thrown=$false;try { & $Action | Out-Null }catch { $thrown=$true }; Assert $thrown $Message }
 
+Assert ((Get-WebRoomUrl -Record ([pscustomobject]@{provider='gemini'}) -Room 'abc123') -eq 'https://gemini.google.com/app/abc123') 'Gemini native room route'
+Assert ((Get-WebRoomUrl -Record ([pscustomobject]@{provider='claude'}) -Room 'aaa-bbb') -eq 'https://claude.ai/chat/aaa-bbb') 'Claude room route'
+Assert ((Get-WebRoomUrl -Record ([pscustomobject]@{provider='claude'})) -eq 'https://claude.ai/new') 'Claude new conversation route'
+
 if ($PublicTunnelOnly) {
     $ctx = New-ConnectionContext -DataRoot (Join-Path $testRoot 'public') -Isolated
     Assert-Throws { Add-CapsulePlatform $ctx 'deepseek' } 'deprecated platform rejected'

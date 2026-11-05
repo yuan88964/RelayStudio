@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "RelayStudio Web Bridge",
   "version": "1.5.0",
-  "description": "RelayStudio 本地智能体工作台与 ChatGPT 网页端双向自动续航桥接器（动态模型协议与零点击拦截版）",
+  "description": "RelayStudio multi-platform web conversation bridge",
   "permissions": [
     "tabs",
     "scripting",
@@ -21,7 +21,9 @@
     "http://127.0.0.1:8766/*",
     "http://localhost:8766/*",
     "https://chatgpt.com/*",
-    "https://chat.openai.com/*"
+    "https://chat.openai.com/*",
+    "https://gemini.google.com/*",
+    "https://claude.ai/*"
   ],
   "content_scripts": [
     {
@@ -38,7 +40,9 @@
     {
       "matches": [
         "https://chatgpt.com/*",
-        "https://chat.openai.com/*"
+        "https://chat.openai.com/*",
+        "https://gemini.google.com/*",
+        "https://claude.ai/*"
       ],
       "js": [
         "bridge-content.js"

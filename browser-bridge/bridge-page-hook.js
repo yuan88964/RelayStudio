@@ -5,6 +5,9 @@
 // 3. Intercept POST /backend-api/(f/)?conversation(\/prepare)? to override model & thinking_effort directly in JSON body without any DOM menu clicking
 
 (() => {
+  // Never mutate third-party requests using ChatGPT's private API schema.
+  try {if (!['chatgpt.com', 'chat.openai.com'].includes(new URL(window.location.href).hostname)) return;} catch (_) {return;}
+
   if (window.__RELAYSTUDIO_PAGE_HOOK_INSTALLED__) {
     return;
   }

@@ -75,14 +75,15 @@ function fakeEl({parts = [], excluded = false, role = '', hidden = false} = {}) 
 }
 
 function makeEnv({clickFetch = false, streamChunks = null, streamFail = false, origOverride = null,
-  sendButton = true, clock = null, holdSleep120 = false, errorNodes = [], messageNodes = []} = {}) {
+  site = null, rich = false, generating = false, acceptedText = null, sendButton = true, clock = null, holdSleep120 = false, errorNodes = [], messageNodes = []} = {}) {
   const dataset = {};
   const sent = [];
   const winListeners = new Map();
   const fillEvents = [];
   const sleeps120 = [];
   const textarea = {
-    tagName: 'TEXTAREA', offsetParent: {}, value: '', isContentEditable: false,
+    tagName: rich ? 'DIV' : 'TEXTAREA', offsetParent: {}, value: '', isContentEditable: rich,
+    get innerText() {return this.value}, set innerText(v) {this.value=v},
     getAttribute() {return null}, focus() {},
     dispatchEvent(ev) {if (ev && ev.type === 'keydown' && textarea.onKeydown) textarea.onKeydown(); return true},
   };
@@ -91,24 +92,28 @@ function makeEnv({clickFetch = false, streamChunks = null, streamFail = false, o
   let ctx;
   const button = {disabled: false, offsetParent: {}, getAttribute() {return null}, click() {
     clicks++;
+    if (acceptedText) {textarea.value = ""; messageNodes.push({textContent: acceptedText, innerText: acceptedText});}
     if (clickFetch) {
       ctx.window.fetch('/backend-api/conversation', {method: 'POST', body: JSON.stringify({model: 'gpt-6-thinking', conversation_id: convId})});
     }
   }};
   const doc = {
+    execCommand(op, _ui, text) {if (op === 'insertText') textarea.value=text; else if(op === 'delete') textarea.value=''; return true},
     readyState: 'complete',
     documentElement: {dataset},
     title: 'v4.7 probe fixture',
     body: {innerText: '', appendChild() {}},
     getElementById(id) {return id === 'relaystudio-bridge-toast' ? {style: {}, textContent: ''} : null},
     querySelector(sel) {
-      if (sel === '#prompt-textarea') return textarea;
+      if (sel === (site === 'gemini' ? 'rich-textarea [contenteditable="true"]' : site === 'claude' ? 'div.ProseMirror[contenteditable="true"]' : '#prompt-textarea')) return textarea;
       if (sel === 'button[data-testid="send-button"]') return sendButton ? button : null;
       if (sel === 'main') return {innerText: '', textContent: ''};
       return null;
     },
     querySelectorAll(sel) {
-      if (sel === '#prompt-textarea') return [textarea];
+      if (sel === (site === 'gemini' ? 'rich-textarea [contenteditable="true"]' : site === 'claude' ? 'div.ProseMirror[contenteditable="true"]' : '#prompt-textarea')) return [textarea];
+      if (sel === 'user-query, [data-testid="user-query"]' || sel === '[data-testid="user-message"]') return messageNodes;
+      if (generating && sel.includes('Stop response')) return [{disabled:false, getAttribute(){return null}, getBoundingClientRect(){return {width:20,height:20}}}];
       if (/conversation-error/.test(sel)) return errorNodes;
       if (sel === '[data-message-author-role]') return messageNodes;
       if (sendButton && (sel.includes('send') || sel.includes('Send') || sel.includes('发送'))) return [button];
@@ -127,7 +132,7 @@ function makeEnv({clickFetch = false, streamChunks = null, streamFail = false, o
   });
   class FakeEvent {constructor(type, init) {this.type = type; this.detail = init && init.detail;}}
   const winObj = {
-    fetch: origFetch, Request, location: {href: 'https://chatgpt.com/c/' + convId, pathname: '/c/' + convId, search: ''},
+    fetch: origFetch, Request, location: site === 'gemini' ? {href: 'https://gemini.google.com/app/abc123xy', pathname: '/app/abc123xy', search: ''} : site === 'claude' ? {href:'https://claude.ai/chat/'+convId, pathname:'/chat/'+convId, search:''} : {href: 'https://chatgpt.com/c/' + convId, pathname: '/c/' + convId, search: ''},
     history: {replaceState() {}}, HTMLTextAreaElement: function () {}, HTMLInputElement: function () {}, CustomEvent: FakeEvent,
     addEventListener(type, fn) {if (!winListeners.has(type)) winListeners.set(type, new Set()); winListeners.get(type).add(fn);},
     removeEventListener(type, fn) {if (winListeners.has(type)) winListeners.get(type).delete(fn);},
@@ -173,6 +178,24 @@ function makeEnv({clickFetch = false, streamChunks = null, streamFail = false, o
 }
 
 async function main() {
+  for (const site of ['gemini', 'claude']) {
+    const e = makeEnv({site, rich:site === 'claude', acceptedText: 'cross-site fixture'});
+    const st = await e.collect();
+    check(st.provider === site && st.conv_uuid === (site === 'gemini' ? 'abc123xy' : convId), site + ' reports provider and native room ID');
+    check(!e.ctx.window.__RELAYSTUDIO_PAGE_HOOK_INSTALLED__, site + ' never installs ChatGPT API hook');
+    const delivered = await e.dispatch({id:'cross-'+site, provider:site, text:'cross-site fixture'});
+    check(delivered.ok && delivered.provider === site && e.clicks === 1, site + ' confirms a rendered outgoing turn after send');
+    const wrong = await e.dispatch({id:'wrong',provider:site === 'gemini' ? 'claude' : 'gemini',text:'wrong site'});
+    check(!wrong.ok && e.clicks === 1, site + ' refuses cross-provider dispatch');
+    const busy = makeEnv({site,generating:true});
+    check((await busy.collect()).is_generating, site + ' detects visible stop response');
+    const busySend = await busy.dispatch({id:'busy',provider:site,text:'do not type'});
+    check(!busySend.ok && busySend.retry_safe && busy.clicks === 0, site + ' never auto-types while generating');
+    const pending = makeEnv({site});
+    const uncertain = await pending.dispatch({id:'pending',provider:site,text:'not confirmed'});
+    check(!uncertain.ok && uncertain.uncertain_delivery && pending.clicks === 1, site + ' does not ACK a mere click');
+  }
+
   // ---- 1.1 Stream Hook: sentinel / prepare failures fail the correlated dispatch ------------------------------------
   for (const [label, url, mode] of [
     ['sentinel network error', '/backend-api/sentinel/chat-requirements', 'throw'],
@@ -400,6 +423,15 @@ async function main() {
     check(keys.every(k => entry[k] === full[k]), 'upsertTabStateCache forwards all 7 v4.7 fields');
     const tabs = await bg.collectOpenChatGptTabs();
     check(tabs.length === 1 && keys.every(k => tabs[0][k] === full[k]), 'collectOpenChatGptTabs forwards all 7 v4.7 fields');
+    for (const [provider, url, room] of [['gemini','https://gemini.google.com/app/native123','native123'], ['claude','https://claude.ai/chat/'+convId,convId]]) {
+      bg.chrome.tabs.query = async opts => {
+        check(opts.url.includes('https://gemini.google.com/*') && opts.url.includes('https://claude.ai/*'), 'background enumerates all platform scopes');
+        return [{id:provider === 'gemini' ? 21 : 22,url,title:provider}];
+      };
+      probeState = {provider,conv_uuid:room,url};
+      const nativeTabs = await bg.collectOpenChatGptTabs();
+      check(nativeTabs[0].provider === provider && nativeTabs[0].conv_uuid === room, provider+' survives background tab aggregation');
+    }
     const sparse = bg.upsertTabStateCache('8', {conv_uuid: convId}, {});
     check(sparse.has_composer === true && sparse.turn_incomplete === false && sparse.ui_error_text === '' && sparse.is_archived === false,
       'missing fields default safely (has_composer defaults true)');

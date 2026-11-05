@@ -80,9 +80,18 @@ const inFlightDispatchTabs = new Set();
 let cachedAvailableModels = [];
 let shuttleBusy = false;
 
+const PLATFORM_URLS = ['https://chatgpt.com/*', 'https://chat.openai.com/*', 'https://gemini.google.com/*', 'https://claude.ai/*'];
+function providerFromUrl(url) {
+  try {
+    const host = new URL(String(url || '')).hostname;
+    return host === 'gemini.google.com' ? 'gemini' : host === 'claude.ai' ? 'claude' : ['chatgpt.com','chat.openai.com'].includes(host) ? 'chatgpt' : '';
+  } catch (_) {return '';}
+}
 function extractConvUuidFromUrl(url) {
-  const m = String(url || "").match(/\/c\/([0-9a-fA-F-]{36})/);
-  return m ? m[1] : "";
+  const provider = providerFromUrl(url);
+  const patterns = {chatgpt: /\/c\/([0-9a-fA-F-]{36})(?:[/?#]|$)/, gemini: /\/app\/([a-zA-Z0-9_-]+)(?:[/?#]|$)/, claude: /\/chat\/([a-zA-Z0-9_-]+)(?:[/?#]|$)/};
+  const m = patterns[provider] && String(url || '').match(patterns[provider]);
+  return m ? m[1] : '';
 }
 
 function extractProjectPrefixFromUrl(url) {
@@ -103,7 +112,7 @@ function upsertTabStateCache(tabIdStr, state, tabMeta) {
   const s = state || {};
   const meta = tabMeta || {};
   const tabModels = Array.isArray(s.available_models) ? s.available_models : [];
-  if (tabModels.length > 0) {
+  if (tabModels.length > 0 && (providerFromUrl(meta.url || s.url) || s.provider || "chatgpt") === "chatgpt") {
     cachedAvailableModels = tabModels;
   }
   const sseActive = Boolean(s.sse_active);
@@ -111,6 +120,7 @@ function upsertTabStateCache(tabIdStr, state, tabMeta) {
   const turnSeqNum = Number(s.turn_seq || 0);
   const entry = {
     tab_id: tabIdStr,
+    provider: providerFromUrl(meta.url || s.url) || s.provider || "chatgpt",
     conv_uuid: s.conv_uuid || extractConvUuidFromUrl(meta.url),
     project_prefix: s.project_prefix || extractProjectPrefixFromUrl(meta.url),
     url: s.url || meta.url || "",
@@ -133,7 +143,7 @@ function upsertTabStateCache(tabIdStr, state, tabMeta) {
     ui_error_text: String(s.ui_error_text || ""),
     current_model: String(s.current_model || ""),
     current_effort: String(s.current_effort || ""),
-    available_models: tabModels.length > 0 ? tabModels : cachedAvailableModels,
+    available_models: tabModels.length > 0 ? tabModels : (providerFromUrl(meta.url || s.url) === "chatgpt" ? cachedAvailableModels : []),
     updated_at: Date.now(),
   };
   tabStateCache.set(tabIdStr, entry);
@@ -205,6 +215,7 @@ function releaseClaimToHub(msgIdStr, tabIdStr, reasonStr) {
     body: JSON.stringify({
       msg_id: msgIdStr,
       tab_id: tabIdStr || "",
+      provider: (tabStateCache.get(String(tabIdStr)) || {}).provider || "chatgpt",
       reason: reasonStr || "retry_safe",
     }),
   }).catch(() => {});
@@ -237,7 +248,7 @@ async function collectOpenChatGptTabs() {
   let tabs = [];
   try {
     tabs = await chrome.tabs.query({
-      url: ["https://chatgpt.com/*", "https://chat.openai.com/*"],
+      url: PLATFORM_URLS,
     });
   } catch (_) {
     return [];
@@ -250,6 +261,7 @@ async function collectOpenChatGptTabs() {
     let cached = tabStateCache.get(tabIdStr);
     const cacheFresh = Boolean(
       cached &&
+        cached.provider === providerFromUrl(t.url) &&
         typeof cached.updated_at === "number" &&
         Date.now() - cached.updated_at <= TAB_CACHE_STALE_MS
     );
@@ -269,12 +281,13 @@ async function collectOpenChatGptTabs() {
     const models =
       Array.isArray(safeCached.available_models) && safeCached.available_models.length > 0
         ? safeCached.available_models
-        : cachedAvailableModels;
+        : (providerFromUrl(url) === "chatgpt" ? cachedAvailableModels : []);
     const sseActive = stateKnown ? Boolean(safeCached.sse_active) : false;
     const isGenerating = stateKnown ? Boolean(safeCached.is_generating || sseActive) : false;
     payloads.push({
       tab_id: tabIdStr,
-      conv_uuid: extractConvUuidFromUrl(url) || safeCached.conv_uuid || "",
+      provider: providerFromUrl(url),
+      conv_uuid: extractConvUuidFromUrl(url),
       project_prefix: extractProjectPrefixFromUrl(url) || safeCached.project_prefix || "",
       url,
       title: t.title || safeCached.title || "ChatGPT",
@@ -336,7 +349,7 @@ async function handleShuttleDispatches(dispatches) {
         await fetch(`${BRIDGE_BASE}/web-bridge/ack-open`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ msg_id: msgId }),
+          body: JSON.stringify({ msg_id: msgId, provider: d.provider || providerFromUrl(d.handover_url) }),
         });
       } catch (_) {}
       continue;
@@ -369,13 +382,14 @@ async function handleShuttleDispatches(dispatches) {
             },
             (resp) => {
               const hasErr = Boolean(chrome.runtime && chrome.runtime.lastError);
-              if (!hasErr && resp && resp.ok) {
+              if (!hasErr && resp && resp.ok && (!(messageObj.provider || d.provider) || resp.provider === (messageObj.provider || d.provider))) {
                 inFlightDispatchTabs.delete(tabKey);
                 fetch(`${BRIDGE_BASE}/web-bridge/ack-deliver`, {
                   method: "POST",
                   headers: { "Content-Type": "application/json" },
                   body: JSON.stringify({
                     msg_id: msgIdStr,
+                    provider: resp.provider || messageObj.provider || d.provider || "chatgpt",
                     tab_id: tabKey,
                     conv_uuid: String(resp.conv_uuid || d.conv_uuid || ""),
                   }),
@@ -419,7 +433,7 @@ async function handleShuttleRetireActions(retireActions) {
   let openTabs = [];
   try {
     openTabs = await chrome.tabs.query({
-      url: ["https://chatgpt.com/*", "https://chat.openai.com/*"],
+      url: PLATFORM_URLS,
     });
   } catch (_) {}
 
@@ -433,6 +447,7 @@ async function handleShuttleRetireActions(retireActions) {
     }
 
     const matchedTab = openTabs.find((t) => {
+      if (providerFromUrl(t.url) !== (r.provider || "chatgpt")) return false;
       const tabConv = extractConvUuidFromUrl(t.url);
       if (tabConv && tabConv === convUuid) {
         return true;
@@ -442,7 +457,8 @@ async function handleShuttleRetireActions(retireActions) {
       }
       return false;
     });
-    const carrierTab = openTabs.find((t) => t !== matchedTab) || matchedTab || openTabs[0];
+    const providerTabs = openTabs.filter(t => providerFromUrl(t.url) === (r.provider || "chatgpt"));
+    const carrierTab = providerTabs.find((t) => t !== matchedTab) || matchedTab || providerTabs[0];
     if (!carrierTab || typeof carrierTab.id !== "number") {
       continue;
     }
@@ -468,7 +484,7 @@ async function handleShuttleRetireActions(retireActions) {
     let cloudOk = false;
     if (r.archive_conversation === false && op === "archive") {
       cloudOk = true;
-    } else {
+    } else if ((r.provider || "chatgpt") === "chatgpt") {
       try {
         await ensureTabScriptsInjected(carrierTab.id);
         const archResp = await new Promise((resolve) => {
@@ -497,7 +513,7 @@ async function handleShuttleRetireActions(retireActions) {
           ? await chrome.tabs.query({ windowId: matchedTab.windowId })
           : openTabs;
         if (Array.isArray(winTabs) && winTabs.length <= 1) {
-          await chrome.tabs.update(matchedTab.id, { url: "https://chatgpt.com/" });
+          await chrome.tabs.update(matchedTab.id, { url: (r.provider === "gemini" ? "https://gemini.google.com/app" : r.provider === "claude" ? "https://claude.ai/new" : "https://chatgpt.com/") });
         } else if (typeof chrome.tabs.remove === "function") {
           await chrome.tabs.remove(matchedTab.id);
           openTabs = openTabs.filter((t) => t.id !== matchedTab.id);

@@ -168,6 +168,28 @@ class ShieldHubSeamTests(unittest.TestCase):
         with urllib.request.urlopen(req, timeout=5) as resp:
             return json.loads(resp.read().decode("utf-8"))
 
+    def test_multi_platform_routing_claim_and_receipt(self):
+        for provider, root, room_path, room in [
+            ("gemini", "https://gemini.google.com/app", "/", "abc123def456"),
+            ("claude", "https://claude.ai/new", "https://claude.ai/chat/", "aaaaaaaa-1111-4111-8111-111111111111"),
+        ]:
+            task = "tsk_platform_" + provider
+            self._post_json("/studio/action", {"action": "bind_session", "session_key": task, "provider": provider})
+            enq = self._post_json("/web-bridge/enqueue", {"session_key": task, "mode": "new_window_handover", "text": "continue", "no_launch": True})
+            mid = enq["message"]["id"]
+            self.assertTrue(enq["handover_url"].startswith(root), enq)
+            wrong = self._post_json("/web-bridge/poll", {"tab_id": "wrong", "provider": "chatgpt", "url": "https://chatgpt.com/?msg_id=" + mid, "handover_msg_id": mid})
+            self.assertFalse(wrong.get("messages"))
+            url = root + "/" + room if provider == "gemini" else room_path + room
+            claim = self._post_json("/web-bridge/poll", {"tab_id": provider, "provider": provider, "url": url, "conv_uuid": room, "handover_msg_id": mid})
+            self.assertEqual(len(claim["messages"]), 1)
+            denied = self._post_json("/web-bridge/ack-deliver", {"msg_id": mid, "tab_id": provider, "provider": "chatgpt", "conv_uuid": room})
+            self.assertFalse(denied["ok"])
+            ack = self._post_json("/web-bridge/ack-deliver", {"msg_id": mid, "tab_id": provider, "provider": provider, "conv_uuid": room})
+            self.assertTrue(ack["ok"])
+            opened = self._post_json("/studio/action", {"action": "open_tab", "session_key": task, "no_launch": True})
+            self.assertTrue(opened["url"].startswith(url), opened)
+
     def _write_task(self, task_id: str, title: str, status: str = "active", updated_at: str = None, steps=None):
         now_iso = updated_at or shield._utc_now_iso()
         doc = {
@@ -1261,7 +1283,7 @@ const storage = {};
 let capturedPostBody = null;
 global.window = {
   __relayStudioPageHookInstalled: false,
-  location: { pathname: '/c/66666666-6666-4666-8666-666666666666' },
+  location: { href: 'https://chatgpt.com/c/66666666-6666-4666-8666-666666666666', pathname: '/c/66666666-6666-4666-8666-666666666666' },
   localStorage: {
     getItem: (k) => storage[k] || null,
     setItem: (k, v) => { storage[k] = String(v); }
@@ -1630,3 +1652,4 @@ eval(hookCode);
 
 if __name__ == "__main__":
     unittest.main()
+
