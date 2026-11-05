@@ -1915,6 +1915,31 @@ function Invoke-PurgeAllArchivedSessions {
     return (Clear-AllArchivedSessions -Context $Context -ArchivedSessions $ArchivedSessions -PhysicalPurge -Settings $Settings)
 }
 
+function Get-WebRoomProvider {
+    param($Record)
+    if ($Record -and $Record.PSObject.Properties['provider'] -and $Record.provider) {
+        $value = ([string]$Record.provider).ToLowerInvariant()
+        if ($value -eq 'openai') { return 'chatgpt' }
+        return $value
+    }
+    if ($Record -and $Record.PSObject.Properties['url']) {
+        if ([string]$Record.url -match '^https://gemini\.google\.com/') { return 'gemini' }
+        if ([string]$Record.url -match '^https://claude\.ai/') { return 'claude' }
+    }
+    return 'chatgpt'
+}
+
+function Get-WebRoomUrl {
+    param($Record, [string]$Room = '', [string]$ProjectPrefix = '')
+    $provider = Get-WebRoomProvider $Record
+    $roomPart = [uri]::EscapeDataString($Room)
+    switch ($provider) {
+        'gemini' { if ($Room) { return "https://gemini.google.com/app/$roomPart" }; return 'https://gemini.google.com/app' }
+        'claude' { if ($Room) { return "https://claude.ai/chat/$roomPart" }; return 'https://claude.ai/new' }
+        default { $base = if ($ProjectPrefix) { $ProjectPrefix.TrimEnd('/') } else { 'https://chatgpt.com' }; if ($Room) { return "$base/c/$roomPart" }; return $base }
+    }
+}
+
 function Get-VerifiedBindingConvUuid {
     param($State, $Binding, [string]$WfrId = '')
     if (-not $Binding -or -not $Binding.PSObject.Properties['conv_uuid'] -or -not $Binding.conv_uuid) { return '' }
@@ -1924,9 +1949,10 @@ function Get-VerifiedBindingConvUuid {
     if ($State -and $State.tabs) {
         foreach ($tp in $State.tabs.PSObject.Properties) {
             $tVal = $tp.Value
-            if ($tVal -and $tVal.PSObject.Properties['conv_uuid'] -and [string]$tVal.conv_uuid -eq $cand) { return $cand }
+            if ($tVal -and (Get-WebRoomProvider $tVal) -eq (Get-WebRoomProvider $Binding) -and $tVal.PSObject.Properties['conv_uuid'] -and [string]$tVal.conv_uuid -eq $cand) { return $cand }
         }
     }
+    if ((Get-WebRoomProvider $Binding) -eq 'gemini' -and $cand -match '^[a-zA-Z0-9_-]+$' -and $cand -ne $WfrId) { return $cand }
     if ($cand -match '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$' -and $cand -ne $WfrId) {
         return $cand
     }
@@ -2204,7 +2230,7 @@ function Open-SessionWebPage {
                     if ($qm.PSObject.Properties[$tf] -and $qm.$tf) { $sessionTabIds[[string]$qm.$tf] = $true }
                 }
                 if (-not $convUuid -and $qm.PSObject.Properties['mode'] -and [string]$qm.mode -eq 'new_window_handover' -and [string]$qm.status -in @('pending', 'claimed') -and $qm.PSObject.Properties['id'] -and $qm.id) {
-                    $baseU = if ($projPrefix) { $projPrefix } else { 'https://chatgpt.com' }
+                    $baseU = Get-WebRoomUrl -Record $bEntry -ProjectPrefix $projPrefix
                     $profQs = if ($browserProf) { '&relay_profile=' + [Uri]::EscapeDataString($browserProf) } else { '' }
                     $latestOfflineHandoverUrl = "$baseU/?relay_handover=1&msg_id=$([string]$qm.id)$profQs"
                 }
@@ -2268,7 +2294,7 @@ function Open-SessionWebPage {
     if ($state.tabs) {
         foreach ($tp in $state.tabs.PSObject.Properties) {
             $tVal = $tp.Value
-            if (-not $tVal) { continue }
+            if (-not $tVal -or (Get-WebRoomProvider $tVal) -ne (Get-WebRoomProvider $bEntry)) { continue }
             $tProf = if ($tVal.PSObject.Properties['browser_profile'] -and $tVal.browser_profile) { [string]$tVal.browser_profile } else { '' }
             if ($tProf -and $browserProf -and ($tProf -split ':')[0] -ne ($browserProf -split ':')[0]) { continue }
             $tUuid = if ($tVal.PSObject.Properties['conv_uuid'] -and $tVal.conv_uuid) { [string]$tVal.conv_uuid } else { '' }
@@ -2297,7 +2323,7 @@ function Open-SessionWebPage {
     if ($state.tabs) {
         foreach ($tp in $state.tabs.PSObject.Properties) {
             $tVal = $tp.Value
-            if (-not $tVal) { continue }
+            if (-not $tVal -or (Get-WebRoomProvider $tVal) -ne (Get-WebRoomProvider $bEntry)) { continue }
             $tProf = if ($tVal.PSObject.Properties['browser_profile'] -and $tVal.browser_profile) { [string]$tVal.browser_profile } else { '' }
             if ($tProf -and $browserProf -and ($tProf -split ':')[0] -ne ($browserProf -split ':')[0]) { continue }
             $ageSec = 999999.0
@@ -2362,10 +2388,10 @@ function Open-SessionWebPage {
         }
     }
 
-    $baseUrl = if ($projPrefix) { $projPrefix } else { 'https://chatgpt.com' }
+    $baseUrl = Get-WebRoomUrl -Record $bEntry -ProjectPrefix $projPrefix
     if ($matchedLiveTab) {
         $targetTabId = [string]$matchedLiveTab.tab_id
-        $resolvedTabUrl = if ($matchedLiveTab.PSObject.Properties['url'] -and $matchedLiveTab.url -and $matchedLiveTab.url -match '/c/') { [string]$matchedLiveTab.url } elseif ($convUuid) { "$baseUrl/c/$convUuid" } elseif ($latestOfflineHandoverUrl) { $latestOfflineHandoverUrl } else { "$baseUrl/" }
+        $resolvedTabUrl = if ($matchedLiveTab.PSObject.Properties['url'] -and $matchedLiveTab.url -and $matchedLiveTab.url -match '/c/') { [string]$matchedLiveTab.url } elseif ($convUuid) { (Get-WebRoomUrl -Record $bEntry -Room $convUuid -ProjectPrefix $projPrefix) } elseif ($latestOfflineHandoverUrl) { $latestOfflineHandoverUrl } else { "$baseUrl/" }
         $bName = if (($matchedLiveTab.PSObject.Properties['browser'] -and $matchedLiveTab.browser -eq 'Edge') -or $browserProf -match '^Edge:') { 'msedge' } else { 'chrome' }
         $state | Add-Member -NotePropertyName 'focus_tab_id' -NotePropertyValue $targetTabId -Force
         Save-WebBridgeState $Context $state
@@ -2394,7 +2420,7 @@ function Open-SessionWebPage {
         }
     }
 
-    $targetUrl = if ($convUuid) { "$baseUrl/c/$convUuid" } elseif ($latestOfflineHandoverUrl) { $latestOfflineHandoverUrl } else { "$baseUrl/" }
+    $targetUrl = if ($convUuid) { (Get-WebRoomUrl -Record $bEntry -Room $convUuid -ProjectPrefix $projPrefix) } elseif ($latestOfflineHandoverUrl) { $latestOfflineHandoverUrl } else { "$baseUrl/" }
     if ($doForegroundLaunch) {
         $windowOk = [bool](Open-BridgeHandoverWindow -Url $targetUrl -BrowserProfile $browserProf -Context $Context)
     }
@@ -3263,7 +3289,7 @@ function Send-WebBridgeMessage {
         $matchTab = if ($bEntry -and $bEntry.PSObject.Properties['tab_id'] -and $bEntry.tab_id) { [string]$bEntry.tab_id } else { '' }
         foreach ($tpLive in $state.tabs.PSObject.Properties) {
             $tvLive = $tpLive.Value
-            if (-not $tvLive) { continue }
+            if (-not $tvLive -or (Get-WebRoomProvider $tvLive) -ne (Get-WebRoomProvider $bEntry)) { continue }
             $tvConv = if ($tvLive.PSObject.Properties['conv_uuid']) { [string]$tvLive.conv_uuid } else { '' }
             $tvId = if ($tvLive.PSObject.Properties['tab_id']) { [string]$tvLive.tab_id } else { [string]$tpLive.Name }
             if (($matchConv -and $tvConv -eq $matchConv) -or ($matchTab -and $tvId -eq $matchTab)) {
@@ -3393,7 +3419,7 @@ function Send-WebBridgeMessage {
     }
 
     $msgId = 'msg_' + [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() + '_' + [Guid]::NewGuid().ToString('N').Substring(0, 4)
-    $baseUrl = if ($projPrefix) { $projPrefix } else { 'https://chatgpt.com' }
+    $baseUrl = Get-WebRoomUrl -Record $bEntry -ProjectPrefix $projPrefix
     $handoverUrl = "$baseUrl/?relay_handover=1&msg_id=$msgId"
     if ($modelSlug) {
         $handoverUrl += "&model=$modelSlug"
@@ -3402,6 +3428,7 @@ function Send-WebBridgeMessage {
     $effDefer = [bool]($DeferUntilStopped -and [string]$Session.SessionKey -ne '__new_task__')
     $newItem = [pscustomobject]@{
         id = $msgId
+        provider = (Get-WebRoomProvider $bEntry)
         session_key = [string]$Session.SessionKey
         wfr_id = $wfrId
         conv_uuid = $(if ($Mode -eq 'new_window_handover') { '' } else { $convUuid })

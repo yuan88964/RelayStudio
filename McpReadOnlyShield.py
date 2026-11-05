@@ -69,6 +69,37 @@ def _parse_iso_epoch(iso_str: str) -> float:
         return 0.0
 
 
+PLATFORM_ROUTES = {
+    "chatgpt": ("https://chatgpt.com", "c"),
+    "gemini": ("https://gemini.google.com/app", ""),
+    "claude": ("https://claude.ai/new", "chat"),
+}
+
+
+def _platform(record=None):
+    record = record or {}
+    host = urllib.parse.urlparse(str(record.get("url") or "")).hostname
+    by_host = {"gemini.google.com": "gemini", "claude.ai": "claude", "chatgpt.com": "chatgpt", "chat.openai.com": "chatgpt"}
+    value = str(record.get("provider") or by_host.get(host) or "chatgpt").lower()
+    return "chatgpt" if value == "openai" else value
+
+
+def _platform_base(record, project_prefix=""):
+    provider = _platform(record)
+    return project_prefix if provider == "chatgpt" and project_prefix else PLATFORM_ROUTES.get(provider, PLATFORM_ROUTES["chatgpt"])[0]
+
+
+def _platform_room_url(record, room, project_prefix=""):
+    provider = _platform(record)
+    base = _platform_base(record, project_prefix).rstrip("/")
+    if not room:
+        return base + "/"
+    room = urllib.parse.quote(str(room), safe="")
+    if provider == "claude":
+        return "https://claude.ai/chat/" + room
+    return base + ("/" if provider == "gemini" else "/c/") + room
+
+
 def _extract_project_prefix(url: str, explicit_prefix: str = "") -> str:
     if isinstance(explicit_prefix, str) and explicit_prefix.strip().startswith("https://chatgpt.com/g/g-p-"):
         m_exp = re.match(r"^(https://chatgpt\.com/g/g-p-[a-zA-Z0-9_-]+)", explicit_prefix.strip())
@@ -575,7 +606,7 @@ def _enqueue_retire_action(
     stop_before_archive: bool = False,
     not_before_epoch: float = 0.0,
     operation: str = "archive",
-    provider: str = "chatgpt",
+    provider: str = "",
     carrier: str = "",
 ) -> dict | None:
     """Enqueue a session retirement / restoration / deletion action on a conversation if conv_uuid is non-empty."""
@@ -586,7 +617,7 @@ def _enqueue_retire_action(
     if op not in ("archive", "unarchive", "delete"):
         op = "archive"
     eff_carrier = str(carrier or browser_profile or "").strip()
-    eff_provider = str(provider or "chatgpt").strip().lower() or "chatgpt"
+    eff_provider = str(provider or _platform((state.get("session_bindings") or {}).get(session_key))).strip().lower() or "chatgpt"
     ts_str = now_iso or _utc_now_iso()
     retire_list = state.setdefault("retire_actions", [])
     if not isinstance(retire_list, list):
@@ -620,7 +651,7 @@ def _enqueue_retire_action(
         "reason": str(reason or op).strip(),
         "stop_before_archive": stop_flag,
         "stop_before_action": stop_flag,
-        "archive_conversation": (op == "archive"),
+        "archive_conversation": (op == "archive" and eff_provider == "chatgpt"),
         "close_tab": (not is_unarchive),
         "status": "pending",
         "created_at": ts_str,
@@ -5608,6 +5639,7 @@ def run_guardian_tick(data_root: str, tasks_root: str, web_bridge_path: str = ""
                 msg_entry = {
                     "id": f"msg_{uuid.uuid4().hex[:12]}",
                     "session_key": s_key,
+                    "provider": _platform(binding),
                     "wfr_id": str(sess.get("WfrId") or s_key),
                     "conv_uuid": "",
                     "project_prefix": binding.get("project_prefix", ""),
@@ -5656,6 +5688,7 @@ def run_guardian_tick(data_root: str, tasks_root: str, web_bridge_path: str = ""
                 msg_entry = {
                     "id": f"msg_{uuid.uuid4().hex[:12]}",
                     "session_key": s_key,
+                    "provider": _platform(binding),
                     "wfr_id": str(sess.get("WfrId") or s_key),
                     "conv_uuid": bound_uuid,
                     "project_prefix": binding.get("project_prefix", ""),
@@ -6401,6 +6434,7 @@ def _sync_conv_archived_flag(state: dict, conv_uuid: str, archived: bool, now_is
 
 
 def _update_tab_and_bindings(state: dict, tab_payload: dict, default_browser: str, default_profile: str, tasks_by_id: dict, now_iso: str) -> dict:
+    provider = _platform(tab_payload)
     tab_id = str(tab_payload.get("tab_id") or "").strip()
     conv_uuid = str(tab_payload.get("conv_uuid") or "").strip()
     url = str(tab_payload.get("url") or "").strip()
@@ -6491,6 +6525,7 @@ def _update_tab_and_bindings(state: dict, tab_payload: dict, default_browser: st
 
     tab_record = {
         "tab_id": tab_key,
+        "provider": provider,
         "conv_uuid": conv_uuid,
         "project_prefix": project_prefix,
         "url": url,
@@ -6529,11 +6564,14 @@ def _update_tab_and_bindings(state: dict, tab_payload: dict, default_browser: st
         _sync_conv_archived_flag(state, conv_uuid, bool(is_archived), now_iso)
 
     # Channel 1: Handover ?msg_id token transfer
-    if handover_msg_id:
+    if handover_msg_id and provider == "chatgpt":
         for msg in state["queue"]:
-            if msg.get("id") == handover_msg_id and msg.get("session_key"):
+            if msg.get("id") == handover_msg_id and msg.get("session_key") and _platform(msg) == provider:
                 s_key = msg["session_key"]
                 raw_b = dict(state["session_bindings"].get(s_key) or {})
+                if raw_b and _platform(raw_b) != provider:
+                    break
+                raw_b["provider"] = provider
                 prev_bound = str(raw_b.get("conv_uuid") or "").strip()
                 prev_tab = str(raw_b.get("tab_id") or "").strip()
                 _apply_polled_browser_to_binding(raw_b, browser, browser_profile)
@@ -6572,7 +6610,16 @@ def _update_tab_and_bindings(state: dict, tab_payload: dict, default_browser: st
             reverse=True,
         )
         primary_hint = sorted_hints[0]
+        if provider != "chatgpt" and any(
+            m.get("session_key") == primary_hint and m.get("mode") == "new_window_handover"
+            and m.get("status") in ("pending", "claimed", "unconfirmed") and _platform(m) == provider
+            for m in state["queue"] if isinstance(m, dict)
+        ):
+            return tab_record  # A candidate room is not ownership until successful receipt.
         raw_b = dict(state["session_bindings"].get(primary_hint) or {})
+        if raw_b and _platform(raw_b) != provider:
+            return tab_record
+        raw_b["provider"] = provider
         _apply_polled_browser_to_binding(raw_b, browser, browser_profile)
         b = _ensure_binding_entry(raw_b, browser_profile, default_cfg=ar_cfg)
         retired = b.get("retired_uuids", [])
@@ -6754,6 +6801,7 @@ def handle_web_bridge_poll(wb_path: str, tasks_root: str, payload: dict) -> dict
                         sb_prof
                         and not sb_prof.lower().endswith(":default")
                         and sb_browser.lower() == default_browser.lower()
+                        and _platform(raw_tp) == _platform(sb_v)
                         and ((tp_conv and sb_v.get("conv_uuid") == tp_conv) or (sb_k in tp_hints))
                     ):
                         effective_poll_profile = sb_prof
@@ -6798,7 +6846,7 @@ def handle_web_bridge_poll(wb_path: str, tasks_root: str, payload: dict) -> dict
                 return []
             out_t = []
             for t_rec in state["tabs"].values():
-                if not isinstance(t_rec, dict) or t_rec.get("conv_uuid") != conv_u or t_rec.get("state_known") is False:
+                if not isinstance(t_rec, dict) or t_rec.get("conv_uuid") != conv_u or _platform(t_rec) != provider or t_rec.get("state_known") is False:
                     continue
                 t_seen = _parse_iso_epoch(str(t_rec.get("last_seen_at") or t_rec.get("last_seen") or ""))
                 if t_seen <= 0 or (now_epoch - t_seen) <= 15.0:
@@ -6818,6 +6866,8 @@ def handle_web_bridge_poll(wb_path: str, tasks_root: str, payload: dict) -> dict
             if DesktopAppBridge._is_desktop_profile(msg.get("browser_profile")):
                 continue  # Desktop:ChatGPT messages are delivered by DesktopAppBridge over CDP, never by an extension poll
             binding = _ensure_binding_entry(state["session_bindings"].get(msg_session_key), effective_poll_profile, default_cfg=ar_cfg)
+            provider = _platform(msg if msg.get("provider") else binding)
+            msg["provider"] = provider
             target_conv_uuid = str(msg.get("conv_uuid") or binding.get("conv_uuid") or "").strip()
             target_profile = str(msg.get("browser_profile") or binding.get("browser_profile") or effective_poll_profile).strip()
             target_browser = str(msg.get("browser") or binding.get("browser") or default_browser).strip()
@@ -6834,7 +6884,7 @@ def handle_web_bridge_poll(wb_path: str, tasks_root: str, payload: dict) -> dict
                         if same_profile_batch:
                             old_tabs = [
                                 pt for pt in polled_tabs
-                                if pt.get("conv_uuid") == old_conv and pt.get("state_known") is not False
+                                if _platform(pt) == provider and pt.get("conv_uuid") == old_conv and pt.get("state_known") is not False
                             ]
                         else:
                             old_tabs = _fresh_known_tabs_for_conv(old_conv)
@@ -6863,7 +6913,7 @@ def handle_web_bridge_poll(wb_path: str, tasks_root: str, payload: dict) -> dict
                 # 1. Check if one of the polled tabs is the newly opened handover tab carrying handover_msg_id
                 handover_tab = None
                 for pt in polled_tabs:
-                    if pt.get("state_known") is False:
+                    if _platform(pt) != provider or pt.get("state_known") is False:
                         continue
                     if pt["handover_msg_id"] == msg_id or (msg_id and f"msg_id={msg_id}" in pt["url"]):
                         handover_tab = pt
@@ -6885,7 +6935,7 @@ def handle_web_bridge_poll(wb_path: str, tasks_root: str, payload: dict) -> dict
                     if msg_session_key:
                         claimed_sessions.add(msg_session_key)
                     claimed_tabs.add(handover_tab["tab_id"])
-                    if handover_tab["conv_uuid"]:
+                    if handover_tab["conv_uuid"] and provider == "chatgpt":
                         _bind_conv_uuid(binding, handover_tab["conv_uuid"])
                         state["session_bindings"][msg_session_key] = binding
                     matched_messages.append(msg)
@@ -6896,6 +6946,7 @@ def handle_web_bridge_poll(wb_path: str, tasks_root: str, payload: dict) -> dict
                         "msg_id": msg_id,
                         "session_key": msg_session_key,
                         "message": msg,
+                        "provider": provider,
                     })
                     continue
 
@@ -6907,7 +6958,7 @@ def handle_web_bridge_poll(wb_path: str, tasks_root: str, payload: dict) -> dict
                         or (not browser_instance_id and effective_poll_profile.lower().endswith(":default"))
                     )
                     if target_browser.lower() == default_browser.lower() and profile_matches:
-                        base_url = project_prefix if project_prefix else "https://chatgpt.com"
+                        base_url = _platform_base(msg, project_prefix)
                         model_slug = _model_to_url_slug(
                             str(msg.get("target_model") or binding.get("target_model") or "inherit"),
                             state.get("available_models"),
@@ -6927,6 +6978,7 @@ def handle_web_bridge_poll(wb_path: str, tasks_root: str, payload: dict) -> dict
                             "project_prefix": project_prefix,
                             "browser_profile": target_profile,
                             "message": msg,
+                        "provider": provider,
                         })
                 if msg_session_key:
                     claimed_sessions.add(msg_session_key)
@@ -6937,7 +6989,7 @@ def handle_web_bridge_poll(wb_path: str, tasks_root: str, payload: dict) -> dict
             if not target_conv_uuid and not binding.get("retired_uuids"):
                 nt_b = state["session_bindings"].get("__new_task__")
                 nt_conv = str(nt_b.get("conv_uuid") or "").strip() if isinstance(nt_b, dict) else ""
-                if nt_conv and not any(
+                if nt_conv and _platform(nt_b) == _platform(binding) and not any(
                     k != msg_session_key and k != "__new_task__" and isinstance(v, dict) and str(v.get("conv_uuid") or "").strip() == nt_conv
                     for k, v in state["session_bindings"].items()
                 ):
@@ -6948,7 +7000,7 @@ def handle_web_bridge_poll(wb_path: str, tasks_root: str, payload: dict) -> dict
             target_tab = None
             candidate_conv_tabs = []
             for pt in polled_tabs:
-                if pt.get("state_known") is False:
+                if _platform(pt) != provider or pt.get("state_known") is False:
                     continue
                 pt_uuid = pt["conv_uuid"]
                 if not pt_uuid:
@@ -7051,6 +7103,7 @@ def handle_web_bridge_poll(wb_path: str, tasks_root: str, payload: dict) -> dict
                     "msg_id": msg_id,
                     "session_key": msg_session_key,
                     "message": msg,
+                        "provider": provider,
                 })
             elif (
                 is_batch
@@ -7066,18 +7119,19 @@ def handle_web_bridge_poll(wb_path: str, tasks_root: str, payload: dict) -> dict
             ):
                 # Spec v4.1 ZeroDisturbHostLauncher: the browser is alive (it is polling) but its ChatGPT tab for
                 # this conversation was closed -> the extension re-opens /c/<uuid> as a background tab.
-                base_url = project_prefix if project_prefix else "https://chatgpt.com"
+                base_url = _platform_base(msg, project_prefix)
                 prof_qs = f"?relay_profile={urllib.parse.quote(target_profile)}" if target_profile else ""
                 msg["browser_tab_opened"] = True
                 msg["browser_tab_opened_at"] = now_iso
                 dispatches.append({
                     "open_new_tab": True,
-                    "handover_url": f"{base_url.rstrip('/')}/c/{target_conv_uuid}{prof_qs}",
+                    "handover_url": _platform_room_url(msg, target_conv_uuid, project_prefix) + (prof_qs.replace("&", "?", 1) if prof_qs else ""),
                     "msg_id": msg_id,
                     "session_key": msg_session_key,
                     "project_prefix": project_prefix,
                     "browser_profile": target_profile,
                     "message": msg,
+                        "provider": provider,
                 })
 
         pending_retire_actions = []
@@ -7201,14 +7255,14 @@ def cold_start_pending_hosts(wb_path: str, only_msg_id: str = "", tasks_root: st
                     rebuilt = _build_handover_prompt_from_task_id(s_key, tasks_root, user_text=original)
                     m["prompt"] = rebuilt
                     m["text"] = rebuilt
-            base = str(m.get("project_prefix") or "").strip().rstrip("/") or "https://chatgpt.com"
+            base = _platform_base(m, str(m.get("project_prefix") or "").strip()).rstrip("/")
             prof_qs = f"relay_profile={urllib.parse.quote(profile)}"
             if mode == "new_window_handover":
                 slug = _model_to_url_slug(str(m.get("target_model") or "inherit"), state.get("available_models"))
                 model_qs = f"&model={slug}" if slug else ""
                 url = f"{base}/?relay_handover=1&msg_id={m.get('id')}{model_qs}&{prof_qs}"
             else:
-                url = f"{base}/c/{conv}?{prof_qs}"
+                url = _platform_room_url(m, conv, str(m.get("project_prefix") or "")) + f"?{prof_qs}"
             m["cold_started_at"] = now_iso
             dirty = True
             jobs.append({"msg_id": m.get("id"), "url": url, "browser": browser, "profile": profile, "mode": mode})
@@ -7297,17 +7351,19 @@ def _enqueue_web_bridge_message(wb_path: str, payload: dict, now_iso: str, tasks
                 },
             )
         binding = _ensure_binding_entry(state["session_bindings"].get(session_key), explicit_profile or None, default_cfg=ar_cfg)
+        provider = _platform(payload if payload.get("provider") else binding)
+        binding["provider"] = provider
         if not conv_uuid and binding.get("conv_uuid"):
             conv_uuid = binding["conv_uuid"]
         if not conv_uuid and not binding.get("retired_uuids") and session_key and session_key != "__new_task__" and not is_new_task:
             for t_val in state.get("tabs", {}).values():
-                if isinstance(t_val, dict) and t_val.get("conv_uuid") and session_key in (t_val.get("page_hints") or []):
+                if isinstance(t_val, dict) and _platform(t_val) == provider and t_val.get("conv_uuid") and session_key in (t_val.get("page_hints") or []):
                     conv_uuid = str(t_val["conv_uuid"]).strip()
                     break
             if not conv_uuid:
                 nt_b = state["session_bindings"].get("__new_task__")
                 nt_conv = str(nt_b.get("conv_uuid") or "").strip() if isinstance(nt_b, dict) else ""
-                if nt_conv and not any(
+                if nt_conv and _platform(nt_b) == _platform(binding) and not any(
                     k != session_key and k != "__new_task__" and isinstance(v, dict) and str(v.get("conv_uuid") or "").strip() == nt_conv
                     for k, v in state["session_bindings"].items()
                 ):
@@ -7423,7 +7479,7 @@ def _enqueue_web_bridge_message(wb_path: str, payload: dict, now_iso: str, tasks
                 avail_models = list(state.get("available_models") or [])
                 q_slice = _build_session_queue_slice(state.get("queue"), session_key)
                 pioneer_id = str(existing_pioneer.get("id") or "")
-                base_url = project_prefix if project_prefix else "https://chatgpt.com"
+                base_url = _platform_base(binding, project_prefix)
                 model_slug = _model_to_url_slug(target_model, avail_models)
                 model_qs = f"&model={model_slug}" if model_slug else ""
                 prof_qs = f"&relay_profile={urllib.parse.quote(browser_profile)}" if browser_profile else ""
@@ -7497,6 +7553,7 @@ def _enqueue_web_bridge_message(wb_path: str, payload: dict, now_iso: str, tasks
         new_stage = "HandoverSent" if mode == "new_window_handover" else "WakeupSent"
         msg_entry = {
             "id": msg_id,
+            "provider": provider,
             "app_initiated": bool(is_new_task),
             "manual_send": True,
             "is_auto_wakeup": False,
@@ -7597,7 +7654,7 @@ def _enqueue_web_bridge_message(wb_path: str, payload: dict, now_iso: str, tasks
 
     handover_url = ""
     if mode == "new_window_handover":
-        base_url = project_prefix if project_prefix else "https://chatgpt.com"
+        base_url = _platform_base(binding, project_prefix)
         model_slug = _model_to_url_slug(target_model, avail_models)
         model_qs = f"&model={model_slug}" if model_slug else ""
         prof_qs = f"&relay_profile={urllib.parse.quote(browser_profile)}" if browser_profile else ""
@@ -7768,7 +7825,7 @@ def _open_session_web_tab(wb_path: str, payload: dict) -> dict:
             latest_handover_url = ""
             for m in session_msgs:
                 if m.get("mode") == "new_window_handover" and m.get("status") in ("pending", "claimed") and not conv_uuid:
-                    base_u = (project_prefix or "https://chatgpt.com").rstrip("/")
+                    base_u = _platform_base(binding, project_prefix).rstrip("/")
                     prof_qs = f"&relay_profile={urllib.parse.quote(browser_profile)}" if browser_profile else ""
                     latest_handover_url = f"{base_u}/?relay_handover=1&msg_id={m.get('id')}{prof_qs}"
                     break
@@ -7782,7 +7839,7 @@ def _open_session_web_tab(wb_path: str, payload: dict) -> dict:
             tier3_tab = None
 
             for tid_key, t in list(state["tabs"].items()):
-                if not isinstance(t, dict):
+                if not isinstance(t, dict) or _platform(t) != _platform(binding):
                     continue
                 t_prof = str(t.get("browser_profile") or "").strip()
                 t_browser = str(t.get("browser") or "").strip()
@@ -7862,8 +7919,8 @@ def _open_session_web_tab(wb_path: str, payload: dict) -> dict:
                 state["session_bindings"][session_key] = binding
                 state_changed = True
 
-            base_url = project_prefix if project_prefix else "https://chatgpt.com"
-            target_url = f"{base_url.rstrip('/')}/c/{conv_uuid}" if conv_uuid else (latest_handover_url or f"{base_url.rstrip('/')}/")
+            base_url = _platform_base(binding, project_prefix)
+            target_url = _platform_room_url(binding, conv_uuid, project_prefix) if conv_uuid else (latest_handover_url or _platform_room_url(binding, "", project_prefix))
             action_taken = "OpenedBrowserUrl"
             target_tab_id = ""
             tab_title = ""
@@ -8384,6 +8441,8 @@ def handle_web_bridge_ack_deliver(wb_path: str, payload: dict, now_iso: str = ""
         for m in state["queue"]:
             if not isinstance(m, dict) or m.get("id") != msg_id:
                 continue
+            if _platform(payload) != _platform(m):
+                break
             if m.get("status") == "delivered":
                 acked = True  # idempotent repeat ACK
                 break
@@ -8533,7 +8592,7 @@ class ShieldHandler(BaseHTTPRequestHandler):
         if not origin:
             self.send_header("Access-Control-Allow-Origin", "http://127.0.0.1")
         elif (
-            origin in ("https://chatgpt.com", "https://chat.openai.com", "app://-", "http://127.0.0.1", "http://localhost")
+            origin in ("https://chatgpt.com", "https://chat.openai.com", "https://gemini.google.com", "https://claude.ai", "app://-", "http://127.0.0.1", "http://localhost")
             or origin.startswith("chrome-extension://")
             or origin.startswith("extension://")
             or origin.startswith("http://127.0.0.1:")
@@ -8637,7 +8696,7 @@ class ShieldHandler(BaseHTTPRequestHandler):
         wb_path = getattr(self.server, "web_bridge_path", "")
         now_iso = _utc_now_iso()
 
-        if self.path.startswith("/web-bridge/poll"):
+        if self.path.startswith(("/web-bridge/poll", "/web-bridge/heartbeat")):
             res = handle_web_bridge_poll(wb_path, self.server.tasks_root, payload)
             self._send_json(200, res)
             return

@@ -6,6 +6,14 @@
   }
   window.__RELAYSTUDIO_BRIDGE_CONTENT_INSTALLED__ = true;
 
+  const host = new URL(window.location.href).hostname;
+  const PROVIDER = host === 'gemini.google.com' ? 'gemini' : host === 'claude.ai' ? 'claude' : 'chatgpt';
+  if (!['gemini.google.com', 'claude.ai', 'chatgpt.com', 'chat.openai.com'].includes(host)) return;
+  const SITE = {
+    chatgpt: {room: /\/c\/([0-9a-fA-F-]{36})(?:[/?#]|$)/, user: '[data-message-author-role="user"]'},
+    gemini: {room: /\/app\/([a-zA-Z0-9_-]+)(?:[/?#]|$)/, user: 'user-query, [data-testid="user-query"]', composer: 'rich-textarea [contenteditable="true"]', send: 'button.send-button', stop: 'button[aria-label*="Stop response"], button[aria-label*="停止回答"]'},
+    claude: {room: /\/chat\/([a-zA-Z0-9_-]+)(?:[/?#]|$)/, user: '[data-testid="user-message"]', composer: 'div.ProseMirror[contenteditable="true"]', send: 'button[aria-label="Send message"]', stop: 'button[aria-label="Stop response"], button[aria-label="停止响应"]'},
+  }[PROVIDER];
   const BRIDGE_BASE = "http://127.0.0.1:8766";
   const POLL_INTERVAL_MS = 2200;
   const MODELS_CACHE_KEY = "__relaystudio_models_cache__";
@@ -74,7 +82,7 @@
   let shuttleConnected = false;
 
   function getConvUuid() {
-    const m = window.location.pathname.match(/\/c\/([0-9a-fA-F-]{36})/);
+    const m = window.location.pathname.match(SITE.room);
     return m ? m[1] : "";
   }
 
@@ -208,6 +216,10 @@
   }
 
   function findActiveStopButton() {
+    if (PROVIDER !== 'chatgpt') {
+      const candidates = document.querySelectorAll(SITE.stop);
+      return Array.from(candidates).find(btn => !btn.disabled && isVisibleDomElement(btn)) || null;
+    }
     const composer = findComposerElement();
     const formScope =
       (composer && typeof composer.closest === "function" && composer.closest("form")) ||
@@ -707,6 +719,7 @@
 
   function findComposerElement() {
     const selectors = [
+      ...(SITE.composer ? [SITE.composer] : []),
       "#prompt-textarea",
       'div#prompt-textarea[contenteditable="true"]',
       'div.ProseMirror[contenteditable="true"]',
@@ -723,7 +736,7 @@
           ? Array.from(document.querySelectorAll(sel))
           : [];
       for (const node of nodes) {
-        if (node && node.offsetParent !== null) {
+        if (node && node.offsetParent !== null && isVisibleDomElement(node)) {
           return node;
         }
         if (node && !fallbackEl) {
@@ -731,18 +744,19 @@
         }
       }
       const single = document.querySelector(sel);
-      if (single && single.offsetParent !== null) {
+      if (single && single.offsetParent !== null && isVisibleDomElement(single)) {
         return single;
       }
       if (single && !fallbackEl) {
         fallbackEl = single;
       }
     }
-    return fallbackEl;
+    return PROVIDER === "chatgpt" ? fallbackEl : null;
   }
 
   function findSendButton() {
     const selectors = [
+      ...(SITE.send ? [SITE.send] : []),
       'button[data-testid="send-button"]',
       'button[data-testid*="send"]',
       'button[aria-label*="Send prompt"]',
@@ -754,7 +768,7 @@
     for (const sel of selectors) {
       const nodes = document.querySelectorAll(sel);
       for (const btn of nodes) {
-        if (btn && !btn.disabled && btn.getAttribute("aria-disabled") !== "true") {
+        if (btn && !btn.disabled && isVisibleDomElement(btn) && btn.getAttribute("aria-disabled") !== "true") {
           return btn;
         }
       }
@@ -908,6 +922,8 @@
 
   async function fillAndSendMessage(msg) {
     if (!msg || !msg.text) return false;
+    if (msg.provider && String(msg.provider).toLowerCase().replace('openai', 'chatgpt') !== PROVIDER) return {ok:false,retry_safe:true,reason:'provider_mismatch'};
+    const priorUserNodes = new Set(Array.from(document.querySelectorAll(SITE.user)));
     const msgId = String(msg.id || "");
     if (msgId && deliveredMsgIds.has(msgId)) {
       return { ok: true, model_switch_skipped: false };
@@ -974,7 +990,7 @@
       document.documentElement.dataset.relayDispatchStatus = "waiting";
 
       // Mechanism 2: Set MAIN-world fetch JSON body overrides without any DOM menu clicking!
-      setOutgoingFetchOverrides(
+      if (PROVIDER === 'chatgpt') setOutgoingFetchOverrides(
         msg.target_model || msg.model,
         msg.reasoning_effort || msg.effort
       );
@@ -1050,7 +1066,18 @@
         sent = true;
       }
 
-      if (sent && steerMode) {
+      if (sent && PROVIDER !== 'chatgpt') {
+        // Third-party adapters confirm a NEW rendered user turn plus consumed composer and a real room.
+        // Merely clicking Send or clearing the editor is not a delivery receipt.
+        const deadline = Date.now() + 25000;
+        acceptanceOutcome = 'unconfirmed';
+        for (let attempt = 0; attempt < 209 && Date.now() < deadline; attempt++) {
+          const nodes = Array.from(document.querySelectorAll(SITE.user));
+          const found = nodes.some(node => !priorUserNodes.has(node) && String(node.innerText || node.textContent || '').trim() === lastInjectedText);
+          if (found && nodes.length > priorUserNodes.size && !readComposerCleanText() && getConvUuid()) {acceptanceOutcome = 'accepted'; break;}
+          await sleep(120);
+        }
+      } else if (sent && steerMode) {
         // Live steering: the page may take the text without a classic conversation POST we can correlate. The clock for the
         // judgement starts when the text is in the composer and the send was triggered (never from the panel click).
         acceptanceOutcome = await waitForSteerAcceptance(dispatchId, lastInjectedText);
@@ -1161,6 +1188,7 @@
     const hasComposer = Boolean(findComposerElement());
     return {
       tab_id: TAB_ID,
+      provider: PROVIDER,
       conv_uuid: convUuid,
       project_prefix: projectPrefix,
       url: window.location.href,
@@ -1220,6 +1248,7 @@
             uncertain_delivery: uncertain,
             retry_safe: retrySafe,
             reason,
+            provider: PROVIDER,
             conv_uuid: getConvUuid(),
             model_switch_skipped: skipped,
           });
@@ -1304,7 +1333,8 @@
             body: JSON.stringify({
               msg_id: String(msg.id),
               tab_id: localState.tab_id,
-              conv_uuid: getConvUuid(),
+              provider: PROVIDER,
+            conv_uuid: getConvUuid(),
             }),
           });
         }

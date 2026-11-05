@@ -6,7 +6,7 @@ const vm = require('node:vm');
 
 const background = fs.readFileSync(path.join(__dirname, '..', 'browser-bridge', 'background.js'), 'utf8');
 
-async function runShuttleScenario(responses) {
+async function runShuttleScenario(responses, provider) {
   const sent = [];
   const acks = [];
   const updates = [];
@@ -44,7 +44,7 @@ async function runShuttleScenario(responses) {
   });
   vm.runInContext(background, ctx, {filename:'background.js'});
   await ctx.handleShuttleDispatches([{
-    tab_id:'42', message:{id:'local-only-ack-contract',text:'fixture'}
+    tab_id:'42', provider, message:{id:'local-only-ack-contract',text:'fixture',provider}
   }]);
   for (let i=0; scheduled.length && i<30; i++) {
     const {fn}=scheduled.shift();
@@ -56,6 +56,13 @@ async function runShuttleScenario(responses) {
 }
 
 (async function main() {
+  for (const provider of ['gemini', 'claude']) {
+    const r = await runShuttleScenario([{ok:true,provider,conv_uuid:'native-room'}], provider);
+    assert.equal(r.acks[0].provider,provider,'receipt preserves platform identity');
+    const wrong = await runShuttleScenario([{ok:true,provider:provider === 'claude' ? 'gemini' : 'claude',conv_uuid:'native-room'}],provider);
+    assert.equal(wrong.acks.length,0,'wrong platform receipt is never ACKed');
+  }
+
   const pending = await runShuttleScenario([{ok:false, delivered:false, uncertain_delivery:true}]);
   assert.equal(pending.sent.length,1,'pending POST must not trigger a second click');
   assert.equal(pending.acks.length,0,'pending POST must not trigger ack-deliver');
