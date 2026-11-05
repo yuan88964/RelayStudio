@@ -23,3 +23,9 @@
 ## Attempt Log & Quarantine Status
 
 - (If a subagent hits Two-Strike-Stop or Quarantined status, record: [1] approach tried, [2] falsifying error/evidence, [3] constraint for the next agent or user decision needed.)
+
+## Integration verification repair
+
+- Final integration default PS run exposed legacy snapshots with AvailableModels but no availability metadata being interpreted as disconnected. The earlier 265-pass result predated the final resolver changes; it did not cover that candidate.
+- 1b535ef preserves legacy unknown(null) vs explicit disconnected(empty array), without changing the existing assertion. Same default PS file then passed265; model/effort suite32 passed.
+- 5209b98 distinguishes those states in the render cache signature; sequential unknown-to-disconnected regression passes, model/effort suite33 passed. Both Standards and Spec review the committed repair.
