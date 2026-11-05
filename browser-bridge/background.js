@@ -77,7 +77,7 @@ const injectedTabIds = new Set();
 const openedHandoverMsgIds = new Set();
 const completedRetireIds = new Set();
 const inFlightDispatchTabs = new Set();
-let cachedAvailableModels = [];
+const cachedModelsByProvider = {chatgpt: [], gemini: [], claude: []};
 let shuttleBusy = false;
 
 const PLATFORM_URLS = ['https://chatgpt.com/*', 'https://chat.openai.com/*', 'https://gemini.google.com/*', 'https://claude.ai/*'];
@@ -112,8 +112,9 @@ function upsertTabStateCache(tabIdStr, state, tabMeta) {
   const s = state || {};
   const meta = tabMeta || {};
   const tabModels = Array.isArray(s.available_models) ? s.available_models : [];
-  if (tabModels.length > 0 && (providerFromUrl(meta.url || s.url) || s.provider || "chatgpt") === "chatgpt") {
-    cachedAvailableModels = tabModels;
+  const provider = providerFromUrl(meta.url || s.url) || s.provider || "chatgpt";
+  if (tabModels.length > 0 && Object.hasOwn(cachedModelsByProvider, provider)) {
+    cachedModelsByProvider[provider] = tabModels;
   }
   const sseActive = Boolean(s.sse_active);
   const domGenerating = Boolean(s.is_generating);
@@ -143,7 +144,7 @@ function upsertTabStateCache(tabIdStr, state, tabMeta) {
     ui_error_text: String(s.ui_error_text || ""),
     current_model: String(s.current_model || ""),
     current_effort: String(s.current_effort || ""),
-    available_models: tabModels.length > 0 ? tabModels : (providerFromUrl(meta.url || s.url) === "chatgpt" ? cachedAvailableModels : []),
+    available_models: tabModels.length > 0 ? tabModels : (cachedModelsByProvider[provider] || []),
     updated_at: Date.now(),
   };
   tabStateCache.set(tabIdStr, entry);
@@ -281,7 +282,7 @@ async function collectOpenChatGptTabs() {
     const models =
       Array.isArray(safeCached.available_models) && safeCached.available_models.length > 0
         ? safeCached.available_models
-        : (providerFromUrl(url) === "chatgpt" ? cachedAvailableModels : []);
+        : (cachedModelsByProvider[providerFromUrl(url)] || []);
     const sseActive = stateKnown ? Boolean(safeCached.sse_active) : false;
     const isGenerating = stateKnown ? Boolean(safeCached.is_generating || sseActive) : false;
     payloads.push({
@@ -592,7 +593,8 @@ async function runShuttleTick() {
         browser_profile: effectiveBrowserProfile,
         browser_instance_id: browserInstanceId,
         is_codex_in_app_browser: IS_CODEX_IN_APP,
-        available_models: cachedAvailableModels,
+        available_models: cachedModelsByProvider.chatgpt,
+        available_models_by_provider: cachedModelsByProvider,
         tabs: tabsPayload,
       }),
     });

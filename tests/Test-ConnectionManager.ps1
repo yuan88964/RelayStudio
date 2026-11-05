@@ -1,4 +1,4 @@
-﻿param([string]$EvidenceRoot = (Join-Path ([IO.Path]::GetTempPath()) 'relaystudio-test-outputs'), [switch]$PublicTunnelOnly)
+﻿param([string]$EvidenceRoot = (Join-Path ([IO.Path]::GetTempPath()) 'relaystudio-test-outputs'), [switch]$PublicTunnelOnly, [switch]$ModelCatalogOnly)
 
 $ErrorActionPreference='Stop'
 
@@ -21,6 +21,16 @@ function Assert-Throws([scriptblock]$Action,[string]$Message) { $thrown=$false;t
 Assert ((Get-WebRoomUrl -Record ([pscustomobject]@{provider='gemini'}) -Room 'abc123') -eq 'https://gemini.google.com/app/abc123') 'Gemini native room route'
 Assert ((Get-WebRoomUrl -Record ([pscustomobject]@{provider='claude'}) -Room 'aaa-bbb') -eq 'https://claude.ai/chat/aaa-bbb') 'Claude room route'
 Assert ((Get-WebRoomUrl -Record ([pscustomobject]@{provider='claude'})) -eq 'https://claude.ai/new') 'Claude new conversation route'
+
+if ($ModelCatalogOnly) {
+    $ctx = New-ConnectionContext -DataRoot (Join-Path $testRoot 'catalog') -Isolated
+    Set-TaskComposerConfig -Context $ctx -SessionKey 'switch_test' -Provider 'chatgpt' -ConvUuid 'old-room' -TabId 'old-tab' -ProjectPrefix 'https://chatgpt.com/g/old' | Out-Null
+    $result = Set-TaskComposerConfig -Context $ctx -SessionKey 'switch_test' -Provider 'gemini' -TargetModel 'inherit'
+    Assert ($result.binding.provider -eq 'gemini') 'offline provider selection persists'
+    Assert (-not $result.binding.conv_uuid -and -not $result.binding.tab_id -and -not $result.binding.project_prefix) 'offline platform switch clears previous room tab and project'
+    Write-Output "PASS model catalog: $script:passed"
+    return
+}
 
 if ($PublicTunnelOnly) {
     $ctx = New-ConnectionContext -DataRoot (Join-Path $testRoot 'public') -Isolated

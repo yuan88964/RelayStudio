@@ -1915,6 +1915,16 @@ function Invoke-PurgeAllArchivedSessions {
     return (Clear-AllArchivedSessions -Context $Context -ArchivedSessions $ArchivedSessions -PhysicalPurge -Settings $Settings)
 }
 
+function Get-ProviderAvailableModels {
+    param($State, [string]$Provider = 'chatgpt')
+    if ($State -and $State.PSObject.Properties['available_models_by_provider'] -and $State.available_models_by_provider) {
+        if ($State.available_models_by_provider.PSObject.Properties[$Provider]) { return @($State.available_models_by_provider.$Provider) }
+        return @()
+    }
+    if ($Provider -eq 'chatgpt' -and $State) { return @($State.available_models) }
+    return @()
+}
+
 function Get-WebRoomProvider {
     param($Record)
     if ($Record -and $Record.PSObject.Properties['provider'] -and $Record.provider) {
@@ -2792,6 +2802,7 @@ function Set-TaskComposerConfig {
         [string]$TargetMode = '',
         [string]$BrowserProfile = '',
         [string]$TargetModel = '',
+        [string]$Provider = '',
         [string]$ReasoningEffort = '',
         $AutoResendEnabled = $null,
         [int]$StallSeconds = 0,
@@ -2810,6 +2821,7 @@ function Set-TaskComposerConfig {
     }
     if ($TargetMode) { $payload['target_mode'] = $TargetMode }
     if ($BrowserProfile) { $payload['browser_profile'] = $BrowserProfile }
+    if ($Provider) { $payload['provider'] = $Provider }
     if ($TargetModel) { $payload['target_model'] = $TargetModel }
     if ($ReasoningEffort) { $payload['reasoning_effort'] = $ReasoningEffort }
     if ($null -ne $AutoResendEnabled) { $payload['auto_resend_enabled'] = [bool]$AutoResendEnabled }
@@ -2969,6 +2981,14 @@ function Set-TaskComposerConfig {
     }
     $state.breakers | Add-Member -NotePropertyName $SessionKey -NotePropertyValue $curBrk -Force
 
+    if ($Provider -and $state.session_bindings.PSObject.Properties[$SessionKey]) {
+        if ($existing -and (Get-WebRoomProvider $existing) -ne $Provider) {
+            foreach ($field in @('conv_uuid', 'tab_id', 'project_prefix')) { $newBinding | Add-Member $field '' -Force }
+            if ($oldUuid -and $retiredList -notcontains $oldUuid) { $retiredList.Add($oldUuid) }
+            $newBinding | Add-Member retired_uuids @($retiredList) -Force
+        }
+        $newBinding | Add-Member provider $Provider -Force
+    }
     Save-WebBridgeState $Context $state
     return [pscustomobject]@{
         ok = $true
@@ -3402,7 +3422,7 @@ function Send-WebBridgeMessage {
 
     $modelSlug = ''
     if ($effModel -and $effModel -notin @('inherit', 'auto') -and $effModel -notmatch '网页当前|跟随') {
-        $availModels = @(if ($state -and $state.PSObject.Properties['available_models'] -and $state.available_models) { $state.available_models })
+        $availModels = @(Get-ProviderAvailableModels $state (Get-WebRoomProvider $bEntry))
         foreach ($am in $availModels) {
             if ($am -and $am.PSObject.Properties['slug'] -and $am.slug) {
                 $amSlug = [string]$am.slug
@@ -4371,7 +4391,7 @@ function Add-TaskComposerMetadataToSession {
         if (-not $webModel -and $bProf) {
             foreach ($tp in $BridgeState.tabs.PSObject.Properties) {
                 $tv = $tp.Value
-                if ($tv -and $tv.PSObject.Properties['browser_profile'] -and [string]$tv.browser_profile -eq $bProf -and $tv.PSObject.Properties['current_model'] -and $tv.current_model) {
+                if ($tv -and (Get-WebRoomProvider $tv) -eq (Get-WebRoomProvider $bEntry) -and $tv.PSObject.Properties['browser_profile'] -and [string]$tv.browser_profile -eq $bProf -and $tv.PSObject.Properties['current_model'] -and $tv.current_model) {
                     $webModel = [string]$tv.current_model
                     if (-not $webEffort -and $tv.PSObject.Properties['current_effort'] -and $tv.current_effort) {
                         $webEffort = [string]$tv.current_effort
@@ -4383,7 +4403,7 @@ function Add-TaskComposerMetadataToSession {
         if (-not $webModel) {
             foreach ($tp in $BridgeState.tabs.PSObject.Properties) {
                 $tv = $tp.Value
-                if ($tv -and $tv.PSObject.Properties['current_model'] -and $tv.current_model) {
+                if ($tv -and (Get-WebRoomProvider $tv) -eq (Get-WebRoomProvider $bEntry) -and $tv.PSObject.Properties['current_model'] -and $tv.current_model) {
                     $webModel = [string]$tv.current_model
                     if (-not $webEffort -and $tv.PSObject.Properties['current_effort'] -and $tv.current_effort) {
                         $webEffort = [string]$tv.current_effort
@@ -4394,7 +4414,8 @@ function Add-TaskComposerMetadataToSession {
         }
     }
     $profAvailModels = @(if ($bProf -and $BridgeState -and $BridgeState.PSObject.Properties['available_models_by_profile'] -and $BridgeState.available_models_by_profile -and $BridgeState.available_models_by_profile.PSObject.Properties[$bProf]) { $BridgeState.available_models_by_profile.$bProf })
-    $availModels = @(if ($profAvailModels.Count -gt 0) { $profAvailModels } elseif ($BridgeState -and $BridgeState.PSObject.Properties['available_models'] -and $BridgeState.available_models) { $BridgeState.available_models })
+    $availModels = @(Get-ProviderAvailableModels $BridgeState (Get-WebRoomProvider $bEntry))
+    $SessionObj | Add-Member AvailableModelsByProvider $(if ($BridgeState -and $BridgeState.PSObject.Properties['available_models_by_provider']) { $BridgeState.available_models_by_provider } else { $null }) -Force
 
     $SessionObj | Add-Member -NotePropertyName 'TargetMode' -NotePropertyValue $tMode -Force
     $SessionObj | Add-Member -NotePropertyName 'BrowserProfile' -NotePropertyValue $bProf -Force

@@ -162,3 +162,36 @@ Assert-Case (($offlineContents -join '|') -match '⚪ OpenAI · 主力隧道') '
 $script:profilesState = $null
 
 Write-Output ('{"result":"PASS","assertions":' + $script:passed + ',"network":"OFFLINE_FAKE_ONLY","production_config_written":false}')
+
+$multi = Make-State 'multi'
+$multi | Add-Member ProfilesState ([pscustomobject]@{EnabledPlatforms=@('openai','gemini','claude');Profiles=@()})
+$multi | Add-Member AvailableModelsByProvider ([pscustomobject]@{chatgpt=$catalog;gemini=@([pscustomobject]@{slug='gemini-pro';title='Gemini Pro';efforts=@()});claude=@()})
+Sync-Test $multi $catalog 'inherit' 'inherit'
+Assert-Case (@(Get-Tags $multi.ModelCombo) -contains 'gemini-pro') 'Gemini group exposes its reported model'
+Assert-Case (@($multi.ModelCombo.Items | Where-Object {$_.ToolTip -eq 'claude' -and $_.Tag -eq 'inherit'}).Count -eq 1) 'Disconnected Claude has exactly one default'
+
+$multi | Add-Member ConnectedProviders @('chatgpt')
+Sync-Test $multi $catalog 'inherit' 'inherit'
+Assert-Case (@(Get-Tags $multi.ModelCombo) -notcontains 'gemini-pro') 'Disconnected Gemini does not expose historical cached model'
+
+$multi.ConnectedProviders = @()
+Sync-Test $multi $catalog 'inherit' 'inherit'
+Assert-Case (@(Get-Tags $multi.ModelCombo) -notcontains 'gpt-6-thinking') 'All-disconnected platform set also hides cached OpenAI models'
+
+$helperStart = $source.IndexOf('function Resolve-ComposerCatalogState(')
+$helperEnd = $source.IndexOf('function Build-PlanBComposerPod(', $helperStart)
+. ([scriptblock]::Create($source.Substring($helperStart, $helperEnd - $helperStart)))
+function Get-WebRoomProvider($Record) { if ($Record.provider) { $Record.provider } else { 'chatgpt' } }
+$raw = [pscustomobject]@{available_models_by_provider=$multi.AvailableModelsByProvider;tabs=[pscustomobject]@{fresh=[pscustomobject]@{provider='gemini';last_seen_at=[DateTimeOffset]::UtcNow.ToString('o')};stale=[pscustomobject]@{provider='claude';last_seen_at=[DateTimeOffset]::UtcNow.AddSeconds(-30).ToString('o')}}}
+$resolved = Resolve-ComposerCatalogState $null $raw
+Assert-Case ($resolved.connected_providers -contains 'gemini' -and $resolved.connected_providers -notcontains 'claude') 'Launchpad production extraction derives fresh platform availability from raw tabs'
+$session = [pscustomobject]@{AvailableModelsByProvider=$multi.AvailableModelsByProvider;ConnectedProviders=@('claude')}
+$resolvedSession = Resolve-ComposerCatalogState $session $null
+Assert-Case ($resolvedSession.connected_providers -contains 'claude' -and $resolvedSession.available_models_by_provider.gemini.Count -eq 1) 'Task production extraction uses snapshot session model and availability metadata'
+
+$productionState = Make-State 'production-shaped'
+$productionState | Add-Member ProfilesState ([pscustomobject]@{EnabledPlatforms=@('openai','gemini','claude');Profiles=@()})
+$productionState | Add-Member AvailableModelsByProvider $resolved.available_models_by_provider
+$productionState | Add-Member ConnectedProviders @($resolved.connected_providers)
+Sync-Test $productionState $catalog 'inherit' 'inherit'
+Assert-Case (@(Get-Tags $productionState.ModelCombo) -contains 'gemini-pro') 'Production extracted and constructed connected Gemini keeps its model visible'

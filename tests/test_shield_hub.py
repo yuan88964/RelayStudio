@@ -218,6 +218,48 @@ class ShieldHubSeamTests(unittest.TestCase):
         with open(os.path.join(self.tasks_root, f"{task_id}.json"), "w", encoding="utf-8") as fh:
             json.dump(doc, fh, ensure_ascii=False)
 
+    def test_platform_catalogs_are_isolated_in_snapshot(self):
+        for provider, url, slug in [
+            ("chatgpt", "https://chatgpt.com/c/11111111-1111-4111-8111-111111111111", "openai-observed"),
+            ("gemini", "https://gemini.google.com/app/abcd1234", "gemini-observed"),
+            ("claude", "https://claude.ai/chat/22222222-2222-4222-8222-222222222222", "claude-observed"),
+        ]:
+            response = self._post_json("/web-bridge/poll", {
+                "browser": "Chrome", "browser_profile": "Chrome:Shared",
+                "tabs": [{"tab_id": provider, "provider": provider, "url": url,
+                          "available_models": [{"slug": slug, "title": slug, "efforts": []}]}],
+            })
+            self.assertTrue(response["ok"])
+        self._post_json("/studio/action", {"action": "set_task_composer_config", "session_key": "__new_task__", "provider": "gemini", "target_model": "gemini-observed"})
+        queued = self._post_json("/studio/action", {"action": "enqueue_message", "session_key": "__new_task__", "user_text": "hello"})
+        self.assertEqual(queued["message"]["provider"], "gemini")
+        self.assertTrue(queued["handover_url"].startswith("https://gemini.google.com/app/"))
+        task_id = queued["message"]["session_key"]
+        self._post_json("/studio/action", {"action": "bind_session", "session_key": task_id, "provider": "gemini", "conv_uuid": "abcd1234", "tab_id": "gemini"})
+        switched = self._post_json("/studio/action", {"action": "set_task_composer_config", "session_key": task_id, "provider": "claude"})
+        self.assertEqual(switched["binding"]["conv_uuid"], "")
+        self.assertEqual(switched["binding"]["tab_id"], "")
+        bridge = self._get_json("/studio/snapshot")["web_bridge"]
+        catalogs = bridge["available_models_by_provider"]
+        self.assertEqual([m["slug"] for m in catalogs["chatgpt"]], ["openai-observed"])
+        self.assertEqual([m["slug"] for m in catalogs["gemini"]], ["gemini-observed"])
+        self.assertEqual([m["slug"] for m in catalogs["claude"]], ["claude-observed"])
+        self.assertEqual(bridge["AvailableModels"], catalogs["chatgpt"])
+        # Fixture ages the Gemini probe; snapshot must hide its persisted catalog.
+        with open(self.wb_state_path, encoding="utf-8") as f:
+            state = json.load(f)
+        state["tabs"]["gemini"]["last_seen_at"] = "2000-01-01T00:00:00Z"
+        with open(self.wb_state_path, "w", encoding="utf-8") as f:
+            json.dump(state, f)
+        snapshot = self._get_json("/studio/snapshot")
+        task_view = next(session for session in snapshot["sessions"] if session["SessionKey"] == task_id)
+        self.assertEqual(task_view["AvailableModelsByProvider"]["gemini"], [])
+        self.assertIn("claude", task_view["ConnectedProviders"])
+        disconnected = snapshot["web_bridge"]
+        self.assertEqual(disconnected["available_models_by_provider"]["gemini"], [])
+        self.assertNotIn("gemini", disconnected["connected_providers"])
+        self.assertEqual(disconnected["available_models_by_provider"]["claude"][0]["slug"], "claude-observed")
+
     def test_t1_anti_duplicate_task_and_context_injection(self):
         self._write_task("tsk_19283093310b828b", "ProjectAlpha C4 三层重构：工单 06–21")
 
