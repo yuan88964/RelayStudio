@@ -39,7 +39,7 @@ class MockUpstreamHandler(BaseHTTPRequestHandler):
         tool_name = params.get("name", "")
         args = params.get("arguments") or {}
 
-        self.server.calls.append({"method": method, "tool": tool_name, "args": args})
+        self.server.calls.append({"method": method, "tool": tool_name, "args": args, "accept": self.headers.get("Accept", "")})
 
         if method == "tools/list":
             resp_obj = {
@@ -1699,6 +1699,183 @@ eval(hookCode);
             with urllib.request.urlopen(req, timeout=3) as resp:
                 self.assertIsNone(resp.headers.get("Access-Control-Allow-Origin"),
                                   f"Untrusted origin {blocked_origin} must NOT receive Access-Control-Allow-Origin")
+
+    def test_public_mcp_oauth21_handshake_and_head_probe(self):
+        import base64
+        import hashlib
+        import urllib.error
+        import urllib.parse
+
+        base = f"http://127.0.0.1:{self.shield_port}"
+        tunnel_host = "choir-examined-clause-speech.trycloudflare.com"
+        fwd_headers = {
+            "X-Forwarded-Proto": "https",
+            "X-Forwarded-Host": tunnel_host,
+            "User-Agent": "Google",
+        }
+
+        # 1. HEAD /mcp without Authorization must return 401 with WWW-Authenticate pointing to resource_metadata
+        head_req = urllib.request.Request(f"{base}/mcp", headers=fwd_headers, method="HEAD")
+        with self.assertRaises(urllib.error.HTTPError) as head_err:
+            urllib.request.urlopen(head_req, timeout=3)
+        self.assertEqual(head_err.exception.code, 401)
+        www_auth = head_err.exception.headers.get("WWW-Authenticate", "")
+        self.assertIn(f'resource_metadata="https://{tunnel_host}/.well-known/oauth-protected-resource"', www_auth)
+        head_err.exception.close()
+
+        # 2. Protected resource metadata discovery (both /.well-known/oauth-protected-resource/mcp and root)
+        for pr_path in ("/.well-known/oauth-protected-resource/mcp", "/.well-known/oauth-protected-resource"):
+            pr_req = urllib.request.Request(f"{base}{pr_path}", headers=fwd_headers, method="GET")
+            with urllib.request.urlopen(pr_req, timeout=3) as pr_resp:
+                self.assertEqual(pr_resp.status, 200)
+                pr_data = json.loads(pr_resp.read().decode("utf-8"))
+                self.assertEqual(pr_data["resource"], f"https://{tunnel_host}/mcp")
+                self.assertEqual(pr_data["authorization_servers"], [f"https://{tunnel_host}"])
+
+        # 3. Authorization server metadata discovery (RFC 8414)
+        for as_path in ("/.well-known/oauth-authorization-server", "/.well-known/oauth-authorization-server/mcp"):
+            as_req = urllib.request.Request(f"{base}{as_path}", headers=fwd_headers, method="GET")
+            with urllib.request.urlopen(as_req, timeout=3) as as_resp:
+                self.assertEqual(as_resp.status, 200)
+                as_data = json.loads(as_resp.read().decode("utf-8"))
+                self.assertEqual(as_data["issuer"], f"https://{tunnel_host}")
+                self.assertEqual(as_data["authorization_endpoint"], f"https://{tunnel_host}/oauth/authorize")
+                self.assertEqual(as_data["token_endpoint"], f"https://{tunnel_host}/oauth/token")
+                self.assertEqual(as_data["registration_endpoint"], f"https://{tunnel_host}/oauth/register")
+                self.assertIn("S256", as_data["code_challenge_methods_supported"])
+
+        # 4. Dynamic Client Registration (RFC 7591 POST /oauth/register)
+        redirect_uri = "https://oauth-redirect.googleusercontent.com/r/user_bound_custom-mcp-675498804-choir_examined_clause_speech_trycloudflare_com"
+        reg_body = json.dumps({
+            "client_name": "Google Gemini Connector",
+            "redirect_uris": [redirect_uri],
+            "grant_types": ["authorization_code", "refresh_token"],
+            "response_types": ["code"],
+        }).encode("utf-8")
+        reg_req = urllib.request.Request(
+            f"{base}/oauth/register",
+            data=reg_body,
+            headers={**fwd_headers, "Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(reg_req, timeout=3) as reg_resp:
+            self.assertEqual(reg_resp.status, 201)
+            reg_data = json.loads(reg_resp.read().decode("utf-8"))
+            client_id = reg_data["client_id"]
+            client_secret = reg_data["client_secret"]
+            self.assertEqual(reg_data["redirect_uris"], [redirect_uri])
+
+        # 5. GET /oauth/authorize with PKCE S256 and a 1200-character state parameter (BerriAI/litellm#46414 regression guard)
+        code_verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk_relaystudio_pkce_verifier"
+        code_challenge = base64.urlsafe_b64encode(hashlib.sha256(code_verifier.encode("ascii")).digest()).rstrip(b"=").decode("ascii")
+        long_state = "gemini_state_" + ("A1b2C3d4_-." * 110)  # > 1200 chars
+        self.assertGreater(len(long_state), 1150)
+
+        class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, newurl):
+                return None
+
+        no_redir_opener = urllib.request.build_opener(_NoRedirectHandler())
+        auth_qs = urllib.parse.urlencode({
+            "response_type": "code",
+            "client_id": client_id,
+            "redirect_uri": redirect_uri,
+            "state": long_state,
+            "code_challenge": code_challenge,
+            "code_challenge_method": "S256",
+            "scope": "mcp offline_access",
+        })
+        auth_req = urllib.request.Request(f"{base}/oauth/authorize?{auth_qs}", headers=fwd_headers, method="GET")
+        with self.assertRaises(urllib.error.HTTPError) as auth_redir:
+            no_redir_opener.open(auth_req, timeout=3)
+        self.assertEqual(auth_redir.exception.code, 302)
+        loc = auth_redir.exception.headers.get("Location", "")
+        auth_redir.exception.close()
+        self.assertTrue(loc.startswith(redirect_uri + "?"))
+        loc_qs = urllib.parse.parse_qs(urllib.parse.urlsplit(loc).query)
+        self.assertEqual(loc_qs["state"][0], long_state)
+        auth_code = loc_qs["code"][0]
+        self.assertTrue(auth_code)
+
+        # 6. POST /oauth/token: wrong code_verifier must fail with 400 invalid_grant; valid code_verifier must issue tokens
+        bad_token_body = urllib.parse.urlencode({
+            "grant_type": "authorization_code",
+            "code": auth_code,
+            "redirect_uri": redirect_uri,
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "code_verifier": "wrong_verifier_value_0000000000000000000000000",
+        }).encode("utf-8")
+        bad_token_req = urllib.request.Request(
+            f"{base}/oauth/token",
+            data=bad_token_body,
+            headers={**fwd_headers, "Content-Type": "application/x-www-form-urlencoded"},
+            method="POST",
+        )
+        with self.assertRaises(urllib.error.HTTPError) as bad_tok_err:
+            urllib.request.urlopen(bad_token_req, timeout=3)
+        self.assertEqual(bad_tok_err.exception.code, 400)
+        bad_tok_err.exception.close()
+
+        good_token_body = urllib.parse.urlencode({
+            "grant_type": "authorization_code",
+            "code": auth_code,
+            "redirect_uri": redirect_uri,
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "code_verifier": code_verifier,
+        }).encode("utf-8")
+        good_token_req = urllib.request.Request(
+            f"{base}/oauth/token",
+            data=good_token_body,
+            headers={**fwd_headers, "Content-Type": "application/x-www-form-urlencoded"},
+            method="POST",
+        )
+        with urllib.request.urlopen(good_token_req, timeout=3) as tok_resp:
+            self.assertEqual(tok_resp.status, 200)
+            tok_data = json.loads(tok_resp.read().decode("utf-8"))
+            self.assertEqual(tok_data["token_type"], "Bearer")
+            access_token = tok_data["access_token"]
+            refresh_token = tok_data["refresh_token"]
+            self.assertTrue(access_token)
+            self.assertTrue(refresh_token)
+
+        # 7. Persistent linking: refresh_token grant must return the exact same refresh_token
+        ref_body = urllib.parse.urlencode({
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+            "client_id": client_id,
+        }).encode("utf-8")
+        ref_req = urllib.request.Request(
+            f"{base}/oauth/token",
+            data=ref_body,
+            headers={**fwd_headers, "Content-Type": "application/x-www-form-urlencoded"},
+            method="POST",
+        )
+        with urllib.request.urlopen(ref_req, timeout=3) as ref_resp:
+            self.assertEqual(ref_resp.status, 200)
+            ref_data = json.loads(ref_resp.read().decode("utf-8"))
+            self.assertEqual(ref_data["refresh_token"], refresh_token)
+            self.assertTrue(ref_data["access_token"])
+
+        # 8. HEAD /mcp with Authorization: Bearer <access_token> returns 200 OK, and POST /mcp normalizes Accept header
+        authed_head = urllib.request.Request(
+            f"{base}/mcp",
+            headers={**fwd_headers, "Authorization": f"Bearer {access_token}"},
+            method="HEAD",
+        )
+        with urllib.request.urlopen(authed_head, timeout=3) as ah_resp:
+            self.assertEqual(ah_resp.status, 200)
+
+        mcp_post = urllib.request.Request(
+            f"{base}/mcp",
+            data=json.dumps({"jsonrpc": "2.0", "id": "g1", "method": "tools/list", "params": {}}).encode("utf-8"),
+            headers={**fwd_headers, "Authorization": f"Bearer {access_token}", "Content-Type": "application/json", "Accept": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(mcp_post, timeout=3) as mp_resp:
+            self.assertEqual(mp_resp.status, 200)
+        self.assertIn("text/event-stream", self.upstream.calls[-1]["accept"])
 
 
 if __name__ == "__main__":

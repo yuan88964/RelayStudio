@@ -1,6 +1,8 @@
 import argparse
+import base64
 from datetime import datetime, timezone
 import hashlib
+import hmac
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
@@ -8633,11 +8635,113 @@ def handle_web_bridge_ack_retire(wb_path: str, payload: dict, now_iso: str = "")
     return {"ok": acked, "retire_id": retire_id, "conv_uuid": conv_uuid}
 
 
+_OAUTH_LOCK = threading.Lock()
+_OAUTH_SHIM_KEY = hashlib.sha256(
+    b"RelayStudio-OAuth21-Shim-v1-" + os.path.abspath(__file__).encode("utf-8")
+).digest()
+_OAUTH_CLIENTS: dict[str, dict] = {}
+_USED_AUTH_CODES: set[str] = set()
+_OAUTH_SUPPORTED_SCOPES = ["mcp", "openid", "offline_access"]
+_OAUTH_PROTECTED_RESOURCE_PATHS = (
+    "/.well-known/oauth-protected-resource",
+    "/.well-known/oauth-protected-resource/mcp",
+)
+_OAUTH_AUTH_SERVER_PATHS = (
+    "/.well-known/oauth-authorization-server",
+    "/.well-known/oauth-authorization-server/mcp",
+    "/mcp/.well-known/oauth-authorization-server",
+    "/.well-known/openid-configuration",
+    "/.well-known/openid-configuration/mcp",
+)
+_OAUTH_AUTHORIZE_PATHS = ("/oauth/authorize", "/authorize", "/mcp/oauth/authorize")
+_OAUTH_REGISTER_PATHS = ("/oauth/register", "/register", "/mcp/oauth/register")
+_OAUTH_TOKEN_PATHS = ("/oauth/token", "/token", "/mcp/oauth/token")
+_ALLOWED_HTTPS_REDIRECT_SUFFIXES = (
+    ".googleusercontent.com",
+    ".google.com",
+    ".cloud.google.com",
+    ".chatgpt.com",
+    ".openai.com",
+    ".claude.ai",
+    ".anthropic.com",
+)
+_ALLOWED_HTTPS_REDIRECT_EXACT = (
+    "googleusercontent.com",
+    "google.com",
+    "chatgpt.com",
+    "openai.com",
+    "claude.ai",
+    "anthropic.com",
+)
+
+
+def _b64url_encode(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+
+def _b64url_decode(val: str) -> bytes:
+    padded = val + ("=" * ((4 - (len(val) % 4)) % 4))
+    return base64.urlsafe_b64decode(padded.encode("ascii"))
+
+
+def _sign_oauth_envelope(prefix: str, payload: dict) -> str:
+    body_b64 = _b64url_encode(json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8"))
+    sig_b64 = _b64url_encode(hmac.new(_OAUTH_SHIM_KEY, body_b64.encode("ascii"), hashlib.sha256).digest())
+    return f"{prefix}.{body_b64}.{sig_b64}"
+
+
+def _verify_oauth_envelope(token: str, prefix: str) -> dict | None:
+    if not token or not token.startswith(f"{prefix}."):
+        return None
+    rest = token[len(prefix) + 1 :]
+    body_b64, sep, sig_b64 = rest.partition(".")
+    if not sep or not body_b64 or not sig_b64:
+        return None
+    expected_sig = _b64url_encode(hmac.new(_OAUTH_SHIM_KEY, body_b64.encode("ascii"), hashlib.sha256).digest())
+    if not hmac.compare_digest(sig_b64, expected_sig):
+        return None
+    try:
+        payload = json.loads(_b64url_decode(body_b64).decode("utf-8"))
+        return payload if isinstance(payload, dict) else None
+    except Exception:
+        return None
+
+
+def _is_allowed_oauth_redirect_uri(redirect_uri: str) -> bool:
+    if not redirect_uri or len(redirect_uri) > 4096:
+        return False
+    try:
+        parsed = urllib.parse.urlsplit(redirect_uri)
+    except Exception:
+        return False
+    scheme = (parsed.scheme or "").lower()
+    host = (parsed.hostname or "").lower()
+    if not host:
+        return False
+    if scheme == "https":
+        return host in _ALLOWED_HTTPS_REDIRECT_EXACT or host.endswith(_ALLOWED_HTTPS_REDIRECT_SUFFIXES)
+    if scheme == "http" and host in ("127.0.0.1", "localhost", "::1"):
+        return True
+    return False
+
+
 class ShieldHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def log_message(self, format, *args):
         return
+
+    def _resolve_public_base_url(self) -> str:
+        fwd_host = str(self.headers.get("X-Forwarded-Host") or "").split(",", 1)[0].strip()
+        host = fwd_host or str(self.headers.get("Host") or "").strip() or "127.0.0.1:8766"
+        fwd_proto = str(self.headers.get("X-Forwarded-Proto") or "").split(",", 1)[0].strip().lower()
+        if fwd_proto in ("https", "http"):
+            proto = fwd_proto
+        elif host.startswith(("127.0.0.1", "localhost", "[::1]")):
+            proto = "http"
+        else:
+            proto = "https"
+        return f"{proto}://{host}".rstrip("/")
 
     def _send_cors_headers(self):
         origin = str(self.headers.get("Origin") or "").strip() if hasattr(self, "headers") and self.headers else ""
@@ -8652,25 +8756,331 @@ class ShieldHandler(BaseHTTPRequestHandler):
         ):
             self.send_header("Access-Control-Allow-Origin", origin)
             self.send_header("Vary", "Origin")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, HEAD, DELETE, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, Accept, Mcp-Session-Id, MCP-Protocol-Version")
 
-    def _send_json(self, status_code: int, payload: dict):
+    def _send_json(self, status_code: int, payload: dict, extra_headers: dict | None = None, head_only: bool = False):
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status_code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self._send_cors_headers()
-        self.send_header("Content-Length", str(len(body)))
+        if extra_headers:
+            for hk, hv in extra_headers.items():
+                self.send_header(str(hk), str(hv))
+        self.send_header("Content-Length", "0" if head_only else str(len(body)))
         self.send_header("Connection", "close")
         self.end_headers()
-        self.wfile.write(body)
+        if not head_only:
+            self.wfile.write(body)
         self.close_connection = True
+
+    def _log_oauth_event(self, event: str, detail: dict | None = None):
+        try:
+            data_root = getattr(self.server, "data_root", "")
+            if not data_root:
+                return
+            log_dir = os.path.join(data_root, "logs")
+            os.makedirs(log_dir, exist_ok=True)
+            entry = {
+                "time": _utc_now_iso(),
+                "event": event,
+                "method": getattr(self, "command", ""),
+                "path": getattr(self, "path", ""),
+                "host": self._resolve_public_base_url(),
+                "ua": str(self.headers.get("User-Agent") or ""),
+            }
+            if detail:
+                entry.update(detail)
+            with _OAUTH_LOCK:
+                with open(os.path.join(log_dir, "oauth-shim.log"), "a", encoding="utf-8") as fh:
+                    fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+
+    def _handle_oauth_protected_resource(self, head_only: bool = False):
+        self._log_oauth_event("protected_resource_metadata", {"head_only": head_only})
+        base_url = self._resolve_public_base_url()
+        self._send_json(
+            200,
+            {
+                "resource": f"{base_url}/mcp",
+                "authorization_servers": [base_url],
+                "bearer_methods_supported": ["header"],
+                "scopes_supported": list(_OAUTH_SUPPORTED_SCOPES),
+            },
+            head_only=head_only,
+        )
+
+    def _handle_oauth_authorization_server(self, head_only: bool = False):
+        self._log_oauth_event("authorization_server_metadata", {"head_only": head_only})
+        base_url = self._resolve_public_base_url()
+        self._send_json(
+            200,
+            {
+                "issuer": base_url,
+                "authorization_endpoint": f"{base_url}/oauth/authorize",
+                "token_endpoint": f"{base_url}/oauth/token",
+                "registration_endpoint": f"{base_url}/oauth/register",
+                "response_types_supported": ["code"],
+                "grant_types_supported": ["authorization_code", "refresh_token"],
+                "token_endpoint_auth_methods_supported": ["client_secret_post", "client_secret_basic", "none"],
+                "code_challenge_methods_supported": ["S256", "plain"],
+                "scopes_supported": list(_OAUTH_SUPPORTED_SCOPES),
+            },
+            head_only=head_only,
+        )
+
+    def _handle_oauth_register(self):
+        content_length = int(self.headers.get("Content-Length", "0") or "0")
+        raw = self.rfile.read(content_length) if content_length > 0 else b"{}"
+        try:
+            req_data = json.loads(raw.decode("utf-8"))
+            if not isinstance(req_data, dict):
+                req_data = {}
+        except Exception:
+            req_data = {}
+
+        redirect_uris = req_data.get("redirect_uris")
+        if not isinstance(redirect_uris, list):
+            redirect_uris = []
+        redirect_uris = [str(u).strip() for u in redirect_uris if str(u).strip()]
+
+        client_id = str(req_data.get("client_id") or "").strip() or f"rs_client_{uuid.uuid4().hex[:16]}"
+        client_secret = f"rs_secret_{uuid.uuid4().hex}{uuid.uuid4().hex[:16]}"
+        auth_method = str(req_data.get("token_endpoint_auth_method") or "client_secret_post").strip()
+        now_ts = int(time.time())
+
+        record = {
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "client_id_issued_at": now_ts,
+            "client_secret_expires_at": 0,
+            "redirect_uris": redirect_uris,
+            "token_endpoint_auth_method": auth_method,
+            "grant_types": req_data.get("grant_types") or ["authorization_code", "refresh_token"],
+            "response_types": req_data.get("response_types") or ["code"],
+            "client_name": str(req_data.get("client_name") or "RelayStudio MCP Client"),
+            "scope": str(req_data.get("scope") or "mcp openid offline_access"),
+        }
+        with _OAUTH_LOCK:
+            _OAUTH_CLIENTS[client_id] = record
+        self._log_oauth_event("oauth_register", {"client_id": client_id, "redirect_uris": redirect_uris})
+        self._send_json(201, record, extra_headers={"Cache-Control": "no-store", "Pragma": "no-cache"})
+
+    def _handle_oauth_authorize(self, method: str = "GET"):
+        parsed_url = urllib.parse.urlsplit(self.path)
+        params = urllib.parse.parse_qs(parsed_url.query, keep_blank_values=True)
+        if method == "POST":
+            content_length = int(self.headers.get("Content-Length", "0") or "0")
+            raw = self.rfile.read(content_length) if content_length > 0 else b""
+            try:
+                post_params = urllib.parse.parse_qs(raw.decode("utf-8"), keep_blank_values=True)
+                for k, v in post_params.items():
+                    params[k] = v
+            except Exception:
+                pass
+
+        def _first(key: str, default: str = "") -> str:
+            vals = params.get(key)
+            return str(vals[0]) if vals else default
+
+        client_id = _first("client_id", "rs_default_client").strip() or "rs_default_client"
+        redirect_uri = _first("redirect_uri", "").strip()
+        if not redirect_uri:
+            with _OAUTH_LOCK:
+                c_info = _OAUTH_CLIENTS.get(client_id) or {}
+            r_list = c_info.get("redirect_uris") or []
+            if r_list:
+                redirect_uri = str(r_list[0])
+
+        if not _is_allowed_oauth_redirect_uri(redirect_uri):
+            self._send_json(
+                400,
+                {"error": "invalid_request", "error_description": "Invalid or missing redirect_uri."},
+                extra_headers={"Cache-Control": "no-store"},
+            )
+            return
+
+        state_present = "state" in params
+        state_val = _first("state", "")
+        code_challenge = _first("code_challenge", "").strip()
+        code_challenge_method = (_first("code_challenge_method", "S256").strip() or "S256")
+        scope = _first("scope", "mcp offline_access").strip() or "mcp offline_access"
+
+        auth_code = _sign_oauth_envelope(
+            "rs_code",
+            {
+                "client_id": client_id,
+                "code_challenge": code_challenge,
+                "code_challenge_method": code_challenge_method,
+                "scope": scope,
+                "expires_at": int(time.time()) + 600,
+                "nonce": uuid.uuid4().hex[:16],
+            },
+        )
+
+        redir_split = urllib.parse.urlsplit(redirect_uri)
+        q_pairs = urllib.parse.parse_qsl(redir_split.query, keep_blank_values=True)
+        q_pairs.append(("code", auth_code))
+        if state_present:
+            q_pairs.append(("state", state_val))
+        new_query = urllib.parse.urlencode(q_pairs)
+        location = urllib.parse.urlunsplit((redir_split.scheme, redir_split.netloc, redir_split.path, new_query, redir_split.fragment))
+        self._log_oauth_event("oauth_authorize", {"client_id": client_id, "redirect_uri": redirect_uri, "state_len": len(state_val)})
+
+        self.send_response(302)
+        self._send_cors_headers()
+        self.send_header("Location", location)
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("Content-Length", "0")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.close_connection = True
+
+    def _issue_access_token_response(self, client_id: str, scope: str, refresh_token: str, extra_headers: dict):
+        now_ts = int(time.time())
+        access_token = _sign_oauth_envelope(
+            "rs_at",
+            {"client_id": client_id, "scope": scope, "expires_at": now_ts + 3600, "nonce": uuid.uuid4().hex[:12]},
+        )
+        self._send_json(
+            200,
+            {
+                "access_token": access_token,
+                "token_type": "Bearer",
+                "expires_in": 3600,
+                "refresh_token": refresh_token,
+                "scope": scope,
+            },
+            extra_headers=extra_headers,
+        )
+
+    def _handle_oauth_token(self):
+        content_length = int(self.headers.get("Content-Length", "0") or "0")
+        raw = self.rfile.read(content_length) if content_length > 0 else b""
+        ctype = str(self.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+        form: dict[str, str] = {}
+        if ctype == "application/json":
+            try:
+                j_data = json.loads(raw.decode("utf-8"))
+                if isinstance(j_data, dict):
+                    form = {str(k): str(v) for k, v in j_data.items() if v is not None}
+            except Exception:
+                pass
+        else:
+            try:
+                parsed_form = urllib.parse.parse_qs(raw.decode("utf-8"), keep_blank_values=True)
+                form = {str(k): str(v[0]) for k, v in parsed_form.items() if v}
+            except Exception:
+                pass
+
+        grant_type = str(form.get("grant_type") or "").strip()
+        self._log_oauth_event("oauth_token", {"grant_type": grant_type, "client_id": str(form.get("client_id") or "")})
+        no_store = {"Cache-Control": "no-store", "Pragma": "no-cache"}
+
+        if grant_type == "authorization_code":
+            code = str(form.get("code") or "").strip()
+            code_verifier = str(form.get("code_verifier") or "").strip()
+            code_data = _verify_oauth_envelope(code, "rs_code")
+            nonce = str((code_data or {}).get("nonce") or "")
+            with _OAUTH_LOCK:
+                already_used = bool(nonce and nonce in _USED_AUTH_CODES)
+            if not code_data or already_used or int(code_data.get("expires_at") or 0) < int(time.time()):
+                self._send_json(
+                    400,
+                    {"error": "invalid_grant", "error_description": "Invalid, expired, or already used authorization code."},
+                    extra_headers=no_store,
+                )
+                return
+
+            expected_cc = str(code_data.get("code_challenge") or "").strip()
+            ccm = str(code_data.get("code_challenge_method") or "S256").strip().upper()
+            if expected_cc:
+                if not code_verifier:
+                    self._send_json(
+                        400,
+                        {"error": "invalid_grant", "error_description": "Missing PKCE code_verifier."},
+                        extra_headers=no_store,
+                    )
+                    return
+                s256_calc = _b64url_encode(hashlib.sha256(code_verifier.encode("ascii")).digest())
+                if ccm == "S256":
+                    valid_pkce = hmac.compare_digest(s256_calc, expected_cc)
+                else:
+                    valid_pkce = hmac.compare_digest(code_verifier, expected_cc) or hmac.compare_digest(s256_calc, expected_cc)
+                if not valid_pkce:
+                    self._send_json(
+                        400,
+                        {"error": "invalid_grant", "error_description": "PKCE code_verifier mismatch."},
+                        extra_headers=no_store,
+                    )
+                    return
+
+            if nonce:
+                with _OAUTH_LOCK:
+                    _USED_AUTH_CODES.add(nonce)
+
+            scope = str(code_data.get("scope") or "mcp offline_access")
+            cid = str(form.get("client_id") or code_data.get("client_id") or "rs_default_client")
+            refresh_token = _sign_oauth_envelope(
+                "rs_rt",
+                {"client_id": cid, "scope": scope, "issued_at": int(time.time()), "nonce": uuid.uuid4().hex[:16]},
+            )
+            self._issue_access_token_response(cid, scope, refresh_token, no_store)
+            return
+
+        if grant_type == "refresh_token":
+            refresh_token = str(form.get("refresh_token") or "").strip()
+            rt_data = _verify_oauth_envelope(refresh_token, "rs_rt")
+            if not refresh_token or not rt_data:
+                self._send_json(
+                    400,
+                    {"error": "invalid_grant", "error_description": "Invalid or missing refresh_token."},
+                    extra_headers=no_store,
+                )
+                return
+            scope = str(form.get("scope") or rt_data.get("scope") or "mcp offline_access")
+            cid = str(form.get("client_id") or rt_data.get("client_id") or "rs_default_client")
+            # Persistent Linking requirement: return the exact same refresh_token
+            self._issue_access_token_response(cid, scope, refresh_token, no_store)
+            return
+
+        self._send_json(
+            400,
+            {"error": "unsupported_grant_type", "error_description": f"Unsupported grant_type: {grant_type}"},
+            extra_headers=no_store,
+        )
 
     def do_OPTIONS(self):
         self.send_response(204)
         self._send_cors_headers()
         self.send_header("Content-Length", "0")
         self.end_headers()
+
+    def do_HEAD(self):
+        parsed_url = urllib.parse.urlsplit(self.path)
+        req_path = parsed_url.path.rstrip("/") or "/"
+        if req_path in _OAUTH_PROTECTED_RESOURCE_PATHS:
+            self._handle_oauth_protected_resource(head_only=True)
+            return
+        if req_path in _OAUTH_AUTH_SERVER_PATHS:
+            self._handle_oauth_authorization_server(head_only=True)
+            return
+        if req_path in ("/mcp", "/"):
+            auth_hdr = str(self.headers.get("Authorization") or "").strip()
+            bearer_tok = auth_hdr[7:].strip() if auth_hdr.lower().startswith("bearer ") else ""
+            tok_data = _verify_oauth_envelope(bearer_tok, "rs_at") if bearer_tok else None
+            valid_tok = bool(tok_data and int(tok_data.get("expires_at") or 0) >= int(time.time()))
+            self._log_oauth_event("head_mcp", {"has_auth": bool(auth_hdr), "valid_tok": valid_tok})
+            if valid_tok:
+                self._send_json(200, {"ok": True}, head_only=True)
+                return
+            base_url = self._resolve_public_base_url()
+            challenge = f'Bearer realm="mcp", resource_metadata="{base_url}/.well-known/oauth-protected-resource"'
+            self._send_json(401, {"error": "unauthorized"}, extra_headers={"WWW-Authenticate": challenge}, head_only=True)
+            return
+        self._send_json(200, {"ok": True}, head_only=True)
 
     def do_GET(self):
         if self.path == "/shieldz":
@@ -8687,7 +9097,20 @@ class ShieldHandler(BaseHTTPRequestHandler):
 
         parsed_url = urllib.parse.urlsplit(self.path)
         req_path = parsed_url.path
+        norm_path = req_path.rstrip("/") or "/"
         qs = urllib.parse.parse_qs(parsed_url.query)
+
+        if norm_path in _OAUTH_PROTECTED_RESOURCE_PATHS:
+            self._handle_oauth_protected_resource(head_only=False)
+            return
+
+        if norm_path in _OAUTH_AUTH_SERVER_PATHS:
+            self._handle_oauth_authorization_server(head_only=False)
+            return
+
+        if norm_path in _OAUTH_AUTHORIZE_PATHS:
+            self._handle_oauth_authorize(method="GET")
+            return
 
         if req_path in ("/studio/snapshot", "/__studio__/snapshot") or self.path.startswith("/studio/snapshot") or self.path.startswith("/__studio__/snapshot"):
             since_sig = str((qs.get("since_sig") or qs.get("since_rev") or [""])[0] or "").strip()
@@ -8715,6 +9138,20 @@ class ShieldHandler(BaseHTTPRequestHandler):
         self._forward("GET")
 
     def do_POST(self):
+        parsed_url = urllib.parse.urlsplit(self.path)
+        norm_path = parsed_url.path.rstrip("/") or "/"
+        if norm_path in _OAUTH_REGISTER_PATHS:
+            self._handle_oauth_register()
+            return
+        if norm_path in _OAUTH_AUTHORIZE_PATHS:
+            self._handle_oauth_authorize(method="POST")
+            return
+        if norm_path in _OAUTH_TOKEN_PATHS:
+            self._handle_oauth_token()
+            return
+        if norm_path == "/":
+            self.path = "/mcp"
+
         if self.path.startswith("/studio/action") or self.path.startswith("/__studio__/action"):
             content_length = int(self.headers.get("Content-Length", "0"))
             raw = self.rfile.read(content_length) if content_length > 0 else b"{}"
@@ -8873,6 +9310,17 @@ class ShieldHandler(BaseHTTPRequestHandler):
             if k.lower() in ("host", "content-length", "connection"):
                 continue
             headers[k] = v
+
+        if method == "POST" and self.path.startswith("/mcp"):
+            accept_val = ""
+            accept_key = "Accept"
+            for hk, hv in list(headers.items()):
+                if hk.lower() == "accept":
+                    accept_val = str(hv or "")
+                    accept_key = hk
+                    break
+            if "application/json" not in accept_val.lower() or "text/event-stream" not in accept_val.lower():
+                headers[accept_key] = "application/json, text/event-stream"
 
         req = urllib.request.Request(target_url, data=body, headers=headers, method=method)
         try:
