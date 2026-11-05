@@ -251,7 +251,11 @@ class ShieldHubSeamTests(unittest.TestCase):
         state["tabs"]["gemini"]["last_seen_at"] = "2000-01-01T00:00:00Z"
         with open(self.wb_state_path, "w", encoding="utf-8") as f:
             json.dump(state, f)
-        disconnected = self._get_json("/studio/snapshot")["web_bridge"]
+        snapshot = self._get_json("/studio/snapshot")
+        task_view = next(session for session in snapshot["sessions"] if session["SessionKey"] == task_id)
+        self.assertEqual(task_view["AvailableModelsByProvider"]["gemini"], [])
+        self.assertIn("claude", task_view["ConnectedProviders"])
+        disconnected = snapshot["web_bridge"]
         self.assertEqual(disconnected["available_models_by_provider"]["gemini"], [])
         self.assertNotIn("gemini", disconnected["connected_providers"])
         self.assertEqual(disconnected["available_models_by_provider"]["claude"][0]["slug"], "claude-observed")

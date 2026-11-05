@@ -5206,6 +5206,8 @@ def build_studio_snapshot(data_root: str, tasks_root: str, web_bridge_path: str 
             "WebCurrentModel": web_cur_model,
             "WebCurrentEffort": web_cur_effort,
             "AvailableModels": session_models,
+            "AvailableModelsByProvider": _visible_provider_catalogs(wb_state),
+            "ConnectedProviders": _connected_providers(wb_state),
             "TimeText": _format_local_time_text(item["LastEpoch"], include_date=False),
             "AgoText": ago_text,
             "ElapsedSeconds": elapsed_sec,

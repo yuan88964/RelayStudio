@@ -5351,11 +5351,30 @@ function Sync-ComposerModelAndEffortCombos($StateInfo, $AvailModels, [string]$Cu
     }
 }
 
+function Resolve-ComposerCatalogState($SessionObj, $RawState) {
+    if ($SessionObj -and $SessionObj.PSObject.Properties['AvailableModelsByProvider']) {
+        return [pscustomobject]@{ available_models_by_provider = $SessionObj.AvailableModelsByProvider; connected_providers = @($SessionObj.ConnectedProviders) }
+    }
+    $connected = New-Object 'System.Collections.Generic.List[string]'
+    if ($RawState -and $RawState.PSObject.Properties['tabs'] -and $RawState.tabs) {
+        foreach ($entry in $RawState.tabs.PSObject.Properties) {
+            $tab = $entry.Value
+            if (-not $tab -or -not $tab.PSObject.Properties['last_seen_at']) { continue }
+            try { $age = ([DateTimeOffset]::UtcNow - [DateTimeOffset]::Parse([string]$tab.last_seen_at)).TotalSeconds } catch { continue }
+            if ($age -gt 15 -or $age -lt -5) { continue }
+            $provider = Get-WebRoomProvider $tab
+            if (-not $connected.Contains($provider)) { $connected.Add($provider) }
+        }
+    }
+    return [pscustomobject]@{ available_models_by_provider = $(if ($RawState -and $RawState.PSObject.Properties['available_models_by_provider']) { $RawState.available_models_by_provider } else { $null }); connected_providers = @($connected) }
+}
+
 function Build-PlanBComposerPod($SessionObj = $null, [bool]$IsNarrow = $false, [bool]$IsZeroTask = $false, [int]$PaneId = 0) {
     $taskKey = if ($IsZeroTask -or -not $SessionObj) { '__new_task__' } else { [string]$SessionObj.SessionKey }
     $draftObj = Get-TaskDraftState $taskKey
 
     # Cleanup 3: When $SessionObj is present, trust $SessionObj properties directly without redundant disk reads on UI thread
+    $wbState = $null
     $curBinding = $null
     $autoCfg = $null
     if ($IsZeroTask -or -not $SessionObj) {
@@ -5365,6 +5384,8 @@ function Build-PlanBComposerPod($SessionObj = $null, [bool]$IsNarrow = $false, [
             $curBinding = $wbState.session_bindings.$taskKey
         }
     }
+
+    $catalogState = Resolve-ComposerCatalogState $SessionObj $wbState
 
     $rawMode = if ($IsZeroTask) { 'new_window' }
                elseif ($SessionObj -and $SessionObj.PSObject.Properties['TargetMode'] -and $SessionObj.TargetMode) { [string]$SessionObj.TargetMode }
@@ -5448,9 +5469,9 @@ function Build-PlanBComposerPod($SessionObj = $null, [bool]$IsNarrow = $false, [
                     $st.Session = $SessionObj
                     $st.DraftObj = $draftObj
                     $st.TargetMode = $curTargetMode
-                    $st.ConnectedProviders = $(if ($wbState -and $wbState.PSObject.Properties['connected_providers']) { ,@($wbState.connected_providers) } else { $null })
+                    $st.ConnectedProviders = ,@($catalogState.connected_providers)
                     $st.Provider = $(if ($curBinding) { Get-WebRoomProvider $curBinding } else { 'chatgpt' })
-                    $st.AvailableModelsByProvider = $(if ($wbState -and $wbState.PSObject.Properties['available_models_by_provider']) { $wbState.available_models_by_provider } elseif ($SessionObj -and $SessionObj.PSObject.Properties['AvailableModelsByProvider']) { $SessionObj.AvailableModelsByProvider } else { $null })
+                    $st.AvailableModelsByProvider = $catalogState.available_models_by_provider
                     $st.WebModel = $webModel
                     $st.WebEffort = $webEffort
                     if ($st.IsNarrow -ne $IsNarrow) {
@@ -5740,8 +5761,8 @@ function Build-PlanBComposerPod($SessionObj = $null, [bool]$IsNarrow = $false, [
         PodBorder = $composerPod
         LastCatalogSig = ''
         Provider = $(if ($curBinding) { Get-WebRoomProvider $curBinding } else { 'chatgpt' })
-        ConnectedProviders = $(if ($wbState -and $wbState.PSObject.Properties['connected_providers']) { ,@($wbState.connected_providers) } else { $null })
-        AvailableModelsByProvider = $(if ($wbState -and $wbState.PSObject.Properties['available_models_by_provider']) { $wbState.available_models_by_provider } elseif ($SessionObj -and $SessionObj.PSObject.Properties['AvailableModelsByProvider']) { $SessionObj.AvailableModelsByProvider } else { $null })
+        ConnectedProviders = ,@($catalogState.connected_providers)
+        AvailableModelsByProvider = $catalogState.available_models_by_provider
         AvailableModels = $availModels
         WebModel = $webModel
         WebEffort = $webEffort

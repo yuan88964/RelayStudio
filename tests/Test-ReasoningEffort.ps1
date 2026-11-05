@@ -177,3 +177,14 @@ Assert-Case (@(Get-Tags $multi.ModelCombo) -notcontains 'gemini-pro') 'Disconnec
 $multi.ConnectedProviders = @()
 Sync-Test $multi $catalog 'inherit' 'inherit'
 Assert-Case (@(Get-Tags $multi.ModelCombo) -notcontains 'gpt-6-thinking') 'All-disconnected platform set also hides cached OpenAI models'
+
+$helperStart = $source.IndexOf('function Resolve-ComposerCatalogState(')
+$helperEnd = $source.IndexOf('function Build-PlanBComposerPod(', $helperStart)
+. ([scriptblock]::Create($source.Substring($helperStart, $helperEnd - $helperStart)))
+function Get-WebRoomProvider($Record) { if ($Record.provider) { $Record.provider } else { 'chatgpt' } }
+$raw = [pscustomobject]@{available_models_by_provider=$multi.AvailableModelsByProvider;tabs=[pscustomobject]@{fresh=[pscustomobject]@{provider='gemini';last_seen_at=[DateTimeOffset]::UtcNow.ToString('o')};stale=[pscustomobject]@{provider='claude';last_seen_at=[DateTimeOffset]::UtcNow.AddSeconds(-30).ToString('o')}}}
+$resolved = Resolve-ComposerCatalogState $null $raw
+Assert-Case ($resolved.connected_providers -contains 'gemini' -and $resolved.connected_providers -notcontains 'claude') 'Launchpad production extraction derives fresh platform availability from raw tabs'
+$session = [pscustomobject]@{AvailableModelsByProvider=$multi.AvailableModelsByProvider;ConnectedProviders=@('claude')}
+$resolvedSession = Resolve-ComposerCatalogState $session $null
+Assert-Case ($resolvedSession.connected_providers -contains 'claude' -and $resolvedSession.available_models_by_provider.gemini.Count -eq 1) 'Task production extraction uses snapshot session model and availability metadata'
