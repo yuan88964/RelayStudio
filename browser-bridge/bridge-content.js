@@ -67,6 +67,7 @@
   const resolvedHandoverMsgIds = new Set();
 
   let isBusySending = false;
+  let busySendStartedAtMs = 0;
   let lastInjectedText = "";
   let lastHintsScanAt = 0;
   let cachedPageHints = [];
@@ -269,27 +270,64 @@
     return hasUserDraftRaw();
   }
 
-  function hasErrorState() {
+  // Spec v4.7 1.2: generic outer error text (Cloudflare / timeout / "no reply" banners, any wording). Answer bodies,
+  // code blocks, user bubbles and the composer are never read, so quoted error words in a reply cannot trip it.
+  const UI_ERROR_SELECTOR =
+    '[data-testid*="conversation-error"], [data-testid*="error"], div[role="alert"], [role="status"], button[data-testid*="regenerate"], main [class*="error" i]';
+  const UI_ERROR_EXCLUDE =
+    '.markdown, pre, code, [data-user-message-bubble="true"], [data-message-author-role="user"], textarea, #prompt-textarea';
+
+  function extractUiErrorText() {
     try {
-      const errBanner = document.querySelector(
-        '[data-testid*="conversation-error"], div[role="alert"], button[data-testid*="regenerate"]'
-      );
-      if (errBanner) {
-        const txt = (errBanner.innerText || "").toLowerCase();
-        if (
-          txt.includes("something went wrong") ||
-          txt.includes("network error") ||
-          txt.includes("error generating") ||
-          txt.includes("出了点问题") ||
-          txt.includes("网络错误") ||
-          txt.includes("重新生成") ||
-          txt.includes("regenerate")
-        ) {
-          return true;
+      if (!document || typeof document.querySelectorAll !== "function") return "";
+      const nodes = Array.from(document.querySelectorAll(UI_ERROR_SELECTOR) || []);
+      for (const node of nodes) {
+        if (!node) continue;
+        if (typeof node.closest === "function" && node.closest(UI_ERROR_EXCLUDE)) continue;
+        if (!isVisibleDomElement(node)) continue;
+        let source = node;
+        if (typeof node.cloneNode === "function") {
+          try {
+            const clone = node.cloneNode(true);
+            if (clone && typeof clone.querySelectorAll === "function") {
+              Array.from(clone.querySelectorAll(".markdown, pre, code") || []).forEach((n) => {
+                try {
+                  n.remove();
+                } catch (_) {}
+              });
+            }
+            if (clone) source = clone;
+          } catch (_) {}
         }
+        const txt = String(source.innerText || source.textContent || "").replace(/\s+/g, " ").trim();
+        if (txt) return txt.slice(0, 240);
+      }
+    } catch (_) {}
+    return "";
+  }
+
+  // Spec v4.7 1.2: one question, one answer. An idle page whose last turn never closed (stream cut, sentinel /
+  // prepare failure, or a lone user bubble with no reply below it) is an unfinished turn.
+  function checkTurnIncomplete() {
+    try {
+      if (isSseActive() || isGeneratingState() || isBusySending) return false;
+      const ds = (document.documentElement && document.documentElement.dataset) || {};
+      if (ds.relayStreamIncomplete === "1" || ds.relayTurnIncomplete === "1") return true;
+      if (typeof document.querySelectorAll !== "function") return false;
+      const nodes = Array.from(document.querySelectorAll("[data-message-author-role]") || []);
+      if (nodes.length === 0) return false;
+      for (let i = nodes.length - 1; i >= 0; i--) {
+        const n = nodes[i];
+        if (!isVisibleDomElement(n)) continue;
+        const role = String((typeof n.getAttribute === "function" && n.getAttribute("data-message-author-role")) || "");
+        return role === "user";
       }
     } catch (_) {}
     return false;
+  }
+
+  function hasErrorState() {
+    return Boolean(extractUiErrorText() || checkTurnIncomplete());
   }
 
   function readAvailableModelsCatalog() {
@@ -731,7 +769,9 @@
   async function waitForDispatchAcceptance(dispatchId) {
     // Only a correlated HTTP-success conversation POST proves transport acceptance.
     // Cold-start background tabs may take 15-25s for Sentinel PoW + /prepare before POST /conversation.
-    for (let attempt = 0; attempt < 209; attempt++) {
+    // Spec v4.7 1.2: loop cap AND wall clock - Chrome's intensive throttling can stretch each 120ms sleep to ~60s.
+    const deadline = Date.now() + 25000;
+    for (let attempt = 0; attempt < 209 && Date.now() < deadline; attempt++) {
       const ds = document.documentElement && document.documentElement.dataset;
       if (!ds || ds.relayDispatchId !== dispatchId) return "unconfirmed";
       if (ds.relayDispatchStatus === "accepted") return "accepted";
@@ -745,7 +785,8 @@
   // that the page consumed the text (composer emptied). Text still sitting in the composer = nothing was sent.
   async function waitForSteerAcceptance(dispatchId, injected) {
     const probe = String(injected || "").slice(0, 24);
-    for (let i = 0; i < 50; i++) {
+    const deadline = Date.now() + 6500;
+    for (let i = 0; i < 50 && Date.now() < deadline; i++) {
       const ds = document.documentElement && document.documentElement.dataset;
       if (!ds || ds.relayDispatchId !== dispatchId) return "unconfirmed";
       if (ds.relayDispatchStatus === "accepted") return "accepted";
@@ -890,6 +931,8 @@
     let acceptanceOutcome = "aborted";
     let steerMode = false;
     isBusySending = true;
+    busySendStartedAtMs = Date.now();
+    const myBusyStartedAt = busySendStartedAtMs;
     try {
       if (!manualSteer) {
         // Wait at most 3s (6 * 500ms) for a brief tail end of generation; NEVER force-type into a busy turn!
@@ -966,7 +1009,8 @@
           sent = true;
           break;
         }
-        if (i === 5) {
+        // Spec v4.7 1.2: refill only an empty composer - never stack a second copy onto text that is still there.
+        if (i === 5 && !sentAttempted && readComposerCleanText().length === 0) {
           try {
             window.dispatchEvent(
               new CustomEvent("relaystudio:fill-composer", {
@@ -1021,6 +1065,19 @@
         acceptanceOutcome = sent ? await waitForDispatchAcceptance(dispatchId) : "unconfirmed";
       }
       if (acceptanceOutcome !== "accepted") {
+        // Spec v4.7 1.2: remove only our own leftover draft (exactly the injected text), never a hand-written one.
+        try {
+          const residual = readComposerCleanText();
+          if (residual && lastInjectedText && residual === lastInjectedText) {
+            try {
+              window.dispatchEvent(new CustomEvent("relaystudio:fill-composer", { detail: { clear: true, text: "" } }));
+            } catch (_) {}
+            if (readComposerCleanText()) {
+              setInputText(composer, "");
+            }
+            lastInjectedText = "";
+          }
+        } catch (_) {}
         showBridgeToast("未确认网页已接收消息，本次不标记为已发送");
         // Once the UI was submitted, an unobserved response could still succeed
         // later. Never invite an automatic second click on the same message.
@@ -1053,7 +1110,11 @@
           }, 35000);
         }
       }
-      isBusySending = false;
+      // A dispatch force-released by the 30s watchdog must not clear the busy flag of a newer dispatch.
+      if (busySendStartedAtMs === myBusyStartedAt || busySendStartedAtMs === 0) {
+        isBusySending = false;
+        busySendStartedAtMs = 0;
+      }
     }
   }
 
@@ -1076,6 +1137,11 @@
   }
 
   function buildLocalTabState() {
+    // Spec v4.7 1.2: a send stuck longer than 30s (throttled background timers) must not report is_dispatching forever.
+    if (isBusySending && busySendStartedAtMs > 0 && Date.now() - busySendStartedAtMs > 30000) {
+      isBusySending = false;
+      busySendStartedAtMs = 0;
+    }
     try {
       if (typeof CustomEvent === "function" && window && typeof window.dispatchEvent === "function") {
         window.dispatchEvent(new CustomEvent("relaystudio:sync-live-state"));
@@ -1089,6 +1155,10 @@
     const curModel = detectCurrentModel(availableModels);
     const sseActive = isSseActive();
     const domGenerating = isGeneratingState();
+    const ds = document.documentElement && document.documentElement.dataset;
+    const uiErrorText = String(extractUiErrorText() || "");
+    const turnIncomplete = Boolean(checkTurnIncomplete());
+    const hasComposer = Boolean(findComposerElement());
     return {
       tab_id: TAB_ID,
       conv_uuid: convUuid,
@@ -1107,7 +1177,11 @@
       has_user_draft: hasUserDraft(),
       has_error: hasErrorState(),
       is_archived: isConvArchivedPage(),
-      can_steer_live: Boolean(findComposerElement()),
+      can_steer_live: hasComposer,
+      has_composer: hasComposer,
+      turn_incomplete: turnIncomplete,
+      stream_incomplete: Boolean(ds && ds.relayStreamIncomplete === "1"),
+      ui_error_text: uiErrorText,
       current_model: curModel,
       current_effort: detectCurrentEffort(availableModels, curModel),
       available_models: availableModels,
