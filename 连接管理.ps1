@@ -810,8 +810,8 @@ $script:PANE_SNAP_HIDE_PX = 140.0
         <TextBlock x:Name="ArchiveDrawerTitle" Text="📦 已归档会话管理 (0)" FontSize="14.5" FontWeight="SemiBold" Foreground="#18181B"/>
         <TextBlock Text="展示手动归档与已完工自动归档的任务（还原将同步恢复主会话，彻底删除将同时清除本机账本与云端对话）" FontSize="11.5" Foreground="#71717A" Margin="0,2,0,0"/>
        </StackPanel>
-       <Button x:Name="ClearAllArchivedButton" Grid.Column="1" Content="🗑 一键清空全部归档" Background="#FEF2F2" BorderBrush="#FECACA" Foreground="#DC2626" FontWeight="SemiBold" Padding="10,4" MinHeight="28" FontSize="12" BorderThickness="1" Margin="10,0,8,0"/>
-       <Button x:Name="CloseArchiveDrawerButton" Grid.Column="2" Content="× 关闭" Padding="10,4" MinHeight="28" FontSize="12" BorderThickness="1"/>
+       <Button x:Name="ClearAllArchivedButton" Grid.Column="1" VerticalAlignment="Center" Height="28" Content="🗑 一键清空全部归档" Background="#FEF2F2" BorderBrush="#FECACA" Foreground="#DC2626" FontWeight="SemiBold" Padding="10,4" MinHeight="28" FontSize="12" BorderThickness="1" Margin="10,0,8,0"/>
+       <Button x:Name="CloseArchiveDrawerButton" Grid.Column="2" VerticalAlignment="Center" Height="28" Content="× 关闭" Padding="10,4" MinHeight="28" FontSize="12" BorderThickness="1"/>
       </Grid>
      </Border>
      <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Padding="16,12">
@@ -840,7 +840,7 @@ $script:PANE_SNAP_HIDE_PX = 140.0
         <TextBlock x:Name="SentHistoryTitle" Text="📜 历史发送记录 (0)" FontSize="14.5" FontWeight="SemiBold" Foreground="#18181B"/>
         <TextBlock Text="主界面仅展示最新 1 条蓝框记录以防刷屏；此处可查看发往网页端的全部历史指令与交接单" FontSize="11.5" Foreground="#71717A" Margin="0,2,0,0"/>
        </StackPanel>
-       <Button x:Name="CloseSentHistoryButton" Grid.Column="1" Content="× 关闭" Padding="10,4" MinHeight="28" FontSize="12" BorderThickness="1"/>
+       <Button x:Name="CloseSentHistoryButton" Grid.Column="1" VerticalAlignment="Center" Height="28" Content="× 关闭" Padding="10,4" MinHeight="28" FontSize="12" BorderThickness="1"/>
       </Grid>
      </Border>
      <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Padding="16,12">
@@ -867,12 +867,12 @@ $script:PANE_SNAP_HIDE_PX = 140.0
        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
        <StackPanel VerticalAlignment="Center">
         <TextBlock x:Name="DetailModalTitle" Text="对话详情" FontSize="15" FontWeight="SemiBold" Foreground="#18181B"/>
-        <TextBlock x:Name="DetailModalGoal" Text="" FontSize="12" Foreground="#52525B" Margin="0,3,0,0"/>
+        <TextBlock x:Name="DetailModalGoal" Text="" FontSize="12" Foreground="#52525B" Margin="0,3,0,0" TextWrapping="Wrap" MaxHeight="36" TextTrimming="CharacterEllipsis"/>
        </StackPanel>
        <Border x:Name="DetailModalBadgeBorder" Grid.Column="1" Background="#DCFCE7" BorderBrush="#BBF7D0" BorderThickness="1" CornerRadius="12" Padding="10,3" VerticalAlignment="Center" Margin="10,0,10,0">
         <TextBlock x:Name="DetailModalBadgeText" Text="● 活跃运行中" Foreground="#166534" FontSize="12" FontWeight="SemiBold"/>
        </Border>
-       <Button x:Name="CloseDetailButton" Grid.Column="2" Content="× 关闭详情" Padding="10,4" MinHeight="28" FontSize="12" BorderThickness="1"/>
+       <Button x:Name="CloseDetailButton" Grid.Column="2" VerticalAlignment="Center" Height="28" Content="× 关闭详情" Padding="10,4" MinHeight="28" FontSize="12" BorderThickness="1"/>
       </Grid>
      </Border>
      <ScrollViewer x:Name="DetailModalScroll" Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Padding="18,14">
@@ -4518,6 +4518,30 @@ function New-MilestoneBlockElement($ms) {
     return $mBlock
 }
 
+function Get-VitalSubstateVisual($SessionObj) {
+    # Spec v4.7 §3.4: locally derive the fine-grained StatusBadge / colors from the hub's VitalSubstate.
+    # LIVE / CONFIRMED_STOPPED / missing field return $null so callers keep their legacy rendering.
+    if (-not $SessionObj -or -not $SessionObj.PSObject.Properties['VitalSubstate']) { return $null }
+    $sub = ([string]$SessionObj.VitalSubstate).Trim().ToUpperInvariant()
+    switch ($sub) {
+        'PSEUDO_STOPPED' {
+            return [pscustomobject]@{ Substate = $sub; Badge = '假停保护中'; Bg = '#EFF6FF'; Border = '#BFDBFE'; Dot = '#2563EB'; Fg = '#1D4ED8'; PillText = '网页断流 · 本机工具活跃保护中' }
+        }
+        'WAITING_CONFIRM' {
+            $cd = if ($SessionObj.PSObject.Properties['SilenceCountdownSec'] -and $null -ne $SessionObj.SilenceCountdownSec -and "$($SessionObj.SilenceCountdownSec)" -match '^\d+(\.\d+)?$') { [int][Math]::Ceiling([double]$SessionObj.SilenceCountdownSec) } else { -1 }
+            $cdText = if ($cd -gt 0) { "约 $cd 秒后自动催工" } else { '等待静默确认后自动催工' }
+            return [pscustomobject]@{ Substate = $sub; Badge = '疑似中断'; Bg = '#FFFBEB'; Border = '#FDE68A'; Dot = '#D97706'; Fg = '#B45309'; PillText = "疑似中断 · $cdText" }
+        }
+        'NETWORK_HOLD' {
+            return [pscustomobject]@{ Substate = $sub; Badge = '断网保号中'; Bg = '#FFF7ED'; Border = '#FED7AA'; Dot = '#EA580C'; Fg = '#C2410C'; PillText = '代理/网络断连保号 · 等待恢复中' }
+        }
+        'DUAL_STREAM' {
+            return [pscustomobject]@{ Substate = $sub; Badge = '双流告警'; Bg = '#F5F3FF'; Border = '#DDD6FE'; Dot = '#7C3AED'; Fg = '#6D28D9'; PillText = '双流并发告警 · 已暂停自动派单' }
+        }
+    }
+    return $null
+}
+
 function Build-PaneStreamContent($PaneObj, $SessionObj, [bool]$IsNarrow = $false) {
     $hostContainer = New-Object Windows.Controls.Grid
     $rStream = New-Object Windows.Controls.RowDefinition; $rStream.Height = [Windows.GridLength]::new(1, [Windows.GridUnitType]::Star)
@@ -4718,7 +4742,16 @@ function Build-PaneStreamContent($PaneObj, $SessionObj, [bool]$IsNarrow = $false
     $sLabel.FontWeight = 'SemiBold'
     $sLabel.VerticalAlignment = 'Center'
 
-    if ($SessionObj.IsStalled) {
+    $paneVital = if (-not $SessionObj.IsArchived) { Get-VitalSubstateVisual $SessionObj } else { $null }
+    if ($paneVital) {
+        # Spec v4.7 §3.4: VitalSubstate semantic colors; keeps the >X分钟静默触发 / >X秒静默触发 suffix
+        $statusPill.Background = ConvertTo-Brush $paneVital.Bg
+        $statusPill.BorderBrush = ConvertTo-Brush $paneVital.Border
+        $sDot.Fill = ConvertTo-Brush $paneVital.Dot
+        $sLabel.Foreground = ConvertTo-Brush $paneVital.Fg
+        $guardPart = if ($effAutoWakeup) { "自动重发守护已就绪 ($stallTriggerUnit)" } else { '自动重发已关闭' }
+        $sLabel.Text = "$($paneVital.PillText) · $guardPart"
+    } elseif ($SessionObj.IsStalled) {
         $statusPill.Background = ConvertTo-Brush '#FFFBEB'
         $statusPill.BorderBrush = ConvertTo-Brush '#FDE68A'
         $sDot.Fill = ConvertTo-Brush '#D97706'
@@ -6383,11 +6416,23 @@ function Update-SessionDetailModal {
         return
     }
     $script:controls.DetailModalTitle.Text = $target.Title
-    $script:controls.DetailModalGoal.Text = if ($target.Goal) { "任务目标：$($target.Goal)" } else { $target.MetaText }
-    $script:controls.DetailModalBadgeBorder.Background = ConvertTo-Brush $target.StatusBg
-    $script:controls.DetailModalBadgeBorder.BorderBrush = ConvertTo-Brush $target.StatusBorder
-    $script:controls.DetailModalBadgeText.Text = $target.StatusBadge
-    $script:controls.DetailModalBadgeText.Foreground = ConvertTo-Brush $target.StatusFg
+    # Spec v4.7 §3.2: fold multi-line goals into one flattened line (MaxHeight=36 + ellipsis), full text in ToolTip
+    $goalFull = if ($target.Goal) { "任务目标：$($target.Goal)" } else { [string]$target.MetaText }
+    $script:controls.DetailModalGoal.Text = (([string]$goalFull) -replace '\s*[\r\n]+\s*', ' ').Trim()
+    $script:controls.DetailModalGoal.ToolTip = if ($goalFull) { [string]$goalFull } else { $null }
+    # Spec v4.7 §3.4: VitalSubstate badge (locally derived) overrides the hub badge; missing substate keeps legacy badge
+    $detailVital = Get-VitalSubstateVisual $target
+    if ($detailVital) {
+        $script:controls.DetailModalBadgeBorder.Background = ConvertTo-Brush $detailVital.Bg
+        $script:controls.DetailModalBadgeBorder.BorderBrush = ConvertTo-Brush $detailVital.Border
+        $script:controls.DetailModalBadgeText.Text = "● $($detailVital.Badge)"
+        $script:controls.DetailModalBadgeText.Foreground = ConvertTo-Brush $detailVital.Fg
+    } else {
+        $script:controls.DetailModalBadgeBorder.Background = ConvertTo-Brush $target.StatusBg
+        $script:controls.DetailModalBadgeBorder.BorderBrush = ConvertTo-Brush $target.StatusBorder
+        $script:controls.DetailModalBadgeText.Text = $target.StatusBadge
+        $script:controls.DetailModalBadgeText.Foreground = ConvertTo-Brush $target.StatusFg
+    }
     $script:controls.DetailDiagnosisText.Text = if ($target.HumanDiagnosis) { $target.HumanDiagnosis } else { $target.ActionText }
     $script:controls.DetailProgressBar.Value = if ($null -ne $target.ProgressPercent) { [double]$target.ProgressPercent } else { 100 }
     $script:controls.DetailProgressText.Text = if ($target.ProgressText) { $target.ProgressText } else { $target.MetaText }
@@ -6398,7 +6443,11 @@ function Update-SessionDetailModal {
     $commits = @(if ($target.PSObject.Properties.Name -contains 'RecentCommits' -and $target.RecentCommits) { $target.RecentCommits })
     $ckpts = @(if ($target.PSObject.Properties.Name -contains 'Checkpoints' -and $target.Checkpoints) { $target.Checkpoints })
     $firstSha = if (@($commits).Count -gt 0) { $commits[0].Sha } else { '' }
-    $panelSig = "$($target.SessionKey)|$($target.ProgressText)|$(@($steps).Count)|$firstSha|$(@($ckpts).Count)"
+    # Spec v4.7 §3.3: full dynamic fingerprint (step status + newest checkpoint) so 12-capped checkpoints never freeze the modal
+    $vSubSig = if ($target.PSObject.Properties['VitalSubstate']) { [string]$target.VitalSubstate } else { '' }
+    $stepsSig = (@($steps) | ForEach-Object { "$($_.Id):$($_.Status):$($_.UpdatedText)" }) -join ','
+    $lastCkpt = if (@($ckpts).Count -gt 0) { "$($ckpts[0].TimeText)|$($ckpts[0].Summary)" } else { '' }
+    $panelSig = "$($target.SessionKey)|$($target.VitalState)|$vSubSig|$($target.CommandCount)|$($target.ProgressText)|$stepsSig|$firstSha|$(@($ckpts).Count)|$lastCkpt"
     if ($script:lastDetailPanelSig -eq $panelSig -and $script:controls.DetailStepsPanel.Children.Count -gt 0) {
         return
     }
@@ -6559,6 +6608,11 @@ function Update-SessionCards {
         $pendCntSig = if ($s.PSObject.Properties['PendingQueueCount']) { [int]$s.PendingQueueCount } else { 0 }
         $vStateSig = if ($s.PSObject.Properties['VitalState']) { [string]$s.VitalState } else { '' }
         $vHintSig  = if ($s.PSObject.Properties['VitalHintText']) { [string]$s.VitalHintText } else { '' }
+        $vSubSig   = if ($s.PSObject.Properties['VitalSubstate']) { [string]$s.VitalSubstate } else { '' }
+        if ($vSubSig -eq 'WAITING_CONFIRM' -and $s.PSObject.Properties['SilenceCountdownSec'] -and "$($s.SilenceCountdownSec)" -match '^\d+(\.\d+)?$') {
+            $vSubSig += "~$([int][Math]::Floor([double]$s.SilenceCountdownSec / 10))"
+        }
+        $vHintSig = "$vHintSig/$vSubSig"
         $tModeSig = if ($s.PSObject.Properties['TargetMode']) { $s.TargetMode } else { '' }
         $bProfSig = if ($s.PSObject.Properties['BrowserProfile']) { $s.BrowserProfile } else { '' }
         $tModSig  = if ($s.PSObject.Properties['TargetModel']) { $s.TargetModel } else { '' }
@@ -6693,10 +6747,19 @@ function Update-SessionCards {
             [void]$subGrid.Children.Add($subBlock)
 
             $statusRightTxt = New-Object Windows.Controls.TextBlock
-            $statusRightTxt.Text = $(if ($isStalled) { '停顿中' } else { '执行中' })
+            $cardVital = Get-VitalSubstateVisual $s
             $statusRightTxt.FontSize = 11
-            $statusRightTxt.FontWeight = $(if ($isStalled) { 'SemiBold' } else { 'Normal' })
-            $statusRightTxt.Foreground = ConvertTo-Brush $(if ($isStalled) { '#B45309' } else { '#15803D' })
+            if ($cardVital) {
+                # Spec v4.7 §3.4: fine-grained StatusBadge derived locally from VitalSubstate
+                $statusRightTxt.Text = $cardVital.Badge
+                $statusRightTxt.FontWeight = 'SemiBold'
+                $statusRightTxt.Foreground = ConvertTo-Brush $cardVital.Fg
+                $statusRightTxt.ToolTip = $cardVital.PillText
+            } else {
+                $statusRightTxt.Text = $(if ($isStalled) { '停顿中' } else { '执行中' })
+                $statusRightTxt.FontWeight = $(if ($isStalled) { 'SemiBold' } else { 'Normal' })
+                $statusRightTxt.Foreground = ConvertTo-Brush $(if ($isStalled) { '#B45309' } else { '#15803D' })
+            }
             $statusRightTxt.Margin = [Windows.Thickness]::new(6, 0, 0, 0)
             [Windows.Controls.Grid]::SetColumn($statusRightTxt, 1)
             [void]$subGrid.Children.Add($statusRightTxt)

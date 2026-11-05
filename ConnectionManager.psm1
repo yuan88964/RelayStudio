@@ -4176,18 +4176,38 @@ function Get-RelayTasks {
 }
 
 function Get-WorkspaceRecentCommits {
-    param($Context)
+    # Spec v4.7 §3.1: per-session business repo attribution.
+    # Priority: 1) WorkspaceRoot (+ its parent)  2) WorkspaceName under the RelayStudio parent dir / settings.workspace_roots
+    #           3) RelayStudio's own repo (legacy fallback)  4) settings.workspace_roots own .git (legacy fallback)
+    param($Context, [string]$WorkspaceRoot = '', [string]$WorkspaceName = '')
     if ($Context.Isolated) { return @() }
-    $candidates = @()
-    if ($PSScriptRoot) { $candidates += (Join-Path $PSScriptRoot '.git\logs\HEAD') }
+    $settingsRoots = @()
     try {
         $s = Read-ConnectionSettings $Context
         if ($s -and $s.PSObject.Properties['workspace_roots'] -and $s.workspace_roots) {
-            foreach ($wr in @($s.workspace_roots)) {
-                if ($wr) { $candidates += (Join-Path ([string]$wr) '.git\logs\HEAD') }
-            }
+            $settingsRoots = @(@($s.workspace_roots) | Where-Object { $_ } | ForEach-Object { [string]$_ })
         }
     } catch {}
+    $candidates = @()
+    if ($WorkspaceRoot) {
+        try {
+            $wrFull = [IO.Path]::GetFullPath($WorkspaceRoot.Trim())
+            $candidates += (Join-Path $wrFull '.git\logs\HEAD')
+            $wrParent = Split-Path $wrFull -Parent
+            if ($wrParent) { $candidates += (Join-Path $wrParent '.git\logs\HEAD') }
+        } catch {}
+    }
+    $wsName = ([string]$WorkspaceName).Trim()
+    if ($wsName -and $wsName -notin @('General', 'RelayStudio', '.', '..') -and $wsName.IndexOfAny([IO.Path]::GetInvalidFileNameChars()) -lt 0) {
+        $nameRoots = @()
+        if ($PSScriptRoot) { $nameRoots += (Split-Path $PSScriptRoot -Parent) }
+        $nameRoots += $settingsRoots
+        foreach ($nr in $nameRoots) {
+            if ($nr) { try { $candidates += (Join-Path $nr "$wsName\.git\logs\HEAD") } catch {} }
+        }
+    }
+    if ($PSScriptRoot) { $candidates += (Join-Path $PSScriptRoot '.git\logs\HEAD') }
+    foreach ($wr in $settingsRoots) { try { $candidates += (Join-Path $wr '.git\logs\HEAD') } catch {} }
     foreach ($reflogPath in $candidates) {
         if (-not (Test-Path -LiteralPath $reflogPath)) { continue }
         try {
@@ -4388,6 +4408,33 @@ function Add-TaskComposerMetadataToSession {
     }
 }
 
+function Set-SessionRecentCommits {
+    # Spec v4.7 §3.1: fill each hub session's RecentCommits from its own WorkspaceRoot / WorkspaceName,
+    # caching per (DataRoot, WorkspaceRoot, WorkspaceName) for 6s. Sessions without workspace hints share
+    # the legacy global entry; hub-provided RecentCommits are never overwritten.
+    param($Context, $Sessions, [string]$CacheKey = '', [bool]$CanCache = $false)
+    $local = @{}
+    foreach ($hs in @($Sessions)) {
+        if (-not $hs) { continue }
+        if ($hs.PSObject.Properties['RecentCommits'] -and $hs.RecentCommits -and @($hs.RecentCommits).Count -gt 0) { continue }
+        $wsRoot = if ($hs.PSObject.Properties['WorkspaceRoot'] -and $hs.WorkspaceRoot) { [string]$hs.WorkspaceRoot } else { '' }
+        $wsName = if ($hs.PSObject.Properties['WorkspaceName'] -and $hs.WorkspaceName) { [string]$hs.WorkspaceName } else { '' }
+        $entryKey = if ($wsRoot -or $wsName) { "$CacheKey|$wsRoot|$wsName" } else { $CacheKey }
+        if ($local.ContainsKey($entryKey)) {
+            $commits = $local[$entryKey]
+        } elseif ($CanCache -and $script:WorkspaceCommitsCache.ContainsKey($entryKey) -and (([DateTime]::UtcNow - $script:WorkspaceCommitsCache[$entryKey].CheckedUtc).TotalSeconds -lt 6.0)) {
+            $commits = @($script:WorkspaceCommitsCache[$entryKey].Commits)
+        } else {
+            $commits = @(Get-WorkspaceRecentCommits -Context $Context -WorkspaceRoot $wsRoot -WorkspaceName $wsName)
+            if ($CanCache) { $script:WorkspaceCommitsCache[$entryKey] = @{ Commits = $commits; CheckedUtc = [DateTime]::UtcNow } }
+        }
+        $local[$entryKey] = $commits
+        if (@($commits).Count -gt 0) {
+            $hs | Add-Member -NotePropertyName 'RecentCommits' -NotePropertyValue @($commits) -Force
+        }
+    }
+}
+
 function Get-TunnelActivityPulse {
     param($Context, [bool]$TunnelRunning = $true, $Settings = $null)
     if ($Context.Isolated -or -not $TunnelRunning) {
@@ -4402,20 +4449,9 @@ function Get-TunnelActivityPulse {
         if ($hubSnap.PSObject.Properties['not_modified'] -and $hubSnap.not_modified -and $cachedSnapEntry -and $cachedSnapEntry.Pulse) {
             return $cachedSnapEntry.Pulse
         }
-        $commits = @()
-        if ($canCacheSnap -and $script:WorkspaceCommitsCache.ContainsKey($snapCacheKey) -and (([DateTime]::UtcNow - $script:WorkspaceCommitsCache[$snapCacheKey].CheckedUtc).TotalSeconds -lt 6.0)) {
-            $commits = @($script:WorkspaceCommitsCache[$snapCacheKey].Commits)
-        } else {
-            $commits = @(Get-WorkspaceRecentCommits $Context)
-            if ($canCacheSnap) {
-                $script:WorkspaceCommitsCache[$snapCacheKey] = @{ Commits = $commits; CheckedUtc = [DateTime]::UtcNow }
-            }
-        }
+        Set-SessionRecentCommits -Context $Context -Sessions (@($hubSnap.sessions) + @($hubSnap.archived_sessions)) -CacheKey $snapCacheKey -CanCache $canCacheSnap
         foreach ($hs in @($hubSnap.sessions) + @($hubSnap.archived_sessions)) {
             if (-not $hs) { continue }
-            if ($commits.Count -gt 0 -and (-not $hs.RecentCommits -or @($hs.RecentCommits).Count -eq 0)) {
-                $hs | Add-Member -NotePropertyName 'RecentCommits' -NotePropertyValue $commits -Force
-            }
             $autoVal = if ($hs.PSObject.Properties['AutoResendEnabled'] -and $null -ne $hs.AutoResendEnabled) {
                 [bool]$hs.AutoResendEnabled
             } elseif ($hs.PSObject.Properties['AutoWakeupEnabled'] -and $null -ne $hs.AutoWakeupEnabled) {
