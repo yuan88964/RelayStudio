@@ -2981,7 +2981,14 @@ function Set-TaskComposerConfig {
     }
     $state.breakers | Add-Member -NotePropertyName $SessionKey -NotePropertyValue $curBrk -Force
 
-    if ($Provider -and $state.session_bindings.PSObject.Properties[$SessionKey]) { $state.session_bindings.$SessionKey | Add-Member provider $Provider -Force }
+    if ($Provider -and $state.session_bindings.PSObject.Properties[$SessionKey]) {
+        if ($existing -and (Get-WebRoomProvider $existing) -ne $Provider) {
+            foreach ($field in @('conv_uuid', 'tab_id', 'project_prefix')) { $newBinding | Add-Member $field '' -Force }
+            if ($oldUuid -and $retiredList -notcontains $oldUuid) { $retiredList.Add($oldUuid) }
+            $newBinding | Add-Member retired_uuids @($retiredList) -Force
+        }
+        $newBinding | Add-Member provider $Provider -Force
+    }
     Save-WebBridgeState $Context $state
     return [pscustomobject]@{
         ok = $true

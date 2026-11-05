@@ -5001,6 +5001,8 @@ function Sync-ComposerModelAndEffortCombos($StateInfo, $AvailModels, [string]$Cu
     try {
     $modelsArr = @(if ($AvailModels) { $AvailModels })
     $providerCatalogs = if ($StateInfo.PSObject.Properties['AvailableModelsByProvider']) { $StateInfo.AvailableModelsByProvider } else { $null }
+    $connectedProviders = if ($StateInfo.PSObject.Properties['ConnectedProviders']) { ,@($StateInfo.ConnectedProviders) } else { $null }
+    $connectedSig = @($connectedProviders) -join ','
     $catalogsSig = if ($providerCatalogs) { $providerCatalogs | ConvertTo-Json -Depth 12 -Compress } else { '' }
     $modelSlugsSig = (@($modelsArr | ForEach-Object {
         $s = if ($_.PSObject.Properties['slug']) { [string]$_.slug } else { '' }
@@ -5072,7 +5074,7 @@ function Sync-ComposerModelAndEffortCombos($StateInfo, $AvailModels, [string]$Cu
     }
     $platsSig = (@($enabledPlats | ForEach-Object { (& $resolvePlatGroupSummary $_).Sig }) -join '|')
     $isColdStartNoWebModel = ($modelsArr.Count -eq 0) -and [string]::IsNullOrWhiteSpace($WebModel) -and ([string]::IsNullOrWhiteSpace($CurModel) -or $CurModel -eq 'inherit') -and [string]::IsNullOrWhiteSpace($WebEffort)
-    $catalogSig = "$catalogsSig||$modelSlugsSig||webM=$WebModel||webE=$WebEffort||curM=$CurModel||plats=$platsSig||cold=$isColdStartNoWebModel"
+    $catalogSig = "$connectedSig||$catalogsSig||$modelSlugsSig||webM=$WebModel||webE=$WebEffort||curM=$CurModel||plats=$platsSig||cold=$isColdStartNoWebModel"
 
     $modelCombo = $StateInfo.ModelCombo
     $effortCombo = $StateInfo.EffortCombo
@@ -5229,7 +5231,7 @@ function Sync-ComposerModelAndEffortCombos($StateInfo, $AvailModels, [string]$Cu
         for ($pi = 0; $pi -lt $enabledPlats.Count; $pi++) {
             $pCode = $enabledPlats[$pi]
             $provider = if ($pCode -eq 'openai') { 'chatgpt' } else { $pCode }
-            $pModels = @(if ($providerCatalogs -and $providerCatalogs.PSObject.Properties[$provider]) { $providerCatalogs.$provider } elseif ($provider -eq 'chatgpt') { $modelsArr })
+            $pModels = @(if ($null -ne $connectedProviders -and $connectedProviders -notcontains $provider) { } elseif ($providerCatalogs -and $providerCatalogs.PSObject.Properties[$provider]) { $providerCatalogs.$provider } elseif ($provider -eq 'chatgpt') { $modelsArr })
             if ($enabledPlats.Count -gt 1) { [void]$modelCombo.Items.Add((& $buildPlatGroupHeader $pCode)) }
             if ($pi -gt 0) {
                 $pDefItem = New-Object Windows.Controls.ComboBoxItem
@@ -5446,6 +5448,7 @@ function Build-PlanBComposerPod($SessionObj = $null, [bool]$IsNarrow = $false, [
                     $st.Session = $SessionObj
                     $st.DraftObj = $draftObj
                     $st.TargetMode = $curTargetMode
+                    $st.ConnectedProviders = $(if ($wbState -and $wbState.PSObject.Properties['connected_providers']) { ,@($wbState.connected_providers) } else { $null })
                     $st.Provider = $(if ($curBinding) { Get-WebRoomProvider $curBinding } else { 'chatgpt' })
                     $st.AvailableModelsByProvider = $(if ($wbState -and $wbState.PSObject.Properties['available_models_by_provider']) { $wbState.available_models_by_provider } elseif ($SessionObj -and $SessionObj.PSObject.Properties['AvailableModelsByProvider']) { $SessionObj.AvailableModelsByProvider } else { $null })
                     $st.WebModel = $webModel
@@ -5737,6 +5740,7 @@ function Build-PlanBComposerPod($SessionObj = $null, [bool]$IsNarrow = $false, [
         PodBorder = $composerPod
         LastCatalogSig = ''
         Provider = $(if ($curBinding) { Get-WebRoomProvider $curBinding } else { 'chatgpt' })
+        ConnectedProviders = $(if ($wbState -and $wbState.PSObject.Properties['connected_providers']) { ,@($wbState.connected_providers) } else { $null })
         AvailableModelsByProvider = $(if ($wbState -and $wbState.PSObject.Properties['available_models_by_provider']) { $wbState.available_models_by_provider } elseif ($SessionObj -and $SessionObj.PSObject.Properties['AvailableModelsByProvider']) { $SessionObj.AvailableModelsByProvider } else { $null })
         AvailableModels = $availModels
         WebModel = $webModel

@@ -169,3 +169,11 @@ $multi | Add-Member AvailableModelsByProvider ([pscustomobject]@{chatgpt=$catalo
 Sync-Test $multi $catalog 'inherit' 'inherit'
 Assert-Case (@(Get-Tags $multi.ModelCombo) -contains 'gemini-pro') 'Gemini group exposes its reported model'
 Assert-Case (@($multi.ModelCombo.Items | Where-Object {$_.ToolTip -eq 'claude' -and $_.Tag -eq 'inherit'}).Count -eq 1) 'Disconnected Claude has exactly one default'
+
+$multi | Add-Member ConnectedProviders @('chatgpt')
+Sync-Test $multi $catalog 'inherit' 'inherit'
+Assert-Case (@(Get-Tags $multi.ModelCombo) -notcontains 'gemini-pro') 'Disconnected Gemini does not expose historical cached model'
+
+$multi.ConnectedProviders = @()
+Sync-Test $multi $catalog 'inherit' 'inherit'
+Assert-Case (@(Get-Tags $multi.ModelCombo) -notcontains 'gpt-6-thinking') 'All-disconnected platform set also hides cached OpenAI models'

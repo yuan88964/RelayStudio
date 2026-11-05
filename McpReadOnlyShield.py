@@ -247,6 +247,19 @@ def _provider_models(state: dict, provider: str = "chatgpt", profile: str = "") 
     return carrier or catalogs.get(provider) or (state.get("available_models") or [] if provider == "chatgpt" else [])
 
 
+def _connected_providers(state: dict) -> list[str]:
+    return sorted({
+        _platform(tab) for tab in (state.get("tabs") or {}).values()
+        if isinstance(tab, dict) and time.time() - _parse_iso_epoch(str(tab.get("last_seen_at") or "")) <= 15
+    })
+
+
+def _visible_provider_catalogs(state: dict) -> dict:
+    online = _connected_providers(state)
+    return {provider: models if provider in online else []
+            for provider, models in (state.get("available_models_by_provider") or {}).items()}
+
+
 def _store_provider_models(state: dict, provider: str, models: list, profile: str = "") -> None:
     provider = _platform({"provider": provider})
     state.setdefault("available_models_by_provider", {})[provider] = models
@@ -5270,8 +5283,9 @@ def build_studio_snapshot(data_root: str, tasks_root: str, web_bridge_path: str 
             "auto_resend_config": ar_cfg,
             "available_models": effective_models,
             "AvailableModels": effective_models,
-            "available_models_by_provider": wb_state.get("available_models_by_provider", {}),
-            "AvailableModelsByProvider": wb_state.get("available_models_by_provider", {}),
+            "available_models_by_provider": _visible_provider_catalogs(wb_state),
+            "AvailableModelsByProvider": _visible_provider_catalogs(wb_state),
+            "connected_providers": _connected_providers(wb_state),
             "desktop_app_online": desktop_online,
             "DesktopAppOnline": desktop_online,
         },
@@ -6992,7 +7006,7 @@ def handle_web_bridge_poll(wb_path: str, tasks_root: str, payload: dict) -> dict
                         base_url = _platform_base(msg, project_prefix)
                         model_slug = _model_to_url_slug(
                             str(msg.get("target_model") or binding.get("target_model") or "inherit"),
-                            state.get("available_models"),
+                            _provider_models(state, _platform(msg), target_profile),
                         )
                         model_qs = f"&model={model_slug}" if model_slug else ""
                         prof_qs = f"&relay_profile={urllib.parse.quote(target_profile)}" if target_profile else ""
@@ -8317,6 +8331,11 @@ def handle_studio_action(data_root: str, tasks_root: str, wb_path: str, payload:
             new_mode = str(payload.get("target_mode") or "").strip()
 
             if new_provider:
+                new_provider = _platform({"provider": new_provider})
+                if new_provider != _platform(b):
+                    _bind_conv_uuid(b, "", clear_if_empty=True)
+                    b["tab_id"] = ""
+                    b["project_prefix"] = ""
                 b["provider"] = new_provider
             prev_prof = str(b.get("browser_profile") or "").strip()
             if new_prof:
