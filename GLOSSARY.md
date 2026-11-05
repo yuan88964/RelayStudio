@@ -105,3 +105,21 @@ _Avoid_: 前台会话、主屏幕
 **商店容器通行证（Store Package Identity）**:
 Windows 操作系统为微软商店打包程序（如 ChatGPT 桌面端 `OpenAI.Codex`）颁发的官方容器启动身份；通过系统容器命令（`Invoke-CommandInDesktopPackage`）持该通行证启动程序，可在具备合法沙盒权限的前提下挂载内部调试窗口与后台静默环境变量。
 _Avoid_: MSIX 容器、沙盒命令、直接跑 exe
+
+## 多平台回调通道与本地智能体分工（Multi-Platform Channels & Local CLI Agents）
+
+**平台通道胶囊（Platform Channel Capsule）**:
+顶栏用于管理原生支持 MCP 工具回调的三大云端对话平台（OpenAI、Gemini、Claude）与本机后台大管家之间隧道连接及在线状态的一体式分段状态栏。
+_Avoid_: API 密钥栏、CLI 账号切换器、多平台密钥盒
+
+**专用反向隧道（OpenAI Private Tunnel）**:
+供 ChatGPT 云端会话房间回调本机后台大管家的 OpenAI 专属反向连接通道，需凭 `tunnel_...` 隧道编号与仅作隧道鉴权用的 OpenAI API Key 握手建立。
+_Avoid_: 通用隧道、聊天 API 密钥连接
+
+**公网 MCP 隧道（Public HTTPS MCP Tunnel）**:
+将本机后台大管家映射为公网 `https://.../mcp` 挂载地址的标准反向隧道（如 Cloudflare Tunnel），供支持官方远程连接器的云端会话房间（Gemini 网页端/桌面端、Claude 网页端/桌面端）在「已关联的应用 / Connectors」中直接绑定并回调本机工具，无需在面板内填写各平台 API Key。
+_Avoid_: Gemini API Key 配置、Claude 密钥通道
+
+**本地 CLI 智能体（Local CLI Agent）**:
+安装在本机终端、由外部换号软件预先完成账号登录的命令行编程智能体（如 `Codex`、`Claude`、`WorkBuddy`、`AGY`）；归口于面板左上角「通用设置」自动扫描与调度，在云端会话房间通过本机工具下发子任务时于后台并发执行，不在顶栏平台通道胶囊中重复管理其账号或 API Key。
+_Avoid_: 顶栏平台分栏、网页会话载体

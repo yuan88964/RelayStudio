@@ -1,227 +1,183 @@
-# RelayStudio 顶栏双组纯图标分段胶囊、多平台模型分组呼应与跨层契约防崩规格书（Spec）
+# RelayStudio 三大平台（OpenAI / Gemini / Claude）公网 MCP 隧道、后台大管家多平台路由与跨站点网页探针规格书（Spec）
 
 - **Status**: `ready-for-agent`
-- **Date**: 2026-11-04
+- **Date**: 2026-11-05
 
 ---
 
 ## Problem Statement
 
-在围绕「主动向网页端派发开发任务，并让网页端借助本地 MCP 工具回调操控电脑」的核心闭环打磨 **前台遥控面板（Studio Panel）** 与 **新建任务发射台（New Task Launchpad）** 的过程中，当前系统在顶栏交互布局、上下模型/思考强度联动以及跨模块底层契约上存在四类核心问题：
+### 1. 现状系统架构与职责分工（Current Architecture Overview）
 
-1. **顶栏控件分散、文字冗余且缺乏多平台分段生长能力**：
-   - 顶栏按钮分散在左右两端并夹杂竖线隔板与文字标签，视觉不够紧凑；
-   - 隧道状态区仅支持单一固定按钮，无法以一体式分段胶囊的形态按需通过末尾 `＋` 动态添加和切换多个平台分栏（如 `OpenAI`、`Claude`、`Gemini`、`DeepSeek`、`OpenCode`）；
-   - 平台配置弹窗中存在多余的界面操作说明小字，且对「需要本地反向隧道进程（`tunnel`）」与「仅需 API Key 与接口配置（`apikey`）」的平台未做表单与底部操作区分，左下角快捷链接顺序也未统一为「左：获取或管理 API Key，右：平台适配入口」。
-2. **顶栏胶囊分栏与下方模型下拉框、思考强度栏脱节，且冷启动越权预填假数据**：
-   - 下方左一栏「模型下拉框」未与顶栏胶囊已启用的平台分栏建立分组与呼吸灯呼应关系，用户在顶栏添加新平台分栏后，无法在下方模型下拉框中看到对应的平台分组；
-   - 在网页尚未连接或尚未抓回真实模型与思考档位信息的冷启动阶段，底层逻辑会偷偷读取本机 `~/.codex/.codex-global-state.json` 的 CLI 缓存冒充网页模型，且 UI 层在无网页信息时硬编码预填了 `min / standard / extended / max` 四个思考档位并将默认项显示为 `🧠 默认 (standard)`，违背了「一开始只显示 `默认 (跟随网页)`、待从网页读取实际信息后再展开」的原则。
-3. **跨模块底层接口契约缺乏防御性校验，易引发内核或隧道进程静默崩溃**：
-   - 本地 Go 内核（`:8765`）对环境变量 `RELAYCORE_ACP_PROFILES_JSON` 中的 `kind`（仅限 `"codex" | "claude" | "custom"`）、`id` 命名正则与保留字双向约束（`custom` 类型严禁使用 `"codex"` 或 `"claude"` 作为 `id`），以及 `RELAYCORE_ACP_DEFAULT_PROFILE` 必须命中已启用列表具有强校验，一旦传入未归一化的字段即刻以 `exit code 1` 秒退，进而阻断后续 **后台大管家（Studio Hub）**（`:8766`）与隧道客户端（`:8789`）的启动；
-   - 配置保存模块在覆写 `settings.json` 时使用固定字段白名单字典，会静默抹除 `workspace_roots`、`extra_bin_dirs` 等扩展配置项；
-   - 若将非隧道类的平台密钥配置（`kind: "apikey"`）混入原有的 `Save-ConnectionProfile` / `Select-ConnectionProfile` 流程，会触发 `tunnel_...` 正则校验报错或错误覆写 OpenAI 隧道的 `relay-tunnel.yaml` 与 `openai-api-key.dpapi`。
+`RelayStudio` 由四个相互配合的模块组成，负责把本地开发任务投递给云端 **会话房间（Conversation Room）**，并让云端对话窗口在思考过程中通过 MCP 协议回调本机工具：
+
+1. **前台遥控面板（Studio Panel）**：桌面图形界面，顶栏左侧设有 **平台通道胶囊（Platform Channel Capsule）** 展示并管理各云端平台的连接状态，底部设有任务输入舱（含「模型下拉框」「思考强度下拉框」「运行载体下拉框」），左上角「通用设置」管理 **本地 CLI 智能体（Local CLI Agent）**。
+2. **连接与凭据引擎（Connection & Credential Engine）**：负责持久化管理各平台连接配置、启停本地内核进程与反向隧道守护进程。
+3. **后台大管家（Studio Hub）**：一方面作为本地 MCP 网关，为所有本地工具自动注入免确认只读标记并内置任务进度账本；另一方面作为会话调度中枢，统一维护 **待发队列（Dispatch Queue）**、**房产证绑定簿（Session Binding）** 与 **退役名单（Retired Conversations）**。
+4. **网页探针（Web Probe）与桌面联络员（Desktop Bridge Agent）**：驻留在浏览器页面与桌面客户端中，周期性向 **后台大管家** 汇报当前 **会话房间** 标识、可用模型目录与生成状态，并认领 **待发队列** 中的消息自动填入输入框发送。
+
+### 2. 现状四大核心问题与底层架构成因对照表（Root-Cause Attribution）
+
+| 问题维度 | 用户可观测现象 | 责任模块 | 底层架构成因（为什么现状会出问题） | 目标行为契约（应改为什么行为） |
+| :--- | :--- | :--- | :--- | :--- |
+| **1. 顶栏平台职责错位与非原生 MCP 平台混入** | 点击顶栏 `＋` 出现 `DeepSeek` 与 `OpenCode`；点开 `Gemini` 或 `Claude` 卡片却要求填写 API Key 并测试模型接口，填完后网页端依然无法调用本机 MCP 工具。 | **连接与凭据引擎** + **前台遥控面板** | 1. 早期设计误将顶栏胶囊当作本地 CLI 的密钥配置器（实际上 **本地 CLI 智能体** 的账号登录已由外部换号软件统一接管，归口于左上角「通用设置」）；<br>2. `DeepSeek` 网页端无官方原生 MCP 连接器且每次发消息强制执行算力校验与风控拦截；`OpenCode` 属于不常用的本地命令行工具而非云端对话网页；<br>3. `Gemini` 与 `Claude` 的网页端和桌面端均采用云端服务器主动连接用户提供的 **公网 MCP 隧道（Public HTTPS MCP Tunnel）**，不使用本地填写的平台 API Key。 | 1. 顶栏平台列表收敛为原生支持 MCP 的 **`OpenAI`、`Gemini`、`Claude` 三项**（移除 `DeepSeek` 与 `OpenCode`）；<br>2. 将 `Gemini` 与 `Claude` 卡片从填写 API Key 改为共享本机 **公网 MCP 隧道** 的挂载卡片，直接展示并支持一键复制公网 MCP 挂载网址。 |
+| **2. 后台大管家开窗路由与跨域策略绑定单一平台** | 当任务绑定在 Gemini 或 Claude 上时，触发 **新建网页交接** 或唤醒网页会错误跳往 ChatGPT 网页；且浏览器在 Gemini 或 Claude 页面无法向 **后台大管家** 上报探针状态。 | **后台大管家（Studio Hub）** | 1. 虽然 **房产证绑定簿** 已记录任务所属的平台标识，且内置的 MCP 工具网关与任务进度账本已是跨平台通用协议，但 **后台大管家** 在拼接新建对话网址、生成会话房间直达链接及设置默认投递前缀时，仍写死为单一平台的网址；<br>2. 跨域响应策略仅放行了单一平台的网页域名，拦截了来自 Gemini 与 Claude 网页端的探针请求。 | 在 **后台大管家** 中建立统一的平台路由与跨域接缝，根据任务或会话绑定的平台动态解析对应平台的新建对话网址、会话房间直达链接，并放行三大平台网页域名的跨域通信。 |
+| **3. 模型目录缓存单槽位互相覆盖** | 同时打开多个平台的网页时，底部「模型下拉框」中一个平台的模型列表会覆盖另一个平台，或非主平台分组下始终只显示静态的 `默认 (跟随网页)`。 | **后台大管家** + **前台遥控面板** | 1. **后台大管家** 仅维护单一全局可用模型列表，未按上报来源的平台分槽存储；<br>2. **前台遥控面板** 在渲染多平台模型下拉框时，仅为主平台展开模型列表，其余已启用平台分组下只渲染了静态的默认占位项。 | 1. **后台大管家** 按平台分别存储各平台网页端上报的可用模型目录（同时保持对原有单平台读取方式的兼容）；<br>2. **前台遥控面板** 在底部模型下拉框的各个已启用平台分组下，各自展示该平台已抓回的真实模型列表（未连接对应网页时保持只显示 `默认 (跟随网页)`）。 |
+| **4. 网页探针绑定单一站点的页面结构** | 在浏览器打开 Gemini 或 Claude 网页端时，面板无法识别当前 **会话房间**，也无法自动填字投递、监控停工或执行换窗交接。 | **网页探针（Web Probe）** | **网页探针** 的注入范围、会话房间号提取规则、输入框定位、发送触发与停止生成检测均写死在单一站点的页面结构上，缺乏跨站点适配接缝。 | 将 **网页探针** 拆分为「通用轮询/认领/回执内核」与「跨站点适配接缝」，按当前网页所属平台自动选用对应的房间号提取、生成状态巡检、输入框填字发送与模型目录采集逻辑。 |
 
 ---
 
 ## Solution
 
-围绕「顶栏双组纯图标与分段生长胶囊、上下分组同频呼应与冷启动纯净默认、五层跨模块契约防崩守卫」三大方向，对系统进行收敛重构：
+依据项目领域术语表与架构决策记录，将系统收敛并打通为面向 **`OpenAI`、`Gemini`、`Claude` 三大原生 MCP 平台** 的全链路架构：
 
-1. **顶栏左侧双组纯图标布局 + 一体式分段生长胶囊**：
-   - **完全集中在顶栏左侧，移除所有竖线隔板**：
-     - **第一组（视图与外观组，3 项紧凑相连）**：最左端为 `[R] RelayStudio` 品牌标识，紧跟 `[◧ 侧边栏切换纯图标]` 与 `[☀/🌙 外观切换纯图标]`；全部采用纯图标设计，不带文字标签，仅在鼠标悬停时显示提示说明。
-     - **第二组（设置与平台胶囊组，与第一组保留舒适留白间距）**：左侧为 `[⚙ 通用设置纯图标]`，右侧紧贴 **一体式分段生长胶囊**。
-   - **一体式分段生长胶囊与平台卡片弹窗**：
-     - 胶囊内部以 `1px` 细线分隔各个已启用的平台分栏，每个分栏保留 **呼吸灯状态点（`🟢` / `⚪`）+ 当前配置名称**（多平台共存时前缀显示平台短名，如 `OpenAI:yuan88964`），胶囊最末尾一格固定为 **`＋`** 按钮。
-     - 点击胶囊任意平台分栏，弹出该平台的配置卡片（去除冗余的界面用法说明小字）：
-       - **隧道型平台（`kind: "tunnel"`，如 OpenAI）**：展示配置名称、`tunnel_...` 隧道编号、OpenAI API Key，右下角提供 `▶ 启动隧道 / ↻ 重新连接` 与 `断开`；
-       - **密钥型平台（`kind: "apikey"`，如 Claude / Gemini / DeepSeek / OpenCode）**：展示配置名称、API Key、接口地址（可选），右下角提供 `✓ 测试连接` 与 `启用密钥 / 停用`；
-       - **卡片左下角链接统一规范**：所有平台卡片左下角统一为 **左侧固定是 `获取或管理 API Key ↗`（`ApiKeysButton`），右侧是该平台对应的适配入口（`PlatformButton`）**（如 OpenAI 为 `打开 OpenAI 隧道设置 ↗`、Claude 为 `网页端 Connectors ↗`、Gemini 为 `打开 Google AI Studio ↗`、DeepSeek 为 `开放平台文档 ↗`、OpenCode 为 `OpenCode 官方文档 ↗`）。
-     - 点击胶囊末尾的 **`＋`** 按钮，弹出平台添加面板（包含 `OpenAI` 本身及预设平台，仅保留各平台自身作用说明，不写多余的界面操作提示；新添加的分栏默认仅创建干净的初始配置，不预填假账号或假密钥）。
-2. **顶栏胶囊分栏 ↔ 下方「模型栏 / 思考强度栏」分组呼应与冷启动纯净默认态**：
-   - **顶栏加一个分栏 ➔ 下方模型下拉框自动多一个带呼吸灯的分组**：顶栏胶囊中有几个平台分栏，下方左一栏「模型下拉框」点开后就自动渲染几个对应的平台分组，且分组标题旁同步显示顶栏该分栏的呼吸灯状态（`🟢` / `⚪`）与当前配置名。
-   - **冷启动严格只显示 `默认 (跟随网页)`**：在 **网页探针（Web Probe）** 或 **桌面联络员（Desktop Bridge Agent）** 尚未从真实网页读取到模型目录与思考档位信息前（同时切断对本地 `~/.codex` CLI 缓存的跨界借用），下方左一栏（模型下拉框各分组内）与中间栏（思考强度下拉框）**一律只显示唯一一项 `默认 (跟随网页)`（`Tag = 'inherit'`）**，绝不预填写死的假模型列表或兜底的 `min / standard / extended / max` 档位；待网页实际回传信息后，再动态展开真实模型与对应思考档位。
-   - **右侧运行载体栏保持纯粹自由选择**：只要隧道已建立，右一栏「运行载体下拉框」可自由选择任意浏览器分身或桌面客户端派发任务，不加呼吸灯绑定或错配告警。
-3. **跨模块强约束契约守卫（防崩加固）**：
-   - 在连接管理引擎层落地 ACP Profile 双向校验守卫、`settings.json` 非破坏性合并写盘守卫、以及 `tunnel` 与 `apikey` 两类配置的读写与进程隔离守卫，确保新增平台或自定义 CLI 智能体绝不引发内核崩溃或配置丢失。
+1. **顶栏平台通道胶囊收敛为三大原生 MCP 平台，并将 Gemini / Claude 升级为「公网 MCP 隧道挂载卡片」**：
+   - 点击顶栏胶囊末尾 `＋` 时，仅展示 **`OpenAI`**、**`Gemini`**、**`Claude`** 三项（彻底移除 `DeepSeek` 与 `OpenCode`）；
+   - **`OpenAI` 分栏**：保持现有 **专用反向隧道（OpenAI Private Tunnel）** 配置与启停行为不变；
+   - **`Gemini` 与 `Claude` 分栏**：移除无用的 API Key 输入框，改为共享本机 **公网 MCP 隧道（Public HTTPS MCP Tunnel）**，支持将本机 **后台大管家** 映射为公网可访问的 HTTPS MCP 挂载网址（支持免配置快速临时隧道与自定义固定域名两种模式）。卡片内直接展示当前挂载网址并提供一键复制能力，右下角提供隧道启停操作，左下角一键直达 Gemini 或 Claude 的官方 MCP 关联设置页。
+2. **后台大管家（Studio Hub）建立多平台路由接缝与分平台模型目录**：
+   - **后台大管家** 根据任务或会话所属的平台（`OpenAI`、`Gemini`、`Claude`），动态解析对应平台的新建对话网址、会话房间直达网址与跨域允许来源，消除单平台网址硬编码；
+   - 按平台分槽保存各平台网页端上报的可用模型列表，供 **前台遥控面板** 底部模型下拉框按平台分组独立展示。
+3. **网页探针（Web Probe）建立跨站点适配接缝**：
+   - **网页探针** 同时覆盖 ChatGPT、Gemini 与 Claude 网页端；
+   - 通过统一的站点适配接缝屏蔽三家网页在 URL 结构与输入框形态上的差异，使 **跟随原窗口**、**原页催工单（In-Place Wakeup）** 与 **新建网页交接（New Window Handover Mode）** 在三大平台网页端上具备完全一致的投递与回执体验。
 
 ---
 
 ## User Stories
 
-1. As a RelayStudio 用户, I want 顶栏所有操作入口集中在左侧且分为紧凑的两组纯图标（`RelayStudio + 侧边栏图标 + 外观图标` 为第一组，留白后 `设置图标 + 分段隧道胶囊` 为第二组，无任何竖线隔板或文字标签，悬停才显示说明）, so that 顶栏视觉干净克制且符合高频操作动线。
-2. As a RelayStudio 用户, I want 隧道状态区呈现为一个内部用细线分隔、末尾固定带 `＋` 的一体式胶囊，每一节都保留呼吸灯和当前生效配置名, so that 我能一眼看清各平台的在线状态并按需向右生长新的平台分栏。
-3. As a RelayStudio 用户, I want 点击胶囊的某一节时直接弹出对应平台的配置卡片，且所有平台卡片左下角统一为「左侧：获取或管理 API Key ↗，右侧：平台适配入口 ↗」, so that 我在不同平台卡片中拥有一致的直觉操作体验。
-4. As a RelayStudio 用户, I want 平台配置卡片根据平台真实机制区分表单与操作（OpenAI 展示隧道编号与 API Key 并控制本地隧道进程；Claude / Gemini / DeepSeek / OpenCode 展示 API Key 与可选接口地址并提供连接测试与启用/停用）, so that 界面配置项与各平台的真实工作原理严格一致。
-5. As a RelayStudio 用户, I want 点击胶囊末尾的 `＋` 时弹出包含 OpenAI 及预设平台的添加列表（不含多余的界面操作说明小字），且添加新平台分栏时不预填假账号或假密钥, so that 界面清爽且不会混入干扰性的虚假预设数据。
-6. As a RelayStudio 用户, I want 顶栏胶囊每增加或启用一个平台分栏，下方「新建任务 / 任务输入舱」左一栏的模型下拉框中就自动对应多出一个带同频呼吸灯的平台分组, so that 上方平台通道配置与下方模型选择能够直观呼应。
-7. As a RelayStudio 用户, I want 模型下拉框（各平台分组下）与思考强度下拉框在尚未从网页端读取到实际信息前，一开始都只显示 `默认 (跟随网页)` 而不预填很多选项，等到从网页端读取到实际信息后再显示出相应的模型与思考档位, so that 下拉列表真实反映当前网页状态而不会展示虚假或过期的预填项。
-8. As a RelayStudio 用户, I want 建好隧道后在右一栏「运行载体」中可以自由选择任意浏览器分身或桌面客户端来派发任务，不受隧道账号强制绑定或告警条干扰, so that 我能灵活把任务派发给任意目标浏览器窗口。
-9. As a RelayStudio 用户, I want 本地内核、护盾与隧道进程在面对各种 CLI 智能体配置、多平台密钥切换与设置保存时具备严格的跨层契约保护, so that 不会再发生因枚举值不匹配或配置覆写导致隧道连不上、内核崩溃退出或设置丢失的故障。
+1. As a RelayStudio 用户, I want 点击顶栏 **平台通道胶囊** 末尾的 `＋` 时只看到 `OpenAI`、`Gemini`、`Claude` 三个原生支持 MCP 的主力平台（不再出现 `DeepSeek` 和 `OpenCode`）, so that 界面选项纯粹且完全匹配我的主力开发工作流。
+2. As a RelayStudio 用户, I want 点开顶栏 `Gemini` 或 `Claude` 分栏时不再看到无用的 API Key 输入框，而是直接看到 **公网 MCP 隧道** 的运行状态与公网 MCP 挂载网址, so that 我能直接把本机 **后台大管家** 挂载进 Gemini（网页端与桌面端）和 Claude（网页端与桌面端）。
+3. As a RelayStudio 用户, I want 在 `Gemini` 或 `Claude` 卡片中点击启动隧道即可自动将本机 **后台大管家** 映射为公网 HTTPS MCP 网址并支持一键复制, so that 我无需手敲命令行就能在几秒内完成云端 MCP 绑定。
+4. As a RelayStudio 用户, I want `Gemini` 与 `Claude` 分栏共享本机同一条 **公网 MCP 隧道** 与同一个挂载网址, so that 同时使用 Gemini 与 Claude 时不会重复启动多个隧道进程。
+5. As a RelayStudio 用户, I want **公网 MCP 隧道** 同时支持「免配置快速模式（自动生成临时公网 HTTPS 网址）」与「固定域名模式（选填自定义 HTTPS 域名与隧道凭证）」, so that 我既能零配置开箱即用，也能绑定永久不变的固定挂载网址。
+6. As a RelayStudio 用户, I want 点击 `Gemini` 或 `Claude` 卡片左下角的平台入口按钮能直接打开对应平台的官方连接器设置页面, so that 我复制完公网 MCP 网址后能一步直达粘贴位置。
+7. As a RelayStudio 用户, I want Gemini 网页版或 Windows 桌面端、Claude 网页版或桌面端通过公网 MCP 网址连入本机 **后台大管家** 时，能够免弹窗拉取全部工具列表并调用任务账本、文件读写与终端工具, so that 它们在辅助开发时拥有与 ChatGPT 完全同等的本地操控能力。
+8. As a RelayStudio 用户, I want **后台大管家** 根据任务绑定的平台动态决定新建对话网址、会话房间直达网址与跨域放行规则, so that 当任务绑定在 Gemini 或 Claude 上时，点击「打开网页 ↗」或触发 **新建网页交接** 会准确打开 Gemini 或 Claude 页面而非误跳去 ChatGPT。
+9. As a RelayStudio 用户, I want 浏览器内的 **网页探针** 同时支持 ChatGPT、Gemini 与 Claude 网页端, so that 我在浏览器里打开任意一家网页都能被面板自动识别并建立连接。
+10. As a RelayStudio 用户, I want **网页探针** 在 Gemini 或 Claude 网页端也能准确提取当前 **会话房间** 标识、检测是否正在输出回答、并在需要时自动向输入框填入指令并提交发送, so that **跟随原窗口**、**原页催工单** 与 **新建网页交接** 在三大平台网页端上均能可靠运转。
+11. As a RelayStudio 用户, I want **后台大管家** 与底部输入舱按平台分别存储并展示从各平台网页端采集到的可用模型列表（未连接对应网页时保持显示 `默认 (跟随网页)`）, so that 我在切换不同平台任务时能看到各自真实的模型选项而不会互相覆盖。
 
 ---
 
 ## Implementation Decisions
 
-### 1. 五层架构模块划分与跨边界接口契约（Architecture & Module Contracts）
-
-系统由五个正交的 **模块** 组成，各模块通过明确的 **接口契约** 通信：
+### 1. 目标系统架构与模块协作图（Target Architecture Overview）
 
 ```
-┌────────────────────────────────────────────────────────────────────────────┐
-│ 1. 前台遥控面板模块 (WPF UI Module)                                         │
-│    - 职责：顶栏双组纯图标 + 分段生长胶囊、双弹窗交互、底部任务输入舱联动    │
-└───────────────────┬────────────────────────────────────┬───────────────────┘
-                    │ PowerShell 模块接口契约              │ HTTP JSON 接口契约 (:8766)
-                    ▼                                    ▼
-┌───────────────────────────────────────┐  ┌─────────────────────────────────┐
-│ 2. 连接与凭据引擎模块                  │  │ 3. 后台大管家模块 (Studio Hub)   │
-│    (Connection & Credential Engine)   │  │    - 职责：会话快照、网页桥接态   │
-│    - 职责：多平台凭据读写、DPAPI 加密、 │  │      聚合、任务账本与催工守护   │
-│      内核与隧道守护进程生命周期管理    │  └────────────────┬────────────────┘
-└─────────┬───────────────────┬─────────┘                   │ HTTP / CDP 桥接契约
-          │ 环境变量/CLI 契约  │ YAML/环境变量契约           ▼
-          ▼                   ▼            ┌─────────────────────────────────┐
-┌──────────────────┐ ┌───────────────────┐ │ 4. 网页探针与桌面联络员模块      │
-│ 5a. 本地内核进程  │ │ 5b. 反向隧道客户端 │ │    (Web Probe & Desktop Bridge) │
-│ (:8765 Go Core)  │ │ (:8789 Tunnel)    │ │    - 职责：实时抓取网页模型目录  │
-└──────────────────┘ └───────────────────┘ │      与思考档位、执行网页派单    │
-                                           └─────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────────────┐
+│ 1. 前台遥控面板模块 (Studio Panel)                                                    │
+│    ├─ 顶栏 [平台通道胶囊]：🟢 OpenAI  |  🟢 Gemini  |  🟢 Claude  |  ＋               │
+│    ├─ 顶栏 [⚙ 通用设置]：管理本地 CLI 智能体并发与默认助手                             │
+│    └─ 底部 [任务输入舱]：[按平台分槽模型下拉框] · [思考强度] · [运行载体]              │
+└───────────────────┬──────────────────────────────────────────────┬───────────────────┘
+                    │ 连接与隧道控制契约                            │ 会话快照与派单契约
+                    ▼                                              ▼
+┌───────────────────────────────────────────┐  ┌───────────────────────────────────────┐
+│ 2. 连接与凭据引擎模块                      │  │ 3. 后台大管家模块 (Studio Hub)         │
+│    (Connection & Credential Engine)       │  │    ├─ 接缝 A：多平台路由与跨域规格接缝 │
+│    ├─ OpenAI 通道 ➔ 专用反向隧道守护       │  │    ├─ 分平台可用模型目录槽位           │
+│    └─ Gemini/Claude ➔ 共享公网 MCP 隧道   │  │    └─ 免弹窗只读护盾与原生任务进度账本 │
+└─────────┬───────────────────────┬─────────┘  └─────────┬───────────────────┬─────────┘
+          │                       │                      │                   │
+          ▼                       ▼                      │ 本地工具转发      │ 探针轮询与回执
+┌───────────────────┐   ┌───────────────────┐            ▼                   ▼
+│ 专用反向隧道进程   │   │ 公网 MCP 隧道进程  │  ┌─────────────────┐ ┌───────────────────┐
+│ (连入 OpenAI 云端) │   │ (暴露公网 MCP 地址)│  │ 本地内核进程     │ │ 4. 网页探针模块    │
+└─────────▲─────────┘   └─────────▲─────────┘  │ (文件/终端/CLI) │ │ (Web Probe)       │
+          │                       │            └─────────────────┘ │ 接缝 B：           │
+          │ OpenAI 云端回调       │ Gemini / Claude 云端回调       │ 跨站点探针适配接缝 │
+          │                       │                                └─────────┬─────────┘
+┌─────────┴───────────────────────┴──────────────────────────────────────────┴─────────┐
+│ 云端会话房间 (Conversation Rooms)                                                     │
+│  • ChatGPT (网页端 / 桌面端)   • Gemini (网页端 / 桌面端)   • Claude (网页端 / 桌面端) │
+└──────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### 2. 连接与凭据引擎模块（Connection & Credential Engine）接口契约与防崩守卫
+### 2. 四大模块行为契约与可替换接缝（Module Behavioral Contracts）
 
-1. **多平台凭据与胶囊分栏持久化 Schema（`data/credential-profiles.json` 向后兼容契约）**：
-   - 在保持顶层 `schema_version = 1` 与 `active_profile_id`（专指当前激活的 OpenAI 隧道配置 ID，确保既有调用方与测试零破坏）的基础上，扩展支持多平台胶囊分栏：
-     ```json
-     {
-       "schema_version": 1,
-       "active_profile_id": "prof_primary",
-       "enabled_platforms": ["openai"],
-       "active_profile_by_platform": {
-         "openai": "prof_primary"
-       },
-       "profiles": [
-         {
-           "id": "prof_primary",
-           "platform": "openai",
-           "kind": "tunnel",
-           "name": "yuan88964",
-           "tunnel_id": "tunnel_...",
-           "base_url": "https://api.openai.com",
-           "key_file": "openai-api-key.dpapi",
-           "enabled": true,
-           "updated_at": "2026-11-04T22:00:00"
-         }
-       ]
-     }
-     ```
-   - **读取缺省归一化规则（`Get-ConnectionProfiles`）**：
-     - 旧版无 `platform` 字段的条目自动归一化为 `Platform = 'openai'`；
-     - 无 `kind` 字段的条目：当 `Platform -eq 'openai'` 时默认 `Kind = 'tunnel'`，其余平台（`claude`、`gemini`、`deepseek`、`opencode`）默认 `Kind = 'apikey'`；
-     - 无 `enabled_platforms` 时默认初始化为 `@('openai')`；
-     - 返回对象除保留原有的 `ActiveProfileId` 与 `Profiles` 外，新增 `EnabledPlatforms`（字串数组）与 `ActiveProfileByPlatform`（哈希表/对象）。
-   - **隧道型（`tunnel`）与密钥型（`apikey`）读写及进程隔离守卫**：
-     - `Save-ConnectionProfile` 新增可选参数 `-Platform 'openai'`、`-Kind ''`、`-BaseUrl ''`（不传时默认 `Platform = 'openai'`、`Kind = 'tunnel'`，完全兼容既有测试与调用点）：
-       - 仅当 `$Kind -eq 'tunnel'` 且 `$TunnelId` 非空时，才执行 `ConvertTo-TunnelId` 校验；当 `$Kind -eq 'apikey'` 时允许 `$TunnelId` 为空，并保存可选的 `BaseUrl`；
-       - 仅当保存或激活的目标条目满足 `Platform -eq 'openai' -and Kind -eq 'tunnel'` 时，才同步更新 `$Settings.tunnel_id`、覆盖 `$Context.KeyPath`（`openai-api-key.dpapi`）并在需要时重启 `tunnel-client.exe`；
-       - 对 `Kind -eq 'apikey'` 的条目执行保存、切换（`Select-ConnectionProfile`）或启用/停用时，仅更新 `credential-profiles.json` 中的 `active_profile_by_platform[$platform]` 与对应 `.dpapi` 密钥文件，**严禁修改 `$Settings.tunnel_id`、严禁覆盖 `openai-api-key.dpapi`、严禁启停 `tunnel-client.exe`**。
-   - **胶囊平台分栏增删接口（`Add-CapsulePlatform` / `Remove-CapsulePlatform`）**：
-     - 当用户在 UI 点击胶囊末尾 `＋` 选择某预设平台（`openai`、`claude`、`gemini`、`deepseek`、`opencode`）时，将该平台 ID 加入 `enabled_platforms`；若该平台尚无任何配置条目，仅初始化一条干净的默认空白条目（`Name = '默认'`、`TunnelId = ''`、无预填假密钥，`Enabled = $false`），绝不预填虚假账号或掩码。
+#### 模块一：连接与凭据引擎模块（Connection & Credential Engine）
 
-2. **本地内核启动强约束守卫（`Start-OfficialCoreIfNeeded` & `Add-CustomCliAgent`）**：
-   - **`kind` 与 `id` 双向保留字守卫**：
-     - 在 `Get-DetectedCliAgents`、`Add-CustomCliAgent` 与 `Start-OfficialCoreIfNeeded` 中，除内置的 `id == 'codex'`（`kind = 'codex'`）和 `id == 'claude'`（`kind = 'claude'`）外，所有其他 CLI 智能体的 `kind` 强制归一化为 `'custom'`；
-     - 在 `Add-CustomCliAgent` 中，清洗生成的 `$idSlug` 必须匹配 `^[a-z0-9._-]{1,64}$`；若用户选中的自定义可执行文件名为 `codex` 或 `claude`，自动添加前缀转为 `'custom-codex'` 或 `'custom-claude'`，防止触发内核 `ACP profile id is reserved for the built-in profile` 致命退出。
-   - **`RELAYCORE_ACP_DEFAULT_PROFILE` 存在性守卫与并发数钳制**：
-     - 在 `Start-OfficialCoreIfNeeded` 组装 `$acpList` 后：
-       - 若 `$acpList.Count -eq 0` 或 `$acpLim -le 0`，强制设置 `RELAYCORE_ACP_ENABLED = 'false'`；
-       - 若 `$acpList.Count -gt 0` 且 `$acpDef -notin @($acpList | ForEach-Object { [string]$_.id })`，自动将 `$acpDef` 回退为 `[string]$acpList[0].id`；
-       - 将 `RELAYCORE_ACP_MAX_CONCURRENT_PROMPTS` 严格钳制在 `[Math]::Min(8, [Math]::Max(1, [int]$acpLim))` 范围内。
-   - **内核启动失败诊断透出**：
-     - 当 `Start-OfficialCoreIfNeeded` 轮询 `:8765/healthz` 未就绪时，自动读取 `data\logs\core.err.log` 末尾非空报错行写入诊断信息，杜绝静默吞没底层退出原因。
+1. **平台集合收敛与历史数据自动净化**：
+   - 允许加入 **平台通道胶囊** 的平台集合固定为 `OpenAI`、`Gemini`、`Claude` 三项；
+   - 当请求添加集合以外的平台时直接拒绝并给出明确提示；读取已有配置文件时，若存在历史遗留的 `DeepSeek` 或 `OpenCode` 分栏记录，自动过滤清理且不影响其余已保存配置。
+2. **公网 MCP 隧道（Public HTTPS MCP Tunnel）共享生命周期行为**：
+   - 为 `Gemini` 与 `Claude` 提供共享的本机 **公网 MCP 隧道** 启动、停止与状态查询能力，将本机 **后台大管家** 的 MCP 服务映射为公网 HTTPS 挂载网址；
+   - **免配置快速模式（默认）**：当用户未指定自定义固定域名时，自动调用本机已安装的公网隧道客户端建立临时 HTTPS 隧道，提取生成的公网域名并补齐 MCP 路径后缀，作为当前生效的挂载网址；
+   - **固定域名模式（可选）**：当用户配置了自定义 HTTPS 域名（及可选的隧道凭证）时，使用该固定域名生成永久不变的挂载网址；
+   - **单实例共享与隔离保护**：`Gemini` 与 `Claude` 分栏共用同一条本机 **公网 MCP 隧道** 进程；当隧道已处于运行态时，在另一分栏触发启动直接复用当前隧道与挂载网址。对 `Gemini` 或 `Claude` 配置的任何保存、切换或启停操作，绝不修改或重启 `OpenAI` 的 **专用反向隧道**。
 
-3. **`Save-ConnectionSettings` 非破坏性合并写盘守卫**：
-   - 在 `Save-ConnectionSettings` 构造写盘 JSON 前，先读取磁盘上现有的 `data\settings.json` 全部键值作为基底字典，再覆写更新已知核心字段，完整保留 `workspace_roots`、`extra_bin_dirs`、`custom_cli_agents`、`default_browser_profile`、`auto_archive_completed_mode` 等全部扩展属性。
+#### 模块二：前台遥控面板模块（Studio Panel）
 
-### 3. 前台遥控面板模块（WPF UI Module）接口契约与交互流转
+1. **顶栏胶囊与平台配置卡片交互行为**：
+   - 点击胶囊末尾 `＋` 打开的添加面板仅展示 `OpenAI`、`Gemini`、`Claude` 三项及其各自连接云端 **会话房间** 的用途说明；
+   - 当点开 `Gemini` 或 `Claude` 分栏时，卡片直接展示当前 **公网 MCP 隧道** 的在线状态与生效的公网 MCP 挂载网址，并提供一键复制该网址的交互入口；展开编辑区域时，仅提供配置名称、可选固定域名与可选隧道凭证设置，不再展示无用的平台 API Key 表单；
+   - 卡片右下角主操作按钮根据当前隧道状态提供一键启动/重连 **公网 MCP 隧道**（或复制已就绪的挂载网址）与断开操作；卡片左下角右侧按钮分别一键打开 Gemini 官方「已关联的应用」设置页与 Claude 官方「Connectors」设置页。
+2. **底部任务输入舱多平台模型分组联动行为**：
+   - 底部左一栏「模型下拉框」按照顶栏已启用的平台顺序展示带呼吸灯状态的平台分组标题；
+   - 每个平台分组下读取该平台专属的可用模型槽位：当对应平台的 **网页探针** 已上报真实模型列表时，在该平台分组下动态展开可选模型；当该平台尚未连接网页或尚未抓回模型信息时，该分组下严格只显示唯一一项 `默认 (跟随网页)`。
 
-1. **顶栏（`AppTitleBarBorder`）双组纯图标 + 分段生长胶囊布局契约**：
-   - **第一组（左侧起点，紧凑相连，无竖线隔板）**：
-     - `[R] RelayStudio` 品牌标识 ➔ `ToggleRailButton`（`28x28` 纯图标，ToolTip 显示 `"展开 / 收起左侧任务分栏"`） ➔ `ThemeToggleButton`（`28x28` 纯图标，内含 `ThemeToggleIconPath`，ToolTip 显示当前外观模式说明，左键切换深浅色、右键恢复跟随系统）。
-   - **第二组（与第一组相隔 `20px` 留白间距，无竖线隔板）**：
-     - `GlobalSettingsButton`（`28x28` 纯齿轮图标，ToolTip 显示 `"通用与本地引擎设置"`） ➔ **分段生长胶囊容器 `TunnelCapsuleBorder`**：
-       - 胶囊内部由 `CapsuleSegmentsPanel`（水平 `StackPanel`）承载各已启用平台分栏按钮与 `1px` 竖向内部细分隔线，最右侧固定为 `AddPlatformCellButton`（`＋` 纯图标按钮，ToolTip 显示 `"添加平台隧道或密钥"`）；
-       - 第一个 OpenAI 分栏直接复用并保留 `ConnIconBadgeButton`、`TopStatusDot`、`ConnProfileMiniTagBorder`、`ConnProfileMiniTagText` 的控件名与事件绑定，确保既有测试无缝通过；当 `enabled_platforms` 包含多个平台时，动态在 `CapsuleSegmentsPanel` 中追加其余平台分栏按钮（每个分栏显示呼吸灯圆点 + `平台短名:当前配置名`）。
-   - **顶栏右侧**：仅保留故障时才显现的 `TopHeartbeatPillBorder`（平时 `Collapsed`）与窗口系统控制按钮（`AppMinButton`、`AppMaxButton`、`AppCloseButton`）。
+#### 模块三：后台大管家模块（Studio Hub）—— 多平台路由与模型分槽接缝
 
-2. **平台配置卡片弹窗（`KeyPopoverBorder`）与 `＋` 添加平台面板交互契约**：
-   - **去除冗余小字说明**：移除弹窗标题下方的自我解释类操作说明小字，保持头部干净（标题 `PopoverHeaderTitle` + `+ 新增配置` `AddProfileButton` + 多平台分栏下的 `移除` 按钮）。
-   - **按平台类型（`tunnel` vs `apikey`）动态适配表单与底部按钮**：
-     - 当激活分栏为 `OpenAI`（`kind: 'tunnel'`）时，`PopoverHeaderTitle.Text` 保持 `"OpenAI 隧道配置 (N)"`；内联编辑表单显示「配置名称」「隧道编号 (tunnel_...)」「OpenAI API Key」；右下角主按钮 `QuickConnectButton` 显示 `▶ 启动隧道` / `↻ 重新连接`，旁配 `DisconnectButton`（`断开`）。
-     - 当激活分栏为 `Claude / Gemini / DeepSeek / OpenCode`（`kind: 'apikey'`）时，`PopoverHeaderTitle.Text` 显示 `"<平台标题> (N)"`；内联编辑表单显示「配置名称」「API Key」「接口地址 (可选)」；右下角主按钮 `QuickConnectButton` 显示 `✓ 测试连接`（点击后探测接口连通性并反馈 `✓ 接口连通正常`），旁配 `启用密钥 / 停用`。
-   - **左下角快捷链接统一为「左：获取 API Key，右：平台适配选项」**：
-     - 调整 `KeyPopoverBorder` 底部左侧链接顺序：**左侧固定放置 `ApiKeysButton`（文案根据平台显示 `获取或管理 API Key ↗` / `获取 XX API Key ↗`），右侧放置 `PlatformButton`（文案根据平台显示 `打开 OpenAI 隧道设置 ↗` / `网页端 Connectors ↗` / `打开 Google AI Studio ↗` / `开放平台文档 ↗` / `OpenCode 官方文档 ↗`）**。
-   - **`＋` 添加平台视图**：
-     - 点击胶囊末尾的 `AddPlatformCellButton`（`＋`）时，在弹窗内展示预设平台列表（包含 `OpenAI`、`Claude`、`Gemini`、`DeepSeek`、`OpenCode`，展示平台名称与该平台密钥/隧道的实际用途说明，不写多余的界面操作说明小字）；点击某平台后，胶囊向右长出一节对应平台分栏，末尾 `＋` 保持在最右端。
+1. **多平台路由与跨域规格接缝**：
+   - **后台大管家** 内部将平台相关的网址与跨域规则抽象为统一的平台规格接缝，覆盖 `OpenAI`（`ChatGPT`）、`Gemini`、`Claude` 三个平台；
+   - 当执行 **新建网页交接** 生成交接网址、响应「打开网页 ↗」唤醒或新建浏览器标签页、以及为待发消息填充默认站点前缀时，统一根据目标任务或会话绑定的平台标识解析对应平台的新建对话网址与会话房间直达网址，不再默认跳往单一平台；
+   - 跨域访问控制自动放行已注册三大平台的网页来源域名，确保浏览器在 ChatGPT、Gemini、Claude 页面下均可正常与本机 **后台大管家** 通信；
+   - 当云端服务器（如 Gemini 或 Claude 云端后台）通过 **公网 MCP 隧道** 访问本机 MCP 入口时，直接返回经免弹窗只读护盾处理后的标准工具列表与执行结果，不触发阻塞式的额外授权跳转。
+2. **分平台可用模型目录存储行为**：
+   - 在会话桥接状态中按平台分槽维护可用模型目录，当收到 **网页探针** 上报的模型列表时，按其声明的平台归入对应槽位，避免同时打开多平台网页时互相覆盖（同时保持原有默认模型字段与 `OpenAI` 槽位同步，兼容既有调用方）。
 
-3. **下方任务输入舱（`Build-PlanBComposerPod` & `Sync-ComposerModelAndEffortCombos`）上下呼应与冷启动纯净契约**：
-   - **冷启动数据源净化**：
-     - 在 `ConnectionManager.psm1` 的 `Get-WebBridgeState` 与 `McpReadOnlyShield.py` 的 `_get_effective_available_models` 中，当 `web-bridge-state.json` 尚未收到网页端上报的 `available_models` 时，直接返回空数组 `@()` / `[]`，**不再读取 `~/.codex/.codex-global-state.json` 冒充网页端模型列表**（保留 `Get-CodexCachedAvailableModels` 独立函数供其单元测试调用）。
-   - **冷启动 UI 纯净默认态（模型栏与思考强度栏初始只显示 `默认 (跟随网页)`）**：
-     - 在 `Sync-ComposerModelAndEffortCombos` 中判定冷启动状态：
-       ```powershell
-       $isColdStartNoWebModel = ($modelsArr.Count -eq 0) -and [string]::IsNullOrWhiteSpace($WebModel) -and ([string]::IsNullOrWhiteSpace($CurModel) -or $CurModel -eq 'inherit') -and [string]::IsNullOrWhiteSpace($WebEffort)
-       ```
-     - 当 `$isColdStartNoWebModel -eq $true` 时：
-       - `ModelCombo` 中每个已启用平台分组下**仅生成唯一一项 `🤖 默认 (跟随网页)`**（窄屏为 `🤖 默认`）；
-       - `EffortCombo` 的 `$webEffortDisplay` 设为 `'跟随网页'`，且**不预填** `min / standard / extended / max`，使 `EffortCombo` **仅生成唯一一项 `🧠 默认 (跟随网页)`**（窄屏为 `🧠 默认`，`Tag = 'inherit'`）。
-     - 当网页端已抓回实际信息（`$modelsArr.Count -gt 0` 或 `$WebModel` / `$WebEffort` 非空，即 `$isColdStartNoWebModel -eq $false`）时：
-       - 自动展开从网页端读取到的真实模型列表与对应的思考强度档位（`min / standard / extended / max` 等），并显示网页当前生效的模型与思考强度（如 `🧠 默认 (standard)`）。
-   - **顶栏胶囊分栏 ↔ 下方 `ModelCombo` 平台分组与呼吸灯同频呼应**：
-     - 在 `ComboBoxItem` 模板与 `Sync-ComposerModelAndEffortCombos` 中，按照顶栏胶囊当前已启用的平台分栏（`enabled_platforms`）组织 `ModelCombo` 内的平台分组：
-       - 当顶栏胶囊启用多个平台（`EnabledPlatforms.Count -gt 1`）时，按平台分组展示带同频呼吸灯（`🟢` 在线 / `⚪` 离线）的分组头（如 `🟢 OpenAI · yuan88964`、`⚪ Claude · 默认`），同时保持 `ModelCombo.Items[0]` 仍为当前主平台的 `inherit` 选项实例（确保 `$pod.Tag.ModelCombo.Items[0]` 引用稳定性与 `.Content` 字符串契约不变）；
-       - 当顶栏胶囊仅启用 1 个平台（`EnabledPlatforms.Count -le 1`）时，保持原有单列表行为（不插入分组头，冷启动时 `ModelCombo.Items.Count -eq 1`），确保 `Test-ReasoningEffort.ps1` 与 `Test-ConnectionManager.ps1` 100% 兼容。
+#### 模块四：网页探针模块（Web Probe）—— 跨站点探针适配接缝
+
+1. **多站点覆盖与平台自识别行为**：
+   - 浏览器扩展同时作用于 ChatGPT、Gemini 与 Claude 的官方对话网页；
+   - **网页探针** 启动时根据当前页面域名自动匹配对应的站点适配器，并在向 **后台大管家** 轮询、认领消息与交回 **发送回执（Delivery Receipt）** 时始终携带当前平台标识。
+2. **跨站点统一采集与投递契约**：
+   - 各站点适配器对上层通用轮询内核暴露一致的四个行为契约：
+     1. **会话房间号提取**：从当前页面地址或状态中提取当前平台格式的 **会话房间** 标识；
+     2. **生成状态巡检**：检测当前页面是否处于流式输出或显示可见的停止生成按钮，准确驱动 **后台大管家** 的停工计时器与 **等原网页停稳后交接（Deferred Stop-Wait Handover）**；
+     3. **输入框填字与发送**：兼容普通文本框与富文本编辑器，将认领到的任务指令、**原页催工单** 或 **新窗交接单** 填入当前页面输入框并触发提交，确认发出后交回 **发送回执**；
+     4. **可用模型采集**：采集当前页面可用的模型与思考档位目录并上报至 **后台大管家** 对应平台的模型槽位。
 
 ---
 
 ## Testing Decisions
 
 ### 1. 好测试的判定标准
-- 测试必须仅对准各模块的对外 **接口契约**（**接口测试面**）验证用户可观测行为与跨层数据契约，不绑定私有辅助函数或内部局部变量名称。
-- 优先复用现有的高阶 **可替换接缝**，不新增多余的测试脚手架文件。
+- 测试仅验证各模块的对外 **接口契约** 与用户可观测行为（如平台列表收敛、隧道状态流转、跨平台交接网址生成、分槽模型展示与跨站点投递回执），不绑定模块内部实现细节、私有函数名或特定代码结构。
+- 优先复用仓库现有的最高层 **可替换接缝**，不新增碎片化的测试脚本。
 
-### 2. 拟复用的可替换接缝（共 2 个现有最高层可替换接缝）
-1. **接缝 ①：连接管理与 WPF 面板集成接缝（`tests/Test-ConnectionManager.ps1` + `tests/Test-ThemeMode.ps1`）**：
-   - 覆盖 `ConnectionManager.psm1` 的对外函数契约（`Get-DetectedCliAgents`、`Add-CustomCliAgent`、`Start-OfficialCoreIfNeeded`、`Save-ConnectionSettings`、`Get-ConnectionProfiles`、`Save-ConnectionProfile`、`Select-ConnectionProfile`、`Add-CapsulePlatform`、`Remove-CapsulePlatform`）与 `连接管理.ps1` 的顶栏双组纯图标布局、分段生长胶囊、卡片左下角链接顺序（左 API Key、右平台适配项）及深浅色主题渲染契约。
-2. **接缝 ②：底部输入舱模型与思考强度同步接缝（`tests/Test-ReasoningEffort.ps1`）**：
-   - 覆盖 `Sync-ComposerModelAndEffortCombos` 在「冷启动未读取网页信息（模型栏与思考强度栏均只显示 `默认 (跟随网页)`）」与「网页端已抓回真实模型与思考档位（动态展开完整列表）」两种状态下的外部可观测行为，以及多平台胶囊分栏下的分组同步契约。
+### 2. 复用的三大最高层测试接缝
+1. **接缝 ①：连接与凭据引擎及前台遥控面板测试接缝**：
+   - 验证平台通道胶囊仅允许添加 `OpenAI`、`Gemini`、`Claude`，拒绝已废弃的平台标识并自动净化历史残留项；
+   - 验证 **公网 MCP 隧道** 的启停、挂载网址生成与状态共享行为，以及操作 `Gemini` / `Claude` 配置绝不影响 `OpenAI` 专用反向隧道配置；
+   - 验证底部输入舱「模型下拉框」在多平台启用时，能够按平台分槽独立展示各平台的模型列表与冷启动默认项。
+2. **接缝 ②：后台大管家多平台路由与状态管理测试接缝**：
+   - 验证当任务绑定在 `ChatGPT`、`Gemini` 或 `Claude` 时，**新建网页交接**、打开会话标签页与跨域请求校验均准确命中对应平台的网址规则与域名白名单；
+   - 验证不同平台网页探针上报的模型目录按平台分槽独立保存、互不覆盖。
+3. **接缝 ③：网页探针跨站点适配测试接缝**：
+   - 在模拟的 ChatGPT、Gemini、Claude 页面环境中，验证 **网页探针** 能够自动识别当前平台、提取对应格式的 **会话房间** 号、完成输入框填字发送并向 **后台大管家** 交回正确的 **发送回执**。
 
-### 3. 既有测试样板（Prior Art）与兼容性铁律
-- 参照 `tests/Test-ConnectionManager.ps1`（242 项断言）、`tests/Test-ReasoningEffort.ps1`（18 项断言）、`tests/Test-ThemeMode.ps1`（54 项断言）以及 `tests/test_spec_v46.py`。
-- **兼容性铁律**：
-  - 严禁破坏 `Test-ReasoningEffort.ps1` 中通过 `IndexOf('function Set-SessionPropSafe(')` 至 `IndexOf('function Build-PlanBComposerPod(')` 截取源码切片的 **可替换接缝**；
-  - 严禁删除或重命名 `$script:controls` 中被测试断言的 68 个命名控件（含 `AppTitleBarBorder`、`ToggleRailButton`、`ThemeToggleButton`、`ThemeToggleIconPath`、`GlobalSettingsButton`、`GlobalSettingsPopoverBorder`、`ConnIconBadgeButton`、`TopStatusDot`、`ConnProfileMiniTagText`、`KeyPopoverBorder`、`PopoverHeaderTitle`、`ApiKeysButton`、`PlatformButton` 等）。
+### 3. 既有测试兼容性要求
+- 改造完成后，仓库既有的全部自动化测试套件（涵盖连接管理、思考强度联动、外观主题、后台大管家会话调度与网页探针回执）均须保持通过。
 
 ---
 
 ## Out of Scope
 
-1. **非网页端纯 API 聊天客户端能力**：RelayStudio 的核心职责是向网页端派发任务并让网页端通过 MCP 工具回调操控本地电脑，不在本地面板内直接实现用 API Key 向 Claude / Gemini / DeepSeek 发起纯 HTTP 聊天对话的客户端。
-2. **第三方网页端（Claude / Gemini / DeepSeek 网页版）的 DOM 自动注入扩展开发**：本次规格聚焦于顶栏分段胶囊架构、凭据/连接管理以及下方模型与思考强度栏的分组呼应机制；针对非 ChatGPT 网页端的浏览器 DOM 注入探针将在后续专项迭代中按需扩展。
+1. **DeepSeek 网页端与 OpenCode 的接入**：根据 ADR-0004 定稿结论，顶栏胶囊不再纳入无原生 MCP 的 `DeepSeek` 与不常用的 `OpenCode`。
+2. **Gemini Windows 桌面端（`Gemini.exe`）的内部调试端口改造**：因 `Gemini.exe` 客户端自身限制了外部调试端口参数，严格遵守安全边界不对其做客户端破解；`Gemini.exe` 直接通过云端同步共享已挂载的 **公网 MCP 隧道** 调用本机工具，自动化网页派单与换窗交接统一通过浏览器中的 Gemini 网页端完成。
 
 ---
 
 ## Accepted Amendments & Internal Adaptations
 
-- **2026-11-05 用户走查修订（弹窗锚点跟随、动效与统一关闭机制）**：
-  1. **点击 `＋` 弹出纯「添加平台隧道或密钥」面板**：点击胶囊末尾 `＋` 时，弹窗头部标题切换为 `添加平台隧道或密钥`，隐藏 `+ 新增配置`、隐藏账号列表（`ProfilesListScroll`）、隐藏内联编辑表单（`FormScroll`）以及底部操作栏（`PopoverFooterGrid`），仅展示带平台标题、平台用途说明小字与右侧 `＋ 添加 / 已添加` 按钮的预设平台卡片列表。
-  2. **弹窗坐标动态对齐所点击的顶栏图标 + `/impeccable` 入场与平滑位移动效**：`GlobalSettingsPopoverBorder`（`⚙` 设置弹窗）与 `KeyPopoverBorder`（各平台分栏卡片及 `＋` 添加面板）均采用 `HorizontalAlignment="Left"`，在打开或切换分栏时通过 `TranslatePoint` 动态计算当前点击按钮的水平坐标并对齐在其正下方（受窗口左右安全边距钳制），同时执行 `180ms QuarticEase (EaseOut)` 透明度、微缩放与水平/垂直平滑过渡动效。
-  3. **所有弹窗统一具备三类关闭机制**：（a）再次点击当前已激活的顶栏图标/胶囊分栏/`＋` 按钮即收起弹窗；（b）弹窗右上角统一提供 `×` 关闭按钮；（c）点击下方工作区或左栏空白处自动收起已打开的弹窗。
-  4. **`ModelCombo` 多平台分组首项契约兼容**：为兼容 `Test-ReasoningEffort.ps1` 既有宿主契约（`ModelCombo.Items[0]` 恒为主默认可选项 `Tag = 'inherit'`），当 `EnabledPlatforms.Count -gt 1` 时，`Items[0]` 保持为主默认可选项，紧随其后插入首个平台分组标题（`🟢/⚪ OpenAI · <当前配置名>`）与网页模型列表，随后依次渲染其余已启用平台的分组标题及各自平台下的 `🤖 默认 (跟随网页)`（`Tag = 'inherit'`）。
+- **2026-11-05 领域模型收敛与行为契约纯化（对齐 ADR-0004）**：
+  1. 顶栏 **平台通道胶囊** 预设平台收敛为 `OpenAI`、`Gemini`、`Claude` 三项，移除 `DeepSeek` 与 `OpenCode`。
+  2. 规格书全部表述收敛至模块职责、行为契约与可替换接缝层面，不预设底层具体函数名或玩具代码片段，同时保持对既有测试套件外部调用契约的向下兼容。
 
 ---
 
 ## Further Notes
 
-- 所有 PowerShell 源码文件（`ConnectionManager.psm1`、`连接管理.ps1`、`tests/*.ps1`）在编辑后必须严格保持 **`UTF-8 with BOM`** 编码与 **`CRLF`** 换行符，防止 Windows PowerShell 5.1 解析中文字符串或符号乱码。
+- 仓库内 PowerShell 脚本文件在修改后需保持原有的 `UTF-8 with BOM` 编码与 `CRLF` 换行格式，确保 Windows PowerShell 环境正常解析中文字符。
