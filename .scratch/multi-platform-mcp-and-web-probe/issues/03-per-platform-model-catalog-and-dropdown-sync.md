@@ -4,17 +4,21 @@
 
 **Blocked by:** 02: Gemini 与 Claude 网页探针接入、会话投递与新窗交接闭环
 
-**Status:** ready-for-agent
+**Status:** completed
 
-- [ ] **后台大管家** 在会话桥接状态与面板快照中按平台分槽维护可用模型目录（涵盖 `OpenAI`、`Gemini`、`Claude`），不同平台的 **网页探针** 上报各自模型列表时归入对应平台槽位、互不覆盖，同时保持原有默认模型字段与 `OpenAI` 槽位同步以兼容既有调用方。
-- [ ] **网页探针** 在 Gemini 与 Claude 网页端采集当前页面可用的模型目录，并随轮询报文连同当前平台标识上报至 **后台大管家**。
-- [ ] 当顶栏 **平台通道胶囊** 启用多个平台时，面板底部左一栏「模型下拉框」按已启用平台展示带同频呼吸灯状态的分组标题，并在每个已连接网页的平台分组下动态展开该平台真实的可用模型选项。
-- [ ] 当某个已启用平台尚未连接网页或尚未抓回模型列表时，该平台分组下严格只显示唯一一项 `默认 (跟随网页)`，绝不预填虚假模型或借用其他平台的模型列表。
-- [ ] 底部输入舱模型与思考强度联动测试、后台大管家快照测试与网页探针测试全部通过。
+- [x] **后台大管家** 在会话桥接状态与面板快照中按平台分槽维护可用模型目录（涵盖 `OpenAI`、`Gemini`、`Claude`），不同平台的 **网页探针** 上报各自模型列表时归入对应平台槽位、互不覆盖，同时保持原有默认模型字段与 `OpenAI` 槽位同步以兼容既有调用方。
+- [x] **网页探针** 在 Gemini 与 Claude 网页端采集当前页面可用的模型目录，并随轮询报文连同当前平台标识上报至 **后台大管家**。
+- [x] 当顶栏 **平台通道胶囊** 启用多个平台时，面板底部左一栏「模型下拉框」按已启用平台展示带同频呼吸灯状态的分组标题，并在每个已连接网页的平台分组下动态展开该平台真实的可用模型选项。
+- [x] 当某个已启用平台尚未连接网页或尚未抓回模型列表时，该平台分组下严格只显示唯一一项 `默认 (跟随网页)`，绝不预填虚假模型或借用其他平台的模型列表。
+- [x] 底部输入舱模型与思考强度联动测试、后台大管家快照测试与网页探针测试全部通过。
 
 ## Accepted Amendments & Internal Adaptations
 
-- (Append user-approved adjustments or non-breaking internal/blast-radius adaptations that preserve user-visible behaviour and acceptance criteria.)
+- Canonical keys chatgpt/gemini/claude; OpenAI maps to chatgpt, legacy available_models remains OpenAI alias. Persistent catalogs and visible catalogs are separate: snapshot/session metadata exposes only fresh-probe catalogs (15s) plus connected_providers.
+- Selected provider travels through composer config and launchpad inheritance. Online/offline provider switches clear old room, tab and project identities.
+- Review fixes have actual producer-to-consumer coverage: HTTP session metadata, raw launchpad freshness, production-shaped StateInfo arrays.
+- Verified: Hub HTTP12; v46/v47 combined36; probe68, bridge39, effort76, receipt17; PS default265, effort31, ModelCatalogOnly5. Standards0 findings; Spec findings fixed and final re-review passed3649752. Integration/root owns final full regression.
+- Real logged-in websites, live external MCP APIs and visible desktop UI not exercised.
 
 ## Attempt Log & Quarantine Status
 
