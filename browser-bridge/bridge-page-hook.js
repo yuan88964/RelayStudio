@@ -76,6 +76,9 @@
   function markUserTurnAccepted() {
     acceptedPostSeq += 1;
     safeSetDataset("relayAcceptedPostSeq", String(acceptedPostSeq));
+    // Spec v4.7 1.1: a newly accepted user turn starts with a clean closure verdict.
+    safeSetDataset("relayStreamIncomplete", "");
+    safeSetDataset("relayTurnIncomplete", "");
   }
 
   function markSseStreamCompleted(assistantCompletedCleanly = true) {
@@ -508,6 +511,17 @@
 
       const isPrepare = /\/prepare(?:\?|$)/.test(url);
       const dispatchId = isConversationPost && !isPrepare ? safeGetDataset("relayDispatchId") : "";
+      // Spec v4.7 1.1: Sentinel PoW / prepare happen before the real POST; when they fail (offline, 403/429/5xx) the
+      // correlated dispatch must fail at once instead of letting waitForDispatchAcceptance wait for a POST that never comes.
+      const isSentinel = /\/backend-api\/(?:f\/)?sentinel\//i.test(url);
+      const isPreflightStage = isSentinel || (isConversationPost && isPrepare);
+      const activeDispatchId = isConversationPost || isSentinel ? safeGetDataset("relayDispatchId") : "";
+      const failPreflightDispatch = () => {
+        if (isPreflightStage && activeDispatchId && safeGetDataset("relayDispatchId") === activeDispatchId) {
+          safeSetDataset("relayDispatchStatus", "failed");
+          safeSetDataset("relayTurnIncomplete", "1");
+        }
+      };
       let payloadVerified = false;
       let submittedModel = "";
       let submittedEffort = "";
@@ -620,7 +634,12 @@
         if (dispatchId && safeGetDataset("relayDispatchId") === dispatchId) {
           safeSetDataset("relayDispatchStatus", "failed");
         }
+        failPreflightDispatch();
         throw error;
+      }
+
+      if (!response || !response.ok) {
+        failPreflightDispatch();
       }
 
       if (trackSseForTurn) {
@@ -640,6 +659,11 @@
                   let dec = null;
                   let carry = "";
                   let streamErrored = false;
+                  // Spec v4.7 1.1: positive closure. Only a stream that carried real SSE frames must end with
+                  // [DONE] / message_stream_complete; tiny synthetic bodies (offline fixtures) are not judged.
+                  let sawRealSseFrame = false;
+                  let sawSseDone = false;
+                  let sawSseErrorEvent = false;
                   try {
                     dec = typeof TextDecoder === "function" ? new TextDecoder("utf-8") : null;
                   } catch {
@@ -655,6 +679,13 @@
                         try {
                           const piece = carry + dec.decode(step.value, { stream: true });
                           registerTaskHintsFromText(piece);
+                          if (!sawRealSseFrame && /\b(?:event:\s*\w+|data:\s*\{)/.test(piece)) sawRealSseFrame = true;
+                          if (!sawSseDone && /data:\s*\[DONE\]|"message_stream_complete"|"status"\s*:\s*"finished_successfully"/.test(piece)) {
+                            sawSseDone = true;
+                          }
+                          if (!sawSseErrorEvent && /^event:\s*error\b|"error"\s*:\s*\{[^}]*"message"/m.test(piece)) {
+                            sawSseErrorEvent = true;
+                          }
                           carry = piece.slice(-48);
                         } catch {
                           carry = "";
@@ -664,7 +695,10 @@
                   } catch {
                     streamErrored = true;
                   } finally {
-                    markSseStreamCompleted(!streamErrored);
+                    const incomplete = Boolean(streamErrored || sawSseErrorEvent || (sawRealSseFrame && !sawSseDone));
+                    safeSetDataset("relayStreamIncomplete", incomplete ? "1" : "");
+                    safeSetDataset("relayTurnIncomplete", incomplete ? "1" : "");
+                    markSseStreamCompleted(!incomplete);
                   }
                 })();
               }
@@ -791,6 +825,24 @@
     try {
       const detail = (ev && ev.detail) || {};
       const text = String(detail.text || "");
+      // Spec v4.7 1.1: {clear:true} empties a machine-injected ProseMirror draft (React state included).
+      if (detail.clear === true) {
+        const clearEl =
+          document.querySelector("#prompt-textarea") ||
+          document.querySelector('div.ProseMirror[contenteditable="true"]') ||
+          document.querySelector('textarea[data-id="root"]');
+        if (!clearEl) {
+          return;
+        }
+        const clearView =
+          (clearEl.pmViewDesc && clearEl.pmViewDesc.view) ||
+          clearEl.__pmView ||
+          (clearEl.firstChild && clearEl.firstChild.pmViewDesc && clearEl.firstChild.pmViewDesc.view);
+        if (clearView && clearView.state && typeof clearView.dispatch === "function") {
+          clearView.dispatch(clearView.state.tr.delete(0, clearView.state.doc.content.size));
+        }
+        return;
+      }
       if (!text) {
         return;
       }

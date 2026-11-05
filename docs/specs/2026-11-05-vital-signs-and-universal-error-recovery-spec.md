@@ -340,3 +340,17 @@ stateDiagram-v2
 
 - **不强行杀死云端已发起的旧生成流**：当检测到 `DUAL_STREAM` 时，系统负责实时告警并冻结大管家自动追加派单，不通过刷新网页去中断云端（因刷新网页无法终止云端已在运行的后台容器）。
 - **不侵入被测业务代码库**：本地测试流水线探针与业务仓库 Git 提交读取均以纯只读方式访问目标工作区。
+
+---
+
+## Accepted Amendments & Internal Adaptations
+
+> 模块一实施（分支 `v47/m1`）登记。未修改任何现有测试断言；以下均为内部实现适配，不改变面向用户的行为。
+
+| # | 位置 | 规格原文 | 实施适配 | 理由 |
+| :--- | :--- | :--- | :--- | :--- |
+| M1-A1 | §1.2 `checkTurnIncomplete()` | `Number(relayAcceptedPostSeq) > Number(relayTurnSeq)` 判未闭环 | 不采用该计数比较，仅用 `relayStreamIncomplete` / `relayTurnIncomplete` 标记与末条可见消息角色 | `relayTurnSeq` 只计“干净闭环”的回合，一次断流或用户手动停止后两计数永久错位，会让每个后续回合都被误判未闭环；而 SSE 进行中已由 `!isSseActive()` 排除，该比较在其余时刻只会产生假阳性。最新回合的断流已由 hook 的两个标记精确覆盖。 |
+| M1-A2 | §1.2 `extractUiErrorText()` | 遍历选择器并剔除正文/用户气泡 | 额外跳过不可见节点（复用 `isVisibleDomElement`） | 防止隐藏的错误模板 / 屏幕阅读器残留节点误报。 |
+| M1-A3 | §1.2 `isBusySending` 30s 复位 | `finally` 置 `busySendStartedAtMs = 0` | `finally` 仅当计时戳仍属于本次投递（或已被看门狗清零）时才复位 | 看门狗强制复位后若新投递已开始，旧投递的 `finally` 不得清掉新投递的忙碌标记。 |
+| M1-A4 | §1.4 Fiber 回退 | 在 `findCloudCtx` 场景中新增回退选择器 | 新增独立只读函数 `findFallbackCtx()`（不含 `form` / `composerController`），仅在 `script_state()` 中 `ctx` 为空时使用 | 避免 fill/send/stop 等共享 `findCloudCtx()` 的脚本在无输入框时误把回退上下文当作可操作的输入框；`has_composer` 语义保持不变。 |
+| M1-A5 | §1.4 `turnIncomplete` | 末尾 turn `status !== "complete"` | 视 `complete/completed/finished_successfully/finished/done/success` 为已完成；角色读取兼容 `role` / `author.role` / `message.author.role` / `type`，以及 `messages[]` 全为 user 的 turn | 桌面端 entries 结构未有一手样本，放宽完成态词表避免已完成回合被误判；未知结构一律返回 `false`（保守）。 |
