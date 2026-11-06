@@ -190,6 +190,7 @@ function Save-ConnectionSettings {
         }
         throw
     } finally { $lock.Dispose() }
+    if ($script:ConnectionProfilesCache) { $script:ConnectionProfilesCache.Clear() }
 }
 
 function Get-OfficialCoreEndpoint {
@@ -743,33 +744,159 @@ function Get-SavedOpenAIKeyPlaintext {
     return ''
 }
 
+$script:AllowedPlatforms = @('chatgpt', 'gemini', 'claude')
+
+function Resolve-CanonicalPlatform {
+    param([string]$Platform = 'chatgpt')
+    $raw = if ($null -ne $Platform) { $Platform.Trim().ToLowerInvariant() } else { '' }
+    if (-not $raw -or $raw -eq 'openai' -or $raw -eq 'chatgpt') { return 'chatgpt' }
+    return $raw
+}
+
+function Get-StudioPlatformDefinitions {
+    return @(
+        [pscustomobject]@{ Code = 'chatgpt'; Name = 'ChatGPT'; Kind = 'tunnel'; DefaultUrl = 'https://api.openai.com' },
+        [pscustomobject]@{ Code = 'gemini';  Name = 'Gemini';  Kind = 'public_tunnel'; DefaultUrl = '' },
+        [pscustomobject]@{ Code = 'claude';  Name = 'Claude';  Kind = 'public_tunnel'; DefaultUrl = '' }
+    )
+}
+
 function Get-DefaultPlatformBaseUrl {
-    param([string]$Platform = 'openai', $Settings = $null)
-    $plat = if ($Platform) { $Platform.Trim().ToLowerInvariant() } else { 'openai' }
+    param([string]$Platform = 'chatgpt', $Settings = $null)
+    $plat = Resolve-CanonicalPlatform $Platform
     switch ($plat) {
-        'openai'   { return $(if ($Settings -and $Settings.PSObject.Properties['api_base_url'] -and $Settings.api_base_url) { [string]$Settings.api_base_url } else { 'https://api.openai.com' }) }
+        'chatgpt'  { return $(if ($Settings -and $Settings.PSObject.Properties['api_base_url'] -and $Settings.api_base_url) { [string]$Settings.api_base_url } else { 'https://api.openai.com' }) }
         'claude'   { return '' }
         'gemini'   { return '' }
-        'deepseek' { return 'https://api.deepseek.com' }
-        'opencode' { return 'https://api.opencode.ai/v1' }
         default    { return 'https://api.openai.com' }
+    }
+}
+
+$script:ConnectionProfilesCache = @{}
+$script:ConnectionProfilesCacheStats = [pscustomobject]@{
+    Hits = 0
+    Misses = 0
+}
+
+function Clear-ConnectionProfilesCache {
+    $script:ConnectionProfilesCache = @{}
+    $script:ConnectionProfilesCacheStats = [pscustomobject]@{
+        Hits = 0
+        Misses = 0
+    }
+}
+
+function Get-ConnectionProfilesCacheStats {
+    return [pscustomobject]@{
+        Hits = [int]$script:ConnectionProfilesCacheStats.Hits
+        Misses = [int]$script:ConnectionProfilesCacheStats.Misses
+        Entries = $script:ConnectionProfilesCache.Count
+    }
+}
+
+function Get-FileStatToken {
+    param([string]$FilePath)
+    if (-not $FilePath) { return '0:0:0' }
+    try {
+        $fi = [IO.FileInfo]::new($FilePath)
+        if ($fi.Exists) {
+            return "1:$($fi.Length):$($fi.LastWriteTimeUtc.Ticks)"
+        }
+    } catch { }
+    return '0:0:0'
+}
+
+function Get-ConnectionProfilesCacheSignature {
+    param($Context, $Settings = $null, [string]$StorePath = '')
+    $dataRoot = if ($Context -and $Context.DataRoot) { [string]$Context.DataRoot } else { '' }
+    if (-not $StorePath -and $dataRoot) {
+        $StorePath = if ($Context.PSObject.Properties.Name -contains 'ProfilesStorePath' -and $Context.ProfilesStorePath) {
+            [string]$Context.ProfilesStorePath
+        } else {
+            Join-Path $dataRoot 'credential-profiles.json'
+        }
+    }
+    $settingsPath = if ($Context -and $Context.PSObject.Properties['SettingsPath'] -and $Context.SettingsPath) { [string]$Context.SettingsPath } else { '' }
+    $keyPath = if ($Context -and $Context.PSObject.Properties['KeyPath'] -and $Context.KeyPath) { [string]$Context.KeyPath } else { '' }
+    $legacyKeyPath = if ($Context -and $Context.PSObject.Properties['LegacyKeyPath'] -and $Context.LegacyKeyPath) { [string]$Context.LegacyKeyPath } else { '' }
+    $dpapiSig = ''
+    if ($dataRoot) {
+        try {
+            $di = [IO.DirectoryInfo]::new($dataRoot)
+            if ($di.Exists) {
+                $dpapiFiles = @($di.GetFiles('*.dpapi') | Sort-Object Name)
+                $dpapiSig = @(foreach ($df in $dpapiFiles) { "$($df.Name):$($df.Length):$($df.LastWriteTimeUtc.Ticks)" }) -join ';'
+            }
+        } catch { }
+    }
+    $memSettingsSig = if ($Settings) {
+        $tid = if ($Settings.PSObject.Properties['tunnel_id']) { [string]$Settings.tunnel_id } else { '' }
+        $abu = if ($Settings.PSObject.Properties['api_base_url']) { [string]$Settings.api_base_url } else { '' }
+        $eps = if ($Settings.PSObject.Properties['enabled_platforms'] -and $Settings.enabled_platforms) { (@($Settings.enabled_platforms) -join ',') } else { '' }
+        "S:$tid|$abu|$eps"
+    } else { 'S:disk' }
+    return "$dataRoot|$(Get-FileStatToken $StorePath)|$(Get-FileStatToken $settingsPath)|$(Get-FileStatToken $keyPath)|$(Get-FileStatToken $legacyKeyPath)|$dpapiSig|$memSettingsSig"
+}
+
+function Copy-ConnectionProfilesState {
+    param($State)
+    if (-not $State) { return $null }
+    $clonedActiveByPlat = [ordered]@{}
+    if ($State.ActiveProfileByPlatform) {
+        foreach ($k in $State.ActiveProfileByPlatform.Keys) {
+            $clonedActiveByPlat[[string]$k] = [string]$State.ActiveProfileByPlatform[$k]
+        }
+    }
+    $clonedProfiles = @(foreach ($p in @($State.Profiles)) {
+        [pscustomobject]@{
+            Id = [string]$p.Id
+            Name = [string]$p.Name
+            Platform = [string]$p.Platform
+            Kind = [string]$p.Kind
+            TunnelId = [string]$p.TunnelId
+            BaseUrl = [string]$p.BaseUrl
+            ApiBaseUrl = [string]$p.ApiBaseUrl
+            KeyFile = [string]$p.KeyFile
+            HasKey = [bool]$p.HasKey
+            PlainKey = [string]$p.PlainKey
+            MaskedKey = [string]$p.MaskedKey
+            Enabled = [bool]$p.Enabled
+            IsActive = [bool]$p.IsActive
+        }
+    })
+    return [pscustomobject]@{
+        ActiveProfileId = [string]$State.ActiveProfileId
+        EnabledPlatforms = @($State.EnabledPlatforms)
+        ActiveProfileByPlatform = $clonedActiveByPlat
+        Profiles = $clonedProfiles
     }
 }
 
 function Get-ConnectionProfiles {
     param($Context, $Settings = $null)
-    if (-not $Settings) { $Settings = Read-ConnectionSettings $Context }
     $storePath = if ($Context.PSObject.Properties.Name -contains 'ProfilesStorePath' -and $Context.ProfilesStorePath) {
         $Context.ProfilesStorePath
     } else {
         Join-Path $Context.DataRoot 'credential-profiles.json'
     }
+    $cacheKey = if ($Context -and $Context.DataRoot) { [IO.Path]::GetFullPath([string]$Context.DataRoot).TrimEnd('\','/').ToLowerInvariant() } else { 'default' }
+    $preSig = Get-ConnectionProfilesCacheSignature -Context $Context -Settings $Settings -StorePath $storePath
+    if ($script:ConnectionProfilesCache.ContainsKey($cacheKey)) {
+        $cachedEntry = $script:ConnectionProfilesCache[$cacheKey]
+        if ($cachedEntry.Signature -eq $preSig -or $cachedEntry.RawSignature -eq $preSig) {
+            $script:ConnectionProfilesCacheStats.Hits++
+            return (Copy-ConnectionProfilesState $cachedEntry.State)
+        }
+    }
+    $script:ConnectionProfilesCacheStats.Misses++
+    if (-not $Settings) { $Settings = Read-ConnectionSettings $Context }
     $activeId = 'prof_primary'
     $rawItems = @()
     $enabledPlatforms = New-Object 'System.Collections.Generic.List[string]'
     $activeByPlatform = [ordered]@{}
     $storeObj = $null
     $hasExplicitProfilesStore = $false
+    $hadLegacyStoreEntries = $false
     if (Test-Path -LiteralPath $storePath) {
         try {
             $storeObj = [IO.File]::ReadAllText($storePath, [Text.Encoding]::UTF8) | ConvertFrom-Json
@@ -781,16 +908,21 @@ function Get-ConnectionProfiles {
             }
             if ($storeObj.PSObject.Properties.Name -contains 'enabled_platforms' -and $storeObj.enabled_platforms) {
                 foreach ($ep in @($storeObj.enabled_platforms)) {
-                    $epNorm = ([string]$ep).Trim().ToLowerInvariant()
-                    if ($epNorm -in @('openai','gemini','claude') -and -not $enabledPlatforms.Contains($epNorm)) {
+                    $epRaw = ([string]$ep).Trim().ToLowerInvariant()
+                    if ($epRaw -eq 'openai' -or $epRaw -notin $script:AllowedPlatforms) { $hadLegacyStoreEntries = $true }
+                    $epNorm = if ($epRaw -eq 'openai') { 'chatgpt' } else { $epRaw }
+                    if ($epNorm -in $script:AllowedPlatforms -and -not $enabledPlatforms.Contains($epNorm)) {
                         [void]$enabledPlatforms.Add($epNorm)
                     }
                 }
             }
             if ($storeObj.PSObject.Properties.Name -contains 'active_profile_by_platform' -and $storeObj.active_profile_by_platform) {
                 foreach ($prop in $storeObj.active_profile_by_platform.PSObject.Properties) {
-                    if ($prop.Name -in @('openai','gemini','claude') -and $prop.Value) {
-                        $activeByPlatform[$prop.Name.ToLowerInvariant()] = [string]$prop.Value
+                    $kRaw = ([string]$prop.Name).Trim().ToLowerInvariant()
+                    if ($kRaw -eq 'openai' -or $kRaw -notin $script:AllowedPlatforms) { $hadLegacyStoreEntries = $true }
+                    $kNorm = if ($kRaw -eq 'openai') { 'chatgpt' } else { $kRaw }
+                    if ($kNorm -in $script:AllowedPlatforms -and $prop.Value) {
+                        $activeByPlatform[$kNorm] = [string]$prop.Value
                     }
                 }
             }
@@ -802,15 +934,19 @@ function Get-ConnectionProfiles {
     if ($enabledPlatforms.Count -eq 0) {
         if ($Settings -and $Settings.PSObject.Properties.Name -contains 'enabled_platforms' -and $Settings.enabled_platforms) {
             foreach ($ep in @($Settings.enabled_platforms)) {
-                $epNorm = ([string]$ep).Trim().ToLowerInvariant()
-                if ($epNorm -in @('openai','gemini','claude') -and -not $enabledPlatforms.Contains($epNorm)) {
+                $epRaw = ([string]$ep).Trim().ToLowerInvariant()
+                $epNorm = if ($epRaw -eq 'openai') { 'chatgpt' } else { $epRaw }
+                if ($epNorm -in $script:AllowedPlatforms -and -not $enabledPlatforms.Contains($epNorm)) {
                     [void]$enabledPlatforms.Add($epNorm)
                 }
             }
         }
         if ($enabledPlatforms.Count -eq 0) {
-            [void]$enabledPlatforms.Add('openai')
+            [void]$enabledPlatforms.Add('chatgpt')
         }
+    }
+    if (-not $enabledPlatforms.Contains('chatgpt')) {
+        $enabledPlatforms.Insert(0, 'chatgpt')
     }
 
     if ($rawItems.Count -eq 0 -and -not $hasExplicitProfilesStore) {
@@ -824,7 +960,7 @@ function Get-ConnectionProfiles {
             [pscustomobject]@{
                 id = 'prof_primary'
                 name = '主工作台隧道'
-                platform = 'openai'
+                platform = 'chatgpt'
                 kind = 'tunnel'
                 tunnel_id = [string]$Settings.tunnel_id
                 base_url = [string]$Settings.api_base_url
@@ -835,24 +971,26 @@ function Get-ConnectionProfiles {
         )
     }
 
-    $activeByPlatform['openai'] = $activeId
+    $activeByPlatform['chatgpt'] = $activeId
     $profiles = @(foreach ($item in $rawItems) {
         $pidStr = [string]$item.id
-        $plat = if ($item.PSObject.Properties.Name -contains 'platform' -and $item.platform) { ([string]$item.platform).Trim().ToLowerInvariant() } else { 'openai' }
-        if ($plat -notin @('openai','gemini','claude')) { continue }
-        $kind = if ($plat -ne 'openai') { 'public_tunnel' } elseif ($item.PSObject.Properties.Name -contains 'kind' -and $item.kind) { ([string]$item.kind).Trim().ToLowerInvariant() } elseif ($plat -eq 'openai') { 'tunnel' } else { 'public_tunnel' }
-        $defaultKeyFile = if ($plat -eq 'openai') { "openai-key-$pidStr.dpapi" } else { "credential-$pidStr.dpapi" }
+        $platRaw = if ($item.PSObject.Properties.Name -contains 'platform' -and $item.platform) { ([string]$item.platform).Trim().ToLowerInvariant() } else { 'chatgpt' }
+        if ($platRaw -eq 'openai' -or $platRaw -notin $script:AllowedPlatforms) { $hadLegacyStoreEntries = $true }
+        $plat = if ($platRaw -eq 'openai') { 'chatgpt' } else { $platRaw }
+        if ($plat -notin $script:AllowedPlatforms) { continue }
+        $kind = if ($plat -ne 'chatgpt') { 'public_tunnel' } elseif ($item.PSObject.Properties.Name -contains 'kind' -and $item.kind) { ([string]$item.kind).Trim().ToLowerInvariant() } else { 'tunnel' }
+        $defaultKeyFile = if ($plat -eq 'chatgpt') { "openai-key-$pidStr.dpapi" } else { "credential-$pidStr.dpapi" }
         $keyFile = if ($item.PSObject.Properties.Name -contains 'key_file' -and $item.key_file) { [string]$item.key_file } else { $defaultKeyFile }
         $keyFullPath = Join-Path $Context.DataRoot $keyFile
         $plain = ''
         if (Test-Path -LiteralPath $keyFullPath) {
             try { $plain = Read-ConnectionSecret $keyFullPath } catch { $plain = '' }
-        } elseif ($plat -eq 'openai' -and $kind -eq 'tunnel' -and $pidStr -eq $activeId) {
+        } elseif ($plat -eq 'chatgpt' -and $kind -eq 'tunnel' -and $pidStr -eq $activeId) {
             $plain = Get-SavedOpenAIKeyPlaintext $Context
         }
         $tunId = if ($item.PSObject.Properties.Name -contains 'tunnel_id' -and $item.tunnel_id) {
             [string]$item.tunnel_id
-        } elseif ($plat -eq 'openai' -and $kind -eq 'tunnel' -and $pidStr -eq $activeId) {
+        } elseif ($plat -eq 'chatgpt' -and $kind -eq 'tunnel' -and $pidStr -eq $activeId) {
             [string]$Settings.tunnel_id
         } else { '' }
         $baseUrl = if ($item.PSObject.Properties.Name -contains 'base_url' -and $item.base_url) {
@@ -862,18 +1000,19 @@ function Get-ConnectionProfiles {
         } else {
             Get-DefaultPlatformBaseUrl $plat $Settings
         }
-        if ($plat -ne 'openai' -and $item.PSObject.Properties['kind'] -and $item.kind -eq 'apikey') {
+        if ($plat -ne 'chatgpt' -and $item.PSObject.Properties['kind'] -and $item.kind -eq 'apikey') {
             # Platform API credentials are not Cloudflare credentials; upgrade to quick mode.
             $plain = ''; $baseUrl = ''; $keyFile = "public-tunnel-$pidStr.dpapi"
+            $hadLegacyStoreEntries = $true
         }
         $enabledFlag = if ($item.PSObject.Properties.Name -contains 'enabled' -and $null -ne $item.enabled) { [bool]$item.enabled } else { $true }
         if ($pidStr -eq 'prof_business' -and [string]$item.name -eq 'Business 席位号' -and (-not $tunId) -and (-not $plain) -and ($pidStr -ne $activeId)) {
             continue
         }
-        if ($plat -ne 'openai' -and (-not $activeByPlatform.Contains($plat) -or -not $activeByPlatform[$plat])) {
+        if ($plat -ne 'chatgpt' -and (-not $activeByPlatform.Contains($plat) -or -not $activeByPlatform[$plat])) {
             $activeByPlatform[$plat] = $pidStr
         }
-        $isAct = if ($plat -eq 'openai') { ($pidStr -eq $activeId) } else { ($activeByPlatform[$plat] -eq $pidStr) }
+        $isAct = if ($plat -eq 'chatgpt') { ($pidStr -eq $activeId) } else { ($activeByPlatform[$plat] -eq $pidStr) }
         $displayName = if ([string]$item.name -eq '个人主力号') { '主工作台隧道' } else { [string]$item.name }
         [pscustomobject]@{
             Id = $pidStr
@@ -891,16 +1030,23 @@ function Get-ConnectionProfiles {
             IsActive = [bool]$isAct
         }
     })
-    if (@($rawItems | Where-Object { $_.PSObject.Properties['kind'] -and $_.kind -eq 'apikey' -and $_.platform -in @('gemini','claude') }).Count -gt 0 -or @($rawItems | Where-Object { $_.platform -and $_.platform -notin @('openai','gemini','claude') }).Count -gt 0 -or
-        ($storeObj -and @($storeObj.enabled_platforms | Where-Object { $_ -notin @('openai','gemini','claude') }).Count -gt 0)) {
+    if ($hadLegacyStoreEntries) {
         Write-ConnectionProfilesStorePayload -Context $Context -ActiveProfileId $activeId -EnabledPlatforms $enabledPlatforms.ToArray() -ActiveProfileByPlatform $activeByPlatform -SerializedProfiles @(foreach ($profile in $profiles) { ConvertTo-SerializedProfileEntry $profile })
     }
-    return [pscustomobject]@{
+    $resultState = [pscustomobject]@{
         ActiveProfileId = $activeId
         EnabledPlatforms = @($enabledPlatforms.ToArray())
         ActiveProfileByPlatform = $activeByPlatform
         Profiles = $profiles
     }
+    $postSigWithSettings = Get-ConnectionProfilesCacheSignature -Context $Context -Settings $Settings -StorePath $storePath
+    $postSigNoSettings = Get-ConnectionProfilesCacheSignature -Context $Context -Settings $null -StorePath $storePath
+    $script:ConnectionProfilesCache[$cacheKey] = @{
+        Signature = $postSigWithSettings
+        RawSignature = $postSigNoSettings
+        State = (Copy-ConnectionProfilesState $resultState)
+    }
+    return $resultState
 }
 
 function ConvertTo-SerializedProfileEntry {
@@ -909,10 +1055,12 @@ function ConvertTo-SerializedProfileEntry {
         [Nullable[bool]]$EnabledOverride = $null
     )
     $enVal = if ($null -ne $EnabledOverride) { [bool]$EnabledOverride } elseif ($ProfileObj.PSObject.Properties['Enabled']) { [bool]$ProfileObj.Enabled } elseif ($ProfileObj.PSObject.Properties['enabled']) { [bool]$ProfileObj.enabled } else { $true }
+    $rawPlat = if ($ProfileObj.PSObject.Properties['Platform']) { [string]$ProfileObj.Platform } elseif ($ProfileObj.PSObject.Properties['platform']) { [string]$ProfileObj.platform } else { 'chatgpt' }
+    $plat = Resolve-CanonicalPlatform $rawPlat
     return [pscustomobject]@{
         id = $(if ($ProfileObj.PSObject.Properties['Id']) { $ProfileObj.Id } else { $ProfileObj.id })
         name = $(if ($ProfileObj.PSObject.Properties['Name']) { $ProfileObj.Name } else { $ProfileObj.name })
-        platform = $(if ($ProfileObj.PSObject.Properties['Platform']) { $ProfileObj.Platform } else { $ProfileObj.platform })
+        platform = $plat
         kind = $(if ($ProfileObj.PSObject.Properties['Kind']) { $ProfileObj.Kind } else { $ProfileObj.kind })
         tunnel_id = $(if ($ProfileObj.PSObject.Properties['TunnelId']) { $ProfileObj.TunnelId } else { $ProfileObj.tunnel_id })
         base_url = $(if ($ProfileObj.PSObject.Properties['BaseUrl']) { $ProfileObj.BaseUrl } else { $ProfileObj.base_url })
@@ -935,14 +1083,33 @@ function Write-ConnectionProfilesStorePayload {
     } else {
         Join-Path $Context.DataRoot 'credential-profiles.json'
     }
+    $normEnabled = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($ep in @($EnabledPlatforms)) {
+        if (-not $ep) { continue }
+        $epNorm = Resolve-CanonicalPlatform ([string]$ep)
+        if ($epNorm -in $script:AllowedPlatforms -and -not $normEnabled.Contains($epNorm)) {
+            [void]$normEnabled.Add($epNorm)
+        }
+    }
+    if ($normEnabled.Count -eq 0) { [void]$normEnabled.Add('chatgpt') }
+    $normActiveByPlat = [ordered]@{}
+    if ($ActiveProfileByPlatform) {
+        foreach ($k in $ActiveProfileByPlatform.Keys) {
+            $kNorm = Resolve-CanonicalPlatform ([string]$k)
+            if ($kNorm -in $script:AllowedPlatforms -and $ActiveProfileByPlatform[$k]) {
+                $normActiveByPlat[$kNorm] = [string]$ActiveProfileByPlatform[$k]
+            }
+        }
+    }
     $storePayload = [pscustomobject]@{
         schema_version = 1
         active_profile_id = $ActiveProfileId
-        enabled_platforms = @($EnabledPlatforms)
-        active_profile_by_platform = $ActiveProfileByPlatform
+        enabled_platforms = @($normEnabled.ToArray())
+        active_profile_by_platform = $normActiveByPlat
         profiles = @($SerializedProfiles)
     } | ConvertTo-Json -Depth 6
     Write-AtomicConnectionText $storePath $storePayload
+    if ($script:ConnectionProfilesCache) { $script:ConnectionProfilesCache.Clear() }
 }
 
 function Save-ConnectionProfile {
@@ -966,36 +1133,36 @@ function Save-ConnectionProfile {
     $state = Get-ConnectionProfiles $Context $Settings
     $existingProf = $state.Profiles | Where-Object { $_.Id -eq $ProfileId } | Select-Object -First 1
     $effPlatform = if ($Platform -and $Platform.Trim()) {
-        $Platform.Trim().ToLowerInvariant()
+        Resolve-CanonicalPlatform $Platform
     } elseif ($existingProf -and $existingProf.PSObject.Properties['Platform'] -and $existingProf.Platform) {
-        ([string]$existingProf.Platform).Trim().ToLowerInvariant()
-    } else { 'openai' }
+        Resolve-CanonicalPlatform ([string]$existingProf.Platform)
+    } else { 'chatgpt' }
     $effKind = if ($Kind -and $Kind.Trim()) {
         $Kind.Trim().ToLowerInvariant()
     } elseif ($existingProf -and $existingProf.PSObject.Properties['Kind'] -and $existingProf.Kind) {
         ([string]$existingProf.Kind).Trim().ToLowerInvariant()
-    } elseif ($effPlatform -eq 'openai') {
+    } elseif ($effPlatform -eq 'chatgpt') {
         'tunnel'
     } else {
         'apikey'
     }
-    if ($effPlatform -notin @('openai','gemini','claude')) { throw '不支持的平台标识。' }
-    if ($effPlatform -ne 'openai') { $effKind = 'public_tunnel' }
+    if ($effPlatform -notin $script:AllowedPlatforms) { throw '不支持的平台标识。' }
+    if ($effPlatform -ne 'chatgpt') { $effKind = 'public_tunnel' }
     $cleanTun = if ($effKind -eq 'tunnel' -and $TunnelId.Trim()) { ConvertTo-TunnelId $TunnelId } else { '' }
     $cleanKey = $ApiKey.Trim()
-    if ($effPlatform -eq 'openai' -and $cleanKey -and ($cleanKey -match '^[a-z]+://' -or $cleanKey -match '\s' -or $cleanKey.Length -lt 12)) {
+    if ($effPlatform -eq 'chatgpt' -and $cleanKey -and ($cleanKey -match '^[a-z]+://' -or $cleanKey -match '\s' -or $cleanKey.Length -lt 12)) {
         throw 'API Key 栏请粘贴密钥本身，不是网页链接；密钥中不能有空格或换行。'
     }
     $activeId = $state.ActiveProfileId
     $activeByPlat = [ordered]@{}
     if ($state.PSObject.Properties['ActiveProfileByPlatform'] -and $state.ActiveProfileByPlatform) {
         foreach ($k in $state.ActiveProfileByPlatform.Keys) {
-            $activeByPlat[[string]$k] = [string]$state.ActiveProfileByPlatform[$k]
+            $activeByPlat[(Resolve-CanonicalPlatform ([string]$k))] = [string]$state.ActiveProfileByPlatform[$k]
         }
     }
-    if ($effPlatform -eq 'openai' -and $effKind -eq 'tunnel') {
+    if ($effPlatform -eq 'chatgpt' -and $effKind -eq 'tunnel') {
         if ($SetActive -or -not $activeId) { $activeId = $ProfileId }
-        $activeByPlat['openai'] = $activeId
+        $activeByPlat['chatgpt'] = $activeId
     } else {
         if ($SetActive -or -not $activeByPlat.Contains($effPlatform) -or -not $activeByPlat[$effPlatform]) {
             $activeByPlat[$effPlatform] = $ProfileId
@@ -1007,16 +1174,16 @@ function Save-ConnectionProfile {
     foreach ($p in $state.Profiles) {
         if ($p.Id -eq $ProfileId) {
             $found = $true
-            $origPlat = if ($p.PSObject.Properties['Platform'] -and $p.Platform) { ([string]$p.Platform).ToLowerInvariant() } else { 'openai' }
-            $origKind = if ($p.PSObject.Properties['Kind'] -and $p.Kind) { ([string]$p.Kind).ToLowerInvariant() } elseif ($origPlat -eq 'openai') { 'tunnel' } else { 'public_tunnel' }
-            if ($origPlat -eq 'openai' -and $origKind -eq 'tunnel' -and ($effPlatform -ne 'openai' -or $effKind -ne 'tunnel')) {
+            $origPlat = if ($p.PSObject.Properties['Platform'] -and $p.Platform) { Resolve-CanonicalPlatform ([string]$p.Platform) } else { 'chatgpt' }
+            $origKind = if ($p.PSObject.Properties['Kind'] -and $p.Kind) { ([string]$p.Kind).ToLowerInvariant() } elseif ($origPlat -eq 'chatgpt') { 'tunnel' } else { 'public_tunnel' }
+            if ($origPlat -eq 'chatgpt' -and $origKind -eq 'tunnel' -and ($effPlatform -ne 'chatgpt' -or $effKind -ne 'tunnel')) {
                 throw "不能将现有的 OpenAI 隧道配置 ($ProfileId) 变更为其他平台类型。"
             }
             $newName = if ($Name.Trim()) { $Name.Trim() } else { $p.Name }
             $newTun = if ($effKind -eq 'tunnel') { $(if ($cleanTun) { $cleanTun } else { $p.TunnelId }) } else { '' }
-            $newBaseUrl = if ($effPlatform -ne 'openai') { $BaseUrl.Trim() } elseif ($BaseUrl -and $BaseUrl.Trim()) { $BaseUrl.Trim() } elseif ($p.BaseUrl) { $p.BaseUrl } else { Get-DefaultPlatformBaseUrl $effPlatform $Settings }
+            $newBaseUrl = if ($effPlatform -ne 'chatgpt') { $BaseUrl.Trim() } elseif ($BaseUrl -and $BaseUrl.Trim()) { $BaseUrl.Trim() } elseif ($p.BaseUrl) { $p.BaseUrl } else { Get-DefaultPlatformBaseUrl $effPlatform $Settings }
             $newEnabled = if ($null -ne $Enabled) { [bool]$Enabled } else { [bool]$p.Enabled }
-            $keyFile = if ($effPlatform -eq 'openai' -and $effKind -eq 'tunnel') {
+            $keyFile = if ($effPlatform -eq 'chatgpt' -and $effKind -eq 'tunnel') {
                 if ($p.KeyFile) { $p.KeyFile } else { "openai-key-$($p.Id).dpapi" }
             } else {
                 if ($p.KeyFile -and $p.KeyFile -notmatch '^openai-') { $p.KeyFile } else { "credential-$($p.Id).dpapi" }
@@ -1040,7 +1207,7 @@ function Save-ConnectionProfile {
         }
     }
     if (-not $found) {
-        $keyFile = if ($effPlatform -eq 'openai') { "openai-key-$ProfileId.dpapi" } else { "credential-$ProfileId.dpapi" }
+        $keyFile = if ($effPlatform -eq 'chatgpt') { "openai-key-$ProfileId.dpapi" } else { "credential-$ProfileId.dpapi" }
         if ($cleanKey) {
             Write-AtomicConnectionText (Join-Path $Context.DataRoot $keyFile) (Protect-ConnectionSecret $cleanKey)
         }
@@ -1065,7 +1232,7 @@ function Save-ConnectionProfile {
     }
     Write-ConnectionProfilesStorePayload -Context $Context -ActiveProfileId $activeId -EnabledPlatforms $enabledPlats -ActiveProfileByPlatform $activeByPlat -SerializedProfiles ($updatedList.ToArray())
 
-    if ($effPlatform -eq 'openai' -and $effKind -eq 'tunnel' -and $activeId -eq $ProfileId -and $cleanTun) {
+    if ($effPlatform -eq 'chatgpt' -and $effKind -eq 'tunnel' -and $activeId -eq $ProfileId -and $cleanTun) {
         $Settings.tunnel_id = $cleanTun
         $effectiveKey = $cleanKey
         if (-not $effectiveKey) {
@@ -1094,25 +1261,25 @@ function Remove-ConnectionProfile {
             Remove-Item -LiteralPath $delKeyPath -Force -ErrorAction SilentlyContinue
         }
     }
-    $targetPlat = if ($targetProf -and $targetProf.Platform) { [string]$targetProf.Platform } else { 'openai' }
+    $targetPlat = if ($targetProf -and $targetProf.Platform) { Resolve-CanonicalPlatform ([string]$targetProf.Platform) } else { 'chatgpt' }
     $newActiveId = $state.ActiveProfileId
-    $openaiRemaining = @($remaining | Where-Object { $_.Platform -eq 'openai' })
-    if ($targetPlat -eq 'openai') {
-        if ($openaiRemaining.Count -eq 0) {
+    $chatgptRemaining = @($remaining | Where-Object { (Resolve-CanonicalPlatform ([string]$_.Platform)) -eq 'chatgpt' })
+    if ($targetPlat -eq 'chatgpt') {
+        if ($chatgptRemaining.Count -eq 0) {
             $newActiveId = ''
         } elseif ($newActiveId -eq $ProfileId) {
-            $newActiveId = $openaiRemaining[0].Id
+            $newActiveId = $chatgptRemaining[0].Id
         }
     }
     $activeByPlat = [ordered]@{}
     if ($state.PSObject.Properties['ActiveProfileByPlatform'] -and $state.ActiveProfileByPlatform) {
         foreach ($k in $state.ActiveProfileByPlatform.Keys) {
-            $activeByPlat[[string]$k] = [string]$state.ActiveProfileByPlatform[$k]
+            $activeByPlat[(Resolve-CanonicalPlatform ([string]$k))] = [string]$state.ActiveProfileByPlatform[$k]
         }
     }
-    $activeByPlat['openai'] = $newActiveId
-    if ($targetPlat -ne 'openai') {
-        $platRem = @($remaining | Where-Object { $_.Platform -eq $targetPlat })
+    $activeByPlat['chatgpt'] = $newActiveId
+    if ($targetPlat -ne 'chatgpt') {
+        $platRem = @($remaining | Where-Object { (Resolve-CanonicalPlatform ([string]$_.Platform)) -eq $targetPlat })
         if ($platRem.Count -eq 0) {
             $activeByPlat.Remove($targetPlat)
         } elseif ($activeByPlat[$targetPlat] -eq $ProfileId) {
@@ -1130,17 +1297,17 @@ function Select-ConnectionProfile {
     $state = Get-ConnectionProfiles $Context $Settings
     $target = $state.Profiles | Where-Object { $_.Id -eq $ProfileId } | Select-Object -First 1
     if (-not $target) { throw "找不到指定的连接配置 ($ProfileId)。" }
-    $targetPlat = if ($target.PSObject.Properties['Platform'] -and $target.Platform) { ([string]$target.Platform).ToLowerInvariant() } else { 'openai' }
-    $targetKind = if ($target.PSObject.Properties['Kind'] -and $target.Kind) { ([string]$target.Kind).ToLowerInvariant() } elseif ($targetPlat -eq 'openai') { 'tunnel' } else { 'public_tunnel' }
+    $targetPlat = if ($target.PSObject.Properties['Platform'] -and $target.Platform) { Resolve-CanonicalPlatform ([string]$target.Platform) } else { 'chatgpt' }
+    $targetKind = if ($target.PSObject.Properties['Kind'] -and $target.Kind) { ([string]$target.Kind).ToLowerInvariant() } elseif ($targetPlat -eq 'chatgpt') { 'tunnel' } else { 'public_tunnel' }
 
     $activeByPlat = [ordered]@{}
     if ($state.PSObject.Properties['ActiveProfileByPlatform'] -and $state.ActiveProfileByPlatform) {
         foreach ($k in $state.ActiveProfileByPlatform.Keys) {
-            $activeByPlat[[string]$k] = [string]$state.ActiveProfileByPlatform[$k]
+            $activeByPlat[(Resolve-CanonicalPlatform ([string]$k))] = [string]$state.ActiveProfileByPlatform[$k]
         }
     }
 
-    if (-not ($targetPlat -eq 'openai' -and $targetKind -eq 'tunnel')) {
+    if (-not ($targetPlat -eq 'chatgpt' -and $targetKind -eq 'tunnel')) {
         if ($targetKind -ne 'public_tunnel' -and -not $target.HasKey) {
             throw "配置「$($target.Name)」尚未填写 API Key，请先点击修改并粘贴凭据。"
         }
@@ -1163,7 +1330,7 @@ function Select-ConnectionProfile {
     if (-not $target.TunnelId -or -not $target.HasKey) {
         throw "配置「$($target.Name)」尚未填写隧道编号或 API Key，请先点击修改并粘贴凭据。"
     }
-    $activeByPlat['openai'] = $ProfileId
+    $activeByPlat['chatgpt'] = $ProfileId
     $rawProfiles = @(foreach ($p in $state.Profiles) {
         $enOverride = if ($p.Id -eq $ProfileId) { $true } else { [bool]$p.Enabled }
         ConvertTo-SerializedProfileEntry -ProfileObj $p -EnabledOverride $enOverride
@@ -1196,15 +1363,16 @@ function Add-CapsulePlatform {
         $Settings = $null
     )
     if (-not $Settings) { $Settings = Read-ConnectionSettings $Context }
-    $plat = if ($Platform) { $Platform.Trim().ToLowerInvariant() } else { '' }
-    if ($plat -notin @('openai', 'claude', 'gemini')) {
+    $rawPlat = if ($Platform) { $Platform.Trim().ToLowerInvariant() } else { '' }
+    $plat = if ($rawPlat -eq 'openai') { 'chatgpt' } else { $rawPlat }
+    if ($plat -notin $script:AllowedPlatforms) {
         throw "不支持的平台标识：$Platform"
     }
     $state = Get-ConnectionProfiles $Context $Settings
     $enabled = New-Object 'System.Collections.Generic.List[string]'
     foreach ($ep in @($state.EnabledPlatforms)) {
-        $epNorm = ([string]$ep).Trim().ToLowerInvariant()
-        if ($epNorm -and -not $enabled.Contains($epNorm)) { [void]$enabled.Add($epNorm) }
+        $epNorm = Resolve-CanonicalPlatform ([string]$ep)
+        if ($epNorm -in $script:AllowedPlatforms -and -not $enabled.Contains($epNorm)) { [void]$enabled.Add($epNorm) }
     }
     if (-not $enabled.Contains($plat)) {
         [void]$enabled.Add($plat)
@@ -1212,10 +1380,10 @@ function Add-CapsulePlatform {
     $activeByPlat = [ordered]@{}
     if ($state.PSObject.Properties['ActiveProfileByPlatform'] -and $state.ActiveProfileByPlatform) {
         foreach ($k in $state.ActiveProfileByPlatform.Keys) {
-            $activeByPlat[[string]$k] = [string]$state.ActiveProfileByPlatform[$k]
+            $activeByPlat[(Resolve-CanonicalPlatform ([string]$k))] = [string]$state.ActiveProfileByPlatform[$k]
         }
     }
-    $platProfiles = @($state.Profiles | Where-Object { ([string]$_.Platform).ToLowerInvariant() -eq $plat })
+    $platProfiles = @($state.Profiles | Where-Object { (Resolve-CanonicalPlatform ([string]$_.Platform)) -eq $plat })
     $rawProfiles = New-Object 'System.Collections.Generic.List[object]'
     foreach ($p in $state.Profiles) {
         $rawProfiles.Add((ConvertTo-SerializedProfileEntry $p))
@@ -1223,8 +1391,8 @@ function Add-CapsulePlatform {
     if ($platProfiles.Count -eq 0) {
         $newId = "prof_${plat}_default"
         $defUrl = Get-DefaultPlatformBaseUrl $plat $Settings
-        $defKind = if ($plat -eq 'openai') { 'tunnel' } else { 'public_tunnel' }
-        $defKeyFile = if ($plat -eq 'openai') { "openai-key-$newId.dpapi" } else { "credential-$newId.dpapi" }
+        $defKind = if ($plat -eq 'chatgpt') { 'tunnel' } else { 'public_tunnel' }
+        $defKeyFile = if ($plat -eq 'chatgpt') { "openai-key-$newId.dpapi" } else { "credential-$newId.dpapi" }
         $rawProfiles.Add([pscustomobject]@{
             id = $newId
             name = '默认'
@@ -1258,11 +1426,11 @@ function Set-ConnectionProfileEnabled {
     $activeByPlat = [ordered]@{}
     if ($state.PSObject.Properties['ActiveProfileByPlatform'] -and $state.ActiveProfileByPlatform) {
         foreach ($k in $state.ActiveProfileByPlatform.Keys) {
-            $activeByPlat[[string]$k] = [string]$state.ActiveProfileByPlatform[$k]
+            $activeByPlat[(Resolve-CanonicalPlatform ([string]$k))] = [string]$state.ActiveProfileByPlatform[$k]
         }
     }
-    $targetPlat = if ($target.PSObject.Properties['Platform'] -and $target.Platform) { ([string]$target.Platform).Trim().ToLowerInvariant() } else { 'openai' }
-    if ($Enabled -and $targetPlat -ne 'openai') {
+    $targetPlat = if ($target.PSObject.Properties['Platform'] -and $target.Platform) { Resolve-CanonicalPlatform ([string]$target.Platform) } else { 'chatgpt' }
+    if ($Enabled -and $targetPlat -ne 'chatgpt') {
         $activeByPlat[$targetPlat] = $ProfileId
     }
     $rawProfiles = @(foreach ($p in $state.Profiles) {
@@ -1291,7 +1459,7 @@ function Test-PlatformConnectionProfile {
     if ($effUrl -notmatch '^https?://') {
         throw "接入点地址 ($effUrl) 格式不正确，请填写以 https:// 开头的接口地址。"
     }
-    $plat = ([string]$target.Platform).Trim().ToLowerInvariant()
+    $plat = Resolve-CanonicalPlatform ([string]$target.Platform)
     $trimmedBase = $effUrl.TrimEnd('/')
     $probeUrl = if ($trimmedBase -match '/(models|healthz)$') {
         $trimmedBase
@@ -1354,14 +1522,18 @@ function Remove-CapsulePlatform {
         $Settings = $null
     )
     if (-not $Settings) { $Settings = Read-ConnectionSettings $Context }
-    $plat = if ($Platform) { $Platform.Trim().ToLowerInvariant() } else { '' }
+    $rawPlat = if ($Platform) { $Platform.Trim().ToLowerInvariant() } else { '' }
+    $plat = if ($rawPlat -eq 'openai') { 'chatgpt' } else { $rawPlat }
     $state = Get-ConnectionProfiles $Context $Settings
-    $enabled = @($state.EnabledPlatforms | Where-Object { ([string]$_).Trim().ToLowerInvariant() -ne $plat })
-    if ($enabled.Count -eq 0) { $enabled = @('openai') }
+    if (-not $plat -or $plat -eq 'chatgpt') {
+        return $state
+    }
+    $enabled = @($state.EnabledPlatforms | Where-Object { (Resolve-CanonicalPlatform ([string]$_)) -ne $plat })
+    if ($enabled.Count -eq 0) { $enabled = @('chatgpt') }
     $activeByPlat = [ordered]@{}
     if ($state.PSObject.Properties['ActiveProfileByPlatform'] -and $state.ActiveProfileByPlatform) {
         foreach ($k in $state.ActiveProfileByPlatform.Keys) {
-            $activeByPlat[[string]$k] = [string]$state.ActiveProfileByPlatform[$k]
+            $activeByPlat[(Resolve-CanonicalPlatform ([string]$k))] = [string]$state.ActiveProfileByPlatform[$k]
         }
     }
     $rawProfiles = @(foreach ($p in $state.Profiles) { ConvertTo-SerializedProfileEntry $p })
@@ -1917,6 +2089,7 @@ function Invoke-PurgeAllArchivedSessions {
 
 function Get-ProviderAvailableModels {
     param($State, [string]$Provider = 'chatgpt')
+    $Provider = Resolve-CanonicalPlatform $Provider
     if ($State -and $State.PSObject.Properties['available_models_by_provider'] -and $State.available_models_by_provider) {
         if ($State.available_models_by_provider.PSObject.Properties[$Provider]) { return @($State.available_models_by_provider.$Provider) }
         return @()
@@ -1928,9 +2101,7 @@ function Get-ProviderAvailableModels {
 function Get-WebRoomProvider {
     param($Record)
     if ($Record -and $Record.PSObject.Properties['provider'] -and $Record.provider) {
-        $value = ([string]$Record.provider).ToLowerInvariant()
-        if ($value -eq 'openai') { return 'chatgpt' }
-        return $value
+        return (Resolve-CanonicalPlatform ([string]$Record.provider))
     }
     if ($Record -and $Record.PSObject.Properties['url']) {
         if ([string]$Record.url -match '^https://gemini\.google\.com/') { return 'gemini' }
@@ -2628,16 +2799,50 @@ function Resolve-RelayBrowserProfile {
     return 'Desktop:ChatGPT'
 }
 
+$script:BrowserProfilesCacheSignature = ''
+$script:BrowserProfilesCacheStats = [pscustomobject]@{
+    Hits = 0
+    Misses = 0
+}
+
+function Clear-BrowserProfilesCache {
+    $script:BrowserProfilesCache = $null
+    $script:BrowserProfilesCacheUtc = [DateTime]::MinValue
+    $script:BrowserProfilesCacheSignature = ''
+    $script:BrowserProfilesCacheStats = [pscustomobject]@{
+        Hits = 0
+        Misses = 0
+    }
+}
+
+function Get-BrowserProfilesCacheStats {
+    return [pscustomobject]@{
+        Hits = [int]$script:BrowserProfilesCacheStats.Hits
+        Misses = [int]$script:BrowserProfilesCacheStats.Misses
+        Signature = [string]$script:BrowserProfilesCacheSignature
+    }
+}
+
 function Get-AvailableBrowserProfiles {
     param(
         [switch]$ForceRefresh,
         $Context = $null
     )
+    $ctxSettingsPath = if ($Context -and $Context.PSObject.Properties['SettingsPath'] -and $Context.SettingsPath) { [string]$Context.SettingsPath } else { '' }
+    $defSettingsPath = if ($PSScriptRoot) { Join-Path $PSScriptRoot 'data\settings.json' } else { '' }
+    $chromeLsPath = "$env:LOCALAPPDATA\Google\Chrome\User Data\Local State"
+    $edgeLsPath = "$env:LOCALAPPDATA\Microsoft\Edge\User Data\Local State"
+    $cacheSig = "$(Get-FileStatToken $ctxSettingsPath)|$(Get-FileStatToken $defSettingsPath)|$(Get-FileStatToken $chromeLsPath)|$(Get-FileStatToken $edgeLsPath)"
+    if ((-not $ForceRefresh) -and $null -ne $script:BrowserProfilesCache -and $script:BrowserProfilesCacheSignature -eq $cacheSig -and (([DateTime]::UtcNow - $script:BrowserProfilesCacheUtc).TotalSeconds -lt 30.0)) {
+        $script:BrowserProfilesCacheStats.Hits++
+        return $script:BrowserProfilesCache
+    }
+    $script:BrowserProfilesCacheStats.Misses++
     $configuredDefault = ''
     $preferredIds = @()
     try {
-        if ($Context -and $Context.PSObject.Properties['SettingsPath'] -and $Context.SettingsPath -and (Test-Path -LiteralPath $Context.SettingsPath)) {
-            $ctxSet = [IO.File]::ReadAllText($Context.SettingsPath, [Text.Encoding]::UTF8) | ConvertFrom-Json
+        if ($ctxSettingsPath -and (Test-Path -LiteralPath $ctxSettingsPath)) {
+            $ctxSet = [IO.File]::ReadAllText($ctxSettingsPath, [Text.Encoding]::UTF8) | ConvertFrom-Json
             if ($ctxSet -and $ctxSet.PSObject.Properties['default_browser_profile'] -and $ctxSet.default_browser_profile) {
                 $configuredDefault = ([string]$ctxSet.default_browser_profile).Trim()
             }
@@ -2645,7 +2850,6 @@ function Get-AvailableBrowserProfiles {
                 $preferredIds = @($ctxSet.preferred_browser_profiles | ForEach-Object { [string]$_ })
             }
         }
-        $defSettingsPath = if ($PSScriptRoot) { Join-Path $PSScriptRoot 'data\settings.json' } else { '' }
         if ($defSettingsPath -and (Test-Path -LiteralPath $defSettingsPath)) {
             $rawSet = [IO.File]::ReadAllText($defSettingsPath, [Text.Encoding]::UTF8) | ConvertFrom-Json
             if ((-not $configuredDefault) -and $rawSet -and $rawSet.PSObject.Properties['default_browser_profile'] -and $rawSet.default_browser_profile) {
@@ -2658,12 +2862,6 @@ function Get-AvailableBrowserProfiles {
     } catch {}
     if ($configuredDefault -match '^Profile\s+\d+$' -or $configuredDefault -eq 'Default') {
         $configuredDefault = "Chrome:$configuredDefault"
-    }
-    if ((-not $ForceRefresh) -and $script:BrowserProfilesCache -and (([DateTime]::UtcNow - $script:BrowserProfilesCacheUtc).TotalSeconds -lt 15.0)) {
-        $cachedDefault = ($script:BrowserProfilesCache | Where-Object { $_.IsDefault } | Select-Object -First 1)
-        if ((-not $configuredDefault) -or ($cachedDefault -and [string]$cachedDefault.Id -eq $configuredDefault)) {
-            return $script:BrowserProfilesCache
-        }
     }
     $extDetected = New-Object 'System.Collections.Generic.List[object]'
     $browsers = @(
@@ -2744,6 +2942,7 @@ function Get-AvailableBrowserProfiles {
             })
         } else {
             $existingMatch.IsDefault = $true
+            $existingMatch.SortOrder = 0
         }
     } elseif ($extDetected.Count -gt 0) {
         $detected[0].IsDefault = $true
@@ -2765,6 +2964,7 @@ function Get-AvailableBrowserProfiles {
     })
     $script:BrowserProfilesCache = $finalProfs
     $script:BrowserProfilesCacheUtc = [DateTime]::UtcNow
+    $script:BrowserProfilesCacheSignature = $cacheSig
     return $finalProfs
 }
 
@@ -2821,7 +3021,10 @@ function Set-TaskComposerConfig {
     }
     if ($TargetMode) { $payload['target_mode'] = $TargetMode }
     if ($BrowserProfile) { $payload['browser_profile'] = $BrowserProfile }
-    if ($Provider) { $payload['provider'] = $Provider }
+    if ($Provider) {
+        $Provider = Resolve-CanonicalPlatform $Provider
+        $payload['provider'] = $Provider
+    }
     if ($TargetModel) { $payload['target_model'] = $TargetModel }
     if ($ReasoningEffort) { $payload['reasoning_effort'] = $ReasoningEffort }
     if ($null -ne $AutoResendEnabled) { $payload['auto_resend_enabled'] = [bool]$AutoResendEnabled }
@@ -6070,6 +6273,31 @@ function ConvertTo-PublicMcpUrl {
     return $uri.GetLeftPart([UriPartial]::Authority) + '/mcp'
 }
 
+$script:PublicMcpTunnelLogCache = @{}
+$script:PublicMcpTunnelLogCacheStats = [pscustomobject]@{
+    Hits = 0
+    Misses = 0
+    LastBytesRead = 0
+}
+
+function Clear-PublicMcpTunnelLogCache {
+    $script:PublicMcpTunnelLogCache = @{}
+    $script:PublicMcpTunnelLogCacheStats = [pscustomobject]@{
+        Hits = 0
+        Misses = 0
+        LastBytesRead = 0
+    }
+}
+
+function Get-PublicMcpTunnelLogCacheStats {
+    return [pscustomobject]@{
+        Hits = [int]$script:PublicMcpTunnelLogCacheStats.Hits
+        Misses = [int]$script:PublicMcpTunnelLogCacheStats.Misses
+        LastBytesRead = [int]$script:PublicMcpTunnelLogCacheStats.LastBytesRead
+        Entries = $script:PublicMcpTunnelLogCache.Count
+    }
+}
+
 function Get-PublicMcpTunnelState {
     param($Context)
     $path = Join-Path $Context.DataRoot 'public-mcp-tunnel.json'
@@ -6083,20 +6311,71 @@ function Get-PublicMcpTunnelState {
             $result.StartedAt = $saved.StartTicks
             $result.Status = '连接中'
             $logPath = Join-Path $Context.DataRoot 'public-mcp-tunnel.log'
+            $logSig = Get-FileStatToken $logPath
+            $cacheKey = "$($Context.DataRoot)|$($proc.Id)|$($saved.StartTicks)|$([string]$saved.FixedUrl)"
+            $cachedEntry = if ($script:PublicMcpTunnelLogCache.ContainsKey($cacheKey)) { $script:PublicMcpTunnelLogCache[$cacheKey] } else { $null }
+            if ($cachedEntry -and $cachedEntry.LogSignature -eq $logSig) {
+                $script:PublicMcpTunnelLogCacheStats.Hits++
+                return [pscustomobject]@{
+                    Running = [bool]$cachedEntry.Running
+                    Url = [string]$cachedEntry.Url
+                    ProcessId = [int]$proc.Id
+                    StartedAt = $saved.StartTicks
+                    Status = [string]$cachedEntry.Status
+                }
+            }
+            $script:PublicMcpTunnelLogCacheStats.Misses++
+            $url = if ($saved.FixedUrl) { [string]$saved.FixedUrl } elseif ($cachedEntry -and $cachedEntry.DiscoveredUrl) { [string]$cachedEntry.DiscoveredUrl } else { '' }
+            $hadReadyBefore = [bool]($cachedEntry -and $cachedEntry.DiscoveredReady)
             $log = ''
-            if (Test-Path -LiteralPath $logPath) {
+            $bytesRead = 0
+            if ($logSig -ne '0:0:0') {
                 # cloudflared holds this file open for writes; allow that writer and log rotation.
                 $logStream = [IO.File]::Open($logPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
                 try {
-                    $logReader = [IO.StreamReader]::new($logStream, [Text.Encoding]::UTF8, $true)
-                    try { $log = $logReader.ReadToEnd() }
-                    finally { $logReader.Dispose() }
+                    $fileLen = $logStream.Length
+                    if ($fileLen -gt 8192) {
+                        [void]$logStream.Seek(-8192, [IO.SeekOrigin]::End)
+                        $buf = New-Object byte[] 8192
+                        $bytesRead = $logStream.Read($buf, 0, 8192)
+                        $log = [Text.Encoding]::UTF8.GetString($buf, 0, $bytesRead)
+                        if (-not $url -and $log -match 'https://[a-zA-Z0-9-]+\.trycloudflare\.com') {
+                            $url = ConvertTo-PublicMcpUrl $Matches[0]
+                        }
+                        if (-not $url) {
+                            [void]$logStream.Seek(0, [IO.SeekOrigin]::Begin)
+                            $headLen = [Math]::Min(4096, [int]$fileLen)
+                            $headBuf = New-Object byte[] $headLen
+                            $headRead = $logStream.Read($headBuf, 0, $headLen)
+                            $headText = [Text.Encoding]::UTF8.GetString($headBuf, 0, $headRead)
+                            if ($headText -match 'https://[a-zA-Z0-9-]+\.trycloudflare\.com') {
+                                $url = ConvertTo-PublicMcpUrl $Matches[0]
+                            }
+                            if ($headText -match 'Registered tunnel connection') {
+                                $hadReadyBefore = $true
+                            }
+                        }
+                    } else {
+                        $bytesRead = [int]$fileLen
+                        $logReader = [IO.StreamReader]::new($logStream, [Text.Encoding]::UTF8, $true)
+                        try { $log = $logReader.ReadToEnd() }
+                        finally { $logReader.Dispose() }
+                    }
                 } finally { $logStream.Dispose() }
             }
-            $url = [string]$saved.FixedUrl
+            $script:PublicMcpTunnelLogCacheStats.LastBytesRead = $bytesRead
             if (-not $url -and $log -match 'https://[a-zA-Z0-9-]+\.trycloudflare\.com') { $url = ConvertTo-PublicMcpUrl $Matches[0] }
-            if ($url -and $log -match 'Registered tunnel connection') {
+            $isReadyNow = ($hadReadyBefore -or ($log -match 'Registered tunnel connection')) -and [bool]$url
+            if ($isReadyNow) {
                 $result.Running = $true; $result.Url = $url; $result.Status = '在线'
+            }
+            $script:PublicMcpTunnelLogCache[$cacheKey] = @{
+                LogSignature = $logSig
+                DiscoveredUrl = $url
+                DiscoveredReady = $isReadyNow
+                Running = [bool]$result.Running
+                Url = [string]$result.Url
+                Status = [string]$result.Status
             }
         } catch { }
     }
@@ -6132,6 +6411,7 @@ function Start-PublicMcpTunnel {
         # cloudflared writes its own logfile, avoiding pipe-buffer deadlocks.
         $logPath = Join-Path $Context.DataRoot 'public-mcp-tunnel.log'
         [IO.File]::WriteAllText($logPath, '')
+        if ($script:PublicMcpTunnelLogCache) { $script:PublicMcpTunnelLogCache.Clear() }
         if ($fixedUrl -and $Token) {
             $info.Arguments = 'tunnel --no-autoupdate --logfile "' + $logPath + '" run'
             $info.EnvironmentVariables['TUNNEL_TOKEN'] = $Token
@@ -6161,7 +6441,9 @@ function Stop-PublicMcpTunnel {
         if ($state.ProcessId) { Stop-Process -Id $state.ProcessId -ErrorAction SilentlyContinue }
         $path = Join-Path $Context.DataRoot 'public-mcp-tunnel.json'
         if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force }
+        if ($script:PublicMcpTunnelLogCache) { $script:PublicMcpTunnelLogCache.Clear() }
     } finally { $lock.Dispose() }
+    if ($script:ConnectionProfilesCache) { $script:ConnectionProfilesCache.Clear() }
 }
 
 Export-ModuleMember -Function *-* -Alias *
