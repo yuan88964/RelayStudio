@@ -10,17 +10,17 @@ Single entry point for software implementation, refactoring, bug fixing, and ver
 
 Once invoked after user go-ahead, execution runs **unattended without stopping to ask mid-flight**: non-breaking internal adaptations (Category 1) and approved blast-radius test syncs (Category 2) are decided autonomously and logged under `## Accepted Amendments & Internal Adaptations`; issues that would alter user-visible behavior or weaken acceptance assertions (Category 3) or exceed 1 clean-room relay (`two_strike_stop`) are marked `quarantined` while all remaining unblocked work continues, then surfaced together at the end ([protocol.md](protocol.md)).
 
-## Scope, Normalization, and Transfer Contract
+## Three-State Interface Contract (`Standard / Normalize / Bailout`)
 
-1. **Typical inputs (handle directly)**:
+1. **`Standard` (handle directly)**:
    - **Small / single-slice change**: a single localized ticket or small feature/fix with settled decisions, without a multi-ticket dependency graph.
    - **Multi-ticket spec graph**: a `SPEC.md` and associated tickets with blocking relationships (`Blocked by`).
-2. **Non-typical inputs (normalize first, then handle)**:
+2. **`Normalize` (normalize $M \to 1$ at entry, then handle)**:
    - **Homogeneous bulk scan or mechanical transform ($\ge 20$ independent files)**: normalize into a local worker script (`max_workers=4`) and dispatch subagents only for flagged exceptions.
-   - **Module boundary, state ledger, or interface redesign**: normalize interface seams, flatten case-by-case branching, and design concurrency isolation first using the [`codebase-design`](../codebase-design/SKILL.md) skill before writing code.
+   - **Module seam, state ledger, or interface redesign**: normalize interface seams, flatten case-by-case branching, and design concurrency isolation first using the [`codebase-design`](../codebase-design/SKILL.md) skill before writing code.
    - **Hard bug without a reproduction loop**: normalize via the `diagnosing-bugs` skill to establish a single red command before attempting fixes.
-3. **Out-of-bounds or blocked cases (stop note + transfer route)**:
-   - Unattended execution never blocks on the user. When a step hits two consecutive same-root-cause failures (`two_strike_stop`), misses a required capability, or encounters a spec/credential conflict, it halts cleanly and outputs a one-line `Error` and structured `Route` (`use`, `need`, `drop`, `amend-spec`, or `ask-user`) per [protocol.md](protocol.md).
+3. **`Bailout` (abort main path and emit `Error` + `Route`)**:
+   - Unattended execution never blocks on the user. When a step hits two consecutive same-root-cause failures (`two_strike_stop`), misses a required capability, or encounters a spec/credential conflict, it triggers a **Bailout**: halts cleanly and outputs a one-line `Error` and structured `Route` (`use`, `need`, `drop`, `amend-spec`, or `ask-user`) per [protocol.md](protocol.md).
 
 ## Internal Reference Files (Load on Demand by Branch)
 

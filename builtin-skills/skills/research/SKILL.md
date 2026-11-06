@@ -11,4 +11,4 @@ Their job:
 2. Write the findings to a single concise, high-density Markdown file (lead with the conclusion, use tables for multi-item comparisons, and cite each claim's source). Return a brief pointer summary ($\le 15$ lines) to the parent agent rather than repeating the full file in the handoff message.
 3. Save the file in a **dedicated subfolder**, never scattered in a root directory:
    - **Repo-specific research**: save where the repo already keeps research notes (or `.scratch/research/`), matching the repo's convention.
-   - **Cross-project AI models, tools, platforms, or engineering research**: save under the central knowledge base's research notes folder (e.g., `docs/research/`) and register the new note's link in its reference index.
+   - **Cross-project AI models, tools, platforms, or engineering research**: save under `参考资料/调研笔记/` and register the new note's link in `参考资料/00 参考资料导览.md`.

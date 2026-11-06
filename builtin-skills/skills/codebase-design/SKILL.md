@@ -32,6 +32,8 @@ Use these terms exactly: don't substitute "component," "service," "API," or "bou
 
 **Locality**: what maintainers get from depth. Change, bugs, knowledge, and verification concentrate in one place rather than spreading across callers. Fix once, fixed everywhere.
 
+**Bailout**: the third state of the **Three-State Interface Contract (`Standard / Normalize / Bailout`)**. When a module cannot close the loop locally—because a precondition fails, the request falls outside the module's responsibility, a required capability is missing, or execution hits two consecutive same-root-cause failures (`two_strike_stop`)—it immediately aborts the main path and emits both a one-line stop reason (`Error`) and a structured next-step directive (`Route: use | need | drop | amend-spec | ask-user`).
+
 ## Why Deep Modules Matter
 
 Complexity stems from **dependencies** (code that cannot be understood or modified in isolation) and **obscurity** (hidden assumptions and invariants), showing up as **change amplification**, **cognitive load**, and **unknown unknowns**. Deep modules fight complexity in three ways:
@@ -66,17 +68,17 @@ Deepening never means stuffing unrelated features into a monolith. When a module
 
 #### 3. Polish: Refine the Interface & Internals from Outside In
 Once scope is bounded by Steps 1 and 2, polish the module from its external seam inward:
-1. **Three-state interface contract (`Standard / Normalize / Error + Route`)**:
-   - *Standard path*: inputs meeting preconditions execute directly on the critical path;
-   - *Normalize at entry*: non-standard or partial inputs are normalized into canonical form at the entry before reaching core logic;
-   - *Guard & route at line 1 (`Error + Route`)*: out-of-scope inputs or blocked states are rejected at line 1 with a one-line `Error` and a structured next-step `Route` (`use`, `need`, `drop`, `amend-spec`, or `ask-user`).
+1. **Three-state interface contract (`Standard / Normalize / Bailout`)**:
+   - *`Standard`*: inputs meeting preconditions execute directly on the critical path;
+   - *`Normalize`*: non-standard or partial inputs are normalized ($M \to 1$) into canonical form at the entry before reaching core logic;
+   - *`Bailout`*: out-of-scope inputs, violated preconditions, missing capabilities, or blocked states (`two_strike_stop`) abort the main path at line 1 and emit both a one-line `Error` and a structured next-step `Route` (`use`, `need`, `drop`, `amend-spec`, or `ask-user`).
 2. **Flatten `if/else` branching from outside in**:
    - *Table-driven adapters at the seam*: replace multi-source or cross-host `else if` chains with a static lookup table of thin **Adapters**;
    - *Canonical entry normalization ($M \to 1$)*: convert $M$ heterogeneous input formats into $1$ canonical internal data structure at the entry;
    - *General internal model*: choose a data representation that treats edge cases as ordinary cases (e.g., representing an empty cursor as a selection of length `0`).
 3. **Pull complexity downwards & eliminate errors safely**:
    - *Mechanism vs. policy*: auto-compute internal mechanism parameters (buffer sizes, backoff intervals, shard counts) from runtime state instead of exporting config knobs; keep domain policy configurable at the interface with zero-config defaults for the 90% case;
-   - *Idempotent 4-tier error ladder*: (a) *Define errors out of existence* (silent target-state convergence, such as deleting an already-absent item) and (b) *low-level retry masking* apply **strictly to idempotent operations** that preserve data invariants; (c) *aggregate* remaining exceptions at a single top-level handler; (d) *fail fast* with `Error + Route` on non-idempotent side effects, broken invariants, or out-of-scope inputs.
+   - *Idempotent 4-tier error ladder*: (a) *Define errors out of existence* (silent target-state convergence, such as deleting an already-absent item) and (b) *low-level retry masking* apply **strictly to idempotent operations** that preserve data invariants; (c) *aggregate* remaining exceptions at a single top-level handler; (d) *trigger a `Bailout`* (`Error` + `Route`) on non-idempotent side effects, broken invariants, or out-of-scope inputs.
 4. **Write interface comments first as a complexity canary**:
    - Write interface comments (preconditions, units, invariants, with zero implementation details) before coding method bodies. If a module or parameter is *Hard to Pick a Name* for or *Hard to Describe* concisely, the abstraction is shallow—redesign it before coding.
    - Return results rather than mutating arguments, replace generic `Pair`/`Tuple` containers with named fields, and use one canonical term per concept (`GLOSSARY.md`).

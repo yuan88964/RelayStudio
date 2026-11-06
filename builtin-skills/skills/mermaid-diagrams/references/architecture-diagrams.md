@@ -1,6 +1,6 @@
 # Cloud & Deployment Topology (`flowchart TB` Deployment View)
 
-> **Unified Rules**: See [SKILL.md](../SKILL.md) for C4/arc42 deployment boundaries, Tufte semantic layering, and unidirectional verb + `[协议]` edge contracts.
+> **Unified Rules**: See [SKILL.md](../SKILL.md) for C4/arc42 deployment seams, Tufte semantic layering, and unidirectional verb + `[协议]` edge contracts.
 
 ## Canonical Example: Edge-to-Database Cloud Deployment Topology
 

@@ -1,16 +1,19 @@
 ---
 name: resolving-merge-conflicts
-description: "解决进行中的 Git merge 或 rebase 冲突。适用于分支合并或变基过程中出现代码冲突需要消解时。"
+description: Resolve in-progress Git merge or rebase conflicts cleanly. Use when a branch merge, rebase, or worktree integration hits conflicting hunks that must be reconciled and verified.
 ---
 
-# 解决合并与变基冲突
+# Resolving Merge & Rebase Conflicts
 
-1. **核查当前合并或变基状态**：检查 Git 提交历史与所有发生冲突的文件。
+1. **Inspect current merge or rebase state (`Standard` / `Normalize`)**: Run `git status --porcelain` and inspect `git log --merge -p` to list every conflicted file and identify the two diverging commits across the integration seam (`Seam`).
 
-2. **追溯每处冲突的一手来源**：深入理解双方改动各自的原因与原始意图。阅读提交说明、核查对应 PR，并查阅原始工单或规格文档。
+2. **Trace each side's primary source of truth**: Read the commit messages, ticket files, and Effective Spec (`Original Spec ⊕ Accepted Amendments`) for both `HEAD` and the incoming branch so you understand the exact invariant each side was trying to establish.
 
-3. **逐块消解冲突**：尽可能同时保留双方的修改意图；若双方意图互斥，选择符合本次合并既定目标的一方，并明确记录取舍理由。**切勿**在解冲突时凭空发明新行为。始终完成冲突消解，绝不执行 `--abort` 放弃。
+3. **Reconcile each conflicted hunk**:
+   - Preserve both sides' intent whenever they are orthogonal;
+   - When the two sides are mutually exclusive, select the side that conforms to the locked interface seam and Effective Spec, and document the rationale;
+   - **Never invent unrequested behavior** during conflict resolution, and never run `--abort` to abandon the integration unless triggering a structured **`Bailout`** (`Error` + `Route: ask-user`) on a genuine spec contradiction.
 
-4. **发现并运行项目的自动化检查**：通常按“类型检查 → 测试 → 代码格式化”的顺序执行，修复合并引入的一切破坏。
+4. **Verify at the module seam (`Tight Loop` + static typecheck)**: Run the target module's `1–3s` `Tight Loop` test command, static typechecker, and formatter in order, fixing any broken imports or contract mismatches introduced by the merge.
 
-5. **完成合并或变基**：暂存所有已解决的文件并提交；若处于变基（rebase）流程中，继续推进变基直至全部提交重放完毕。
+5. **Complete the merge or rebase**: Stage all resolved files (`git add`) and complete the commit or `git rebase --continue` until all commits replay cleanly and `git status --porcelain` is empty.

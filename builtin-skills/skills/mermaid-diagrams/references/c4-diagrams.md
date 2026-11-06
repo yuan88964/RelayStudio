@@ -1,6 +1,6 @@
 # C4 Architecture Diagrams (C1 System Context, C2 Container, C3 Component)
 
-> **Unified Rules**: See [SKILL.md](../SKILL.md) for C4 zoom discipline (`C1`–`C3` stop at deep modules), arc42 blackbox/whitebox boundaries (`Whitebox contains Blackboxes`), and **Template 1 (C4 Level 3 Component / Deep Module View)**.
+> **Unified Rules**: See [SKILL.md](../SKILL.md) for C4 zoom discipline (`C1`–`C3` stop at deep modules), arc42 blackbox/whitebox seam rules (`Whitebox contains Blackboxes`), and **Template 1 (C4 Level 3 Component / Deep Module View)**.
 
 ---
 

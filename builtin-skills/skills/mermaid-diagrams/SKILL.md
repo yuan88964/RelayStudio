@@ -1,74 +1,75 @@
 ---
 name: mermaid-diagrams
-description: 在回答或 Markdown 文档中用 Mermaid 创建、修改高清系统架构图（C4 C1/C2/C3）、跨角色时序图、业务状态生命周期图、SRE 瑞士奶酪故障屏障图、Novak 命题概念图与数学交换推导图。涉及多模块协作、多分支流转、状态机、故障传导或复杂概念推演时主动使用。
+description: Create and refine high-resolution Mermaid diagrams in responses or Markdown documents, including C4 architecture views (C1/C2/C3), numbered cross-actor sequence diagrams, state lifecycle diagrams, SRE Swiss Cheese fault-barrier diagrams, Novak proposition concept maps, and mathematical commutative diagrams. Use whenever explaining cross-module seams, multi-branch flows, state machines, cascading fault barriers, or mathematical/conceptual transformations.
 metadata:
   upstream: softaworks/agent-toolkit
   upstream-commit: 3027f20f3181758385a1bb8c022d4041dfb4de84
-  local-adaptation: "2026-11-05"
+  local-adaptation: "2026-11-06"
 ---
 
-# Mermaid 图解表达深模块（判定、规模契约与六大标准模板）
+# Mermaid Diagramming Deep Module (`mermaid-diagrams`)
 
-本模块统一维护全库的**画图判定、版面规模、交付形式与六大标准 Mermaid 代码模板**（长期表达目标见 [全局协作规则](../../AGENTS.md)）。
+Top-level orchestrator (**Role B1**) for diagram selection, scale discipline, single-track delivery (`.md` vs. `.png`), and six canonical Mermaid templates (user-facing reporting language follows [Global_Agent_Rules.md](../../Agent全局配置/Global_Agent_Rules.md)).
 
-## 0. 模块职责、输入归一化与异常转接契约
+## 0. Three-State Interface Contract (`Standard / Normalize / Bailout`)
 
-1. **典型情景（直接处理）**：涉及跨模块接缝（`Seam`）、多分支流转、状态生命周期、多道故障屏障或概念/数学等价变换时，直接按下方规模与模板绘制图解。
-2. **非典型情景（先归一化再处理）**：
-   - 若信息仅是 $\le 5$ 步单线操作或 $\ge 3$ 项并列维度对比，先归一化为**列表**或**对比表格**，不强行画图；
-   - 若单图核心节点超过 15 个或跨多层抽象，先拆分为**“1 张宏观总览图 + 1 张局部放大图”**再绘制；
-   - 若分支回路复杂、连线交叉或标签拥挤，先调用子零件 [node-link-and-diagram-layout](../node-link-and-diagram-layout/SKILL.md) 整理排列方向与分组，再落图。
-3. **异常或越界情景（输出停工说明 `Error` 与转接建议 `Route`）**：
-   - 需要先做代码库深模块扫描与候选方案对拷 → 输出 `Route: use improve-codebase-architecture: scan codebase seams before drawing before/after C4 diagrams`；
-   - 批量渲染脚本 `scripts/render-batch.mjs` 因本机缺少 Headless Chrome 或依赖失败 → 输出 `Error: <原因>` 与 `Route: need headless-chrome-or-mmdc: fall back to standalone .md Mermaid delivery`。
+1. **`Standard` (handle directly)**: When the target structure involves cross-module **seams** (`Seam`), multi-branch control flow, state lifecycles, multi-layer fault barriers, or conceptual/mathematical equivalence transformations within **5–15 core nodes**, select the matching template below and draw directly.
+2. **`Normalize` (normalize $M \to 1$ at entry, then handle)**:
+   - If the content is a linear sequence of $\le 5$ steps or a parallel comparison across $\ge 3$ dimensions, normalize it into a **list** or **comparison table** rather than drawing a diagram;
+   - If a diagram exceeds **15 core nodes** or mixes abstraction layers, normalize it into **"1 macro overview diagram + 1 whitebox zoom-in diagram"** ($\le 15$ nodes each) before drawing;
+   - If complex branching, return loops, long labels, or edge crossings hurt readability, invoke the layout child part [`node-link-and-diagram-layout`](../node-link-and-diagram-layout/SKILL.md) first to normalize direction (`TB` vs. `LR`), grouping, and connector routing.
+3. **`Bailout` (abort main path and emit `Error` + `Route`)**:
+   - When asked to draw before/after C4 architecture views for an unexamined codebase that requires deep-module seam discovery first → emit `Error: codebase seams not yet audited` and `Route: use codebase-design: audit module seams and deepen candidates before drawing C4 views`;
+   - When the batch renderer `scripts/render-batch.mjs` fails due to a missing Headless Chrome binary or runtime dependency → emit `Error: <reason>` and `Route: need headless-chrome: fall back to standalone .md Mermaid delivery`.
 
 ---
 
-## 一、什么时候不画图，什么时候画图
+## 1. When Not to Draw vs. When to Draw
 
-按信息的自身结构选择合适的呈现方式：
+Match the visual form to the intrinsic structure of the information:
 
-| 信息结构特征 | 适用场景 | 推荐呈现方式 | 判断依据 |
+| Information Structure | Target Scenario | Canonical Form | Selection Criterion |
 | :--- | :--- | :--- | :--- |
-| **1. 单线顺序步骤或单维度要点**<br>（$\le 5$ 步顺序操作、无分支、无回环） | 操作步骤与说明 | **有序或无序列表** | 每个条目只包含 1 个动作且按单线推进时，直接用列表，便于扫读与复制命令。 |
-| **2. 多对象并列对比或归因清单**<br>（$\ge 3$ 个同类对象或 $\ge 3$ 个可比维度、故障归因、改造前后对照） | 结构化查阅与对比 | **对比表格** 或 **LaTeX 对齐阵列** | 并列条目共享 3 个及以上可比属性（如：现象 / 触发条件 / 失守点 / 修复动作）时，表格横向扫读效率高于连线图；数学双轨序列对齐使用 LaTeX `\begin{array}`。 |
-| **3. 跨模块接缝（`Seam`）、多分支流转、状态回环或等价变换** | 机制理解与复杂排障 | **独立图解文档或高清图片**<br>（默认独立 `.md`） | 存在跨容器/跨模块接口接缝、多分支条件判据、异步回调闭环、多道防线穿透或双路径等价变换，纯文字需要反复写“若 A 则跳回 X”时才画图。 |
+| **1. Linear sequential steps or single-dimension points**<br>($\le 5$ sequential steps, no branches, no loops) | Operational steps & instructions | **Ordered or unordered list** | When each item performs one action in a single linear chain, use a list for fast scanning and command copying. |
+| **2. Multi-item parallel comparison or attribution**<br>($\ge 3$ peer items or $\ge 3$ comparable dimensions, root-cause matrices, before/after diffs) | Structured comparison & lookup | **Comparison table** or **LaTeX aligned array** | When peer items share $\ge 3$ attributes (e.g., symptom / trigger / breached seam / fix), horizontal table scanning beats node-link boxes; use LaTeX `\begin{array}` for dual-track math alignments. |
+| **3. Cross-module seams (`Seam`), multi-branch flows, state loops, or equivalence transforms** | Mechanism comprehension & complex debugging | **Standalone `.md` diagram** or **high-res `.png`** | Draw only when cross-container/cross-module seams, conditional branches, async callbacks, multi-layer fault barriers, or dual-path equivalence transforms would force prose to repeat `"if A, jump back to X"`. |
 
 ---
 
-## 二、交付形式与版面规模原则
+## 2. Delivery Mode & Scale Discipline
 
-### 1. 交付形式（`.md` 简要图与 `.png` 大图二选一）
-- **默认交付：独立 `.md` 简要图文档**：日常对话、架构分析或排障解释需要画图时，在当前会话目录创建一份独立的 `.md` 图解文档（集中放入 Mermaid 代码块与必要图例），在对话正文对应句尾内嵌 `[图解名称](file:///...md)` 直链（例如 `整体流转见 [系统架构图解](file:///...md)。`）。此时不额外调用渲染脚本生成 `.png`。
-- **按需交付：高清 `.png` 大图（用户要求导出图片或写入笔记长期归档时启用）**：当用户要求导出图片，或需要将定稿图嵌入 Obsidian 笔记长期归档时，将 Mermaid 源码写入临时 `.mmd` 并调用 `node "scripts/render-batch.mjs"` 批量导出 2x `.png`（见 [批量渲染说明](references/rendering.md)），在句尾内嵌 `[图名](file:///...png)` 交付（写入 Obsidian 笔记归档时用 `![图名](路径)`），不再重复创建装相同 Mermaid 代码块的展示用 `.md` 文档。
+### 1. Single-Track Delivery (Either Standalone `.md` or `.png`, Never Both)
+- **Default delivery — Standalone `.md` diagram document**: During everyday chat, architecture analysis, or debugging explanations, create a standalone `.md` diagram file in the active session folder (holding the Mermaid code block and brief legend) and link it inline at the end of the relevant sentence (`[Diagram Title](file:///...md)`). Do not run the PNG renderer in this mode.
+- **On-demand delivery — High-res `2x .png` image (when the user requests images or when archiving into persistent Obsidian notes)**: Write the Mermaid source to a temporary `.mmd` file, run `node "scripts/render-batch.mjs"` ([Batch Rendering](references/rendering.md)), and link or embed the resulting `.png` (`[Diagram Title](file:///...png)` in chat, or `![Diagram Title](path)` inside Obsidian notes) without creating a duplicate display `.md` file.
+- **Language separation (`Context-as-Sample`)**: Keep this skill's rules in compact English; render user-facing node and edge labels inside diagrams in plain, accurate Chinese per [Global_Agent_Rules.md](../../Agent全局配置/Global_Agent_Rules.md) unless requested otherwise.
 
-### 2. 版面与规模三原则
-1. **控制单图节点数量**：
-   - 单张图核心节点控制在 **5～15 个**，架构图 `subgraph` 边界框最多嵌套 **1 层**（一张图只打开 1 个容器白盒展示内部组件）。
-   - 超出 15 个节点时，拆分为**“1 张宏观总览图 + 1 张局部放大图”**，放入同一个独立 `.md` 图解文档上下对照。
-   - 概念图与数学交换图不加 `subgraph` 外框，用语义浅底色与实/虚线粗细区分角色。
-2. **阅读方向顺应结构自然延展**：
-   - 分层架构、跨角色时序、状态生命周期与多道防御切片默认采用从上到下（`TB`）；短链路或层级树采用从左到右（`LR`）。
-3. **选用匹配的原生图型**：
-   - 按场景选用 Mermaid 原生图型（`flowchart`、`sequenceDiagram`、`stateDiagram-v2`、`classDiagram`、`erDiagram`）。
-   - 每条有向连线写明主动动词或守卫条件，子图 `style` 保持常规字重以免标题截断。
+### 2. Three Scale & Layout Invariants
+1. **Node & `subgraph` budget**:
+   - Keep each diagram within **5–15 core nodes** and at most **1 level of `subgraph` nesting** (open at most 1 container whitebox per diagram).
+   - Above 15 nodes, split into **"1 macro overview + 1 whitebox zoom-in"**.
+   - Use **0 `subgraph` boxes** in Novak concept maps and mathematical commutative diagrams; distinguish roles via semantic pastel fills and stroke weights.
+2. **Reading direction**:
+   - Default to top-to-bottom (`TB`) for layered architectures, cross-actor sequences, state lifecycles, and Swiss Cheese defense slices; use left-to-right (`LR`) for short pipelines or shallow trees.
+3. **Native Mermaid diagram types & active-verb edges**:
+   - Select the native Mermaid diagram type that matches the domain (`flowchart`, `sequenceDiagram`, `stateDiagram-v2`, `classDiagram`, `erDiagram`).
+   - Put an active verb or guard condition on every directed edge, and omit `font-weight:bold` from `style SubgraphID` so SVG header labels never clip.
 
 ---
 
-## 三、六类常见场景与代码模板速查
+## 3. Six Canonical Scenarios & Template Routing Table
 
-| 读者想搞懂的问题 | 对应图解范式与本地代码模板 | 节点要写清什么 | 连线要写清什么 |
+| Reader's Core Question | Canonical Diagram Paradigm & Template | What Each Node Must State | What Each Edge Must State |
 | :--- | :--- | :--- | :--- |
-| **1. 软件有哪些独立程序与外部系统、整体怎么配合？（宏观边界）** | **C4 Level 1/2（系统上下文 / 容器图）**<br>（模板：[C4 架构图手册](references/c4-diagrams.md)） | 角色 / 独立运行容器 / 数据库 + `[类型]` + 一句话对外职责 | 谁向谁发起什么业务动作 + 传输介质 |
-| **2. 某个程序内部有哪些深模块、各自管什么账与接口？（内部放大）** | **C4 Level 3（组件/深模块契约图）**<br>（模板：下方 Template 1 · [领域契约图](references/class-diagrams.md)） | 内部深模块名称 + 负责的数据源 + 对外接口契约（底层函数名留给正文对照表） | 模块间调用规则、输入输出凭据与异常退路 |
-| **3. 一次请求或操作怎么跨角色跑通？（动态交互）** | **带编号跨角色时序图**<br>（模板：下方 Template 2 · [时序图手册](references/sequence-diagrams.md)） | 3～5 个真实职责泳道（客户端 / 服务端 / 核心库 / 外部网关） | ①②③ 编号 + 实线同步请求 / 虚线异步回调；用 `alt/else` 框出正常路径与异常降级 |
-| **4. 业务对象的状态怎么切换、何时挂起或终结？（生命周期）** | **业务状态生命周期图**<br>（模板：下方 Template 3，原生 `stateDiagram-v2`） | 业务状态名 + 含义短注（用浅底色区分初始态、等待态、成功/异常终态） | 触发状态切换的业务事件或守卫条件 |
-| **5. 复杂故障为什么发生、修复方案在哪道门拦截？（排障复盘）** | **瑞士奶酪防御屏障图**<br>（模板：下方 Template 4） | 触发源、各道防线被穿透的 `❌ 漏洞`、新增的 `🛡️ 修复屏障` 与终态结果 | 粗红实线 `==>` 表示故障穿透路径；绿线表示新增屏障拦截与降级路径 |
-| **6. 新概念原理或数学方法如何一步步推演？（认知与数学）** | **命题概念图** 或 **数学交换图**<br>（模板：下方 Template 5 & 6） | 免 `subgraph` 外框：宏观概念/空间名 + 微观直觉/算式 | `[节点A] + 连线谓词短语 + [节点B]` 能连读成完整句子；数学交换图注明等价条件与算子 |
+| **1. What independent runtime containers and external systems exist, and how do they interact? (Macro Seams)** | **C4 Level 1/2 (System Context / Container View)**<br>(See [C4 Diagrams](references/c4-diagrams.md)) | Actor / runtime container / database + `[Type]` + one-line external responsibility | Caller action + transport protocol |
+| **2. Which deep modules live inside a container, and what seams/contracts do they expose? (Whitebox Zoom-in)** | **C4 Level 3 (Component / Deep Module Contract View)**<br>(Template 1 below · [Domain Contracts](references/class-diagrams.md)) | Internal deep module name + owned state + public interface contract | Inter-module call rule, payload contract, and bailout path |
+| **3. How does a request or workflow execute chronologically across actors? (Runtime View)** | **Stripe-Style Numbered Cross-Actor Sequence**<br>(Template 2 below · [Sequence Diagrams](references/sequence-diagrams.md)) | 3–5 participant swimlanes (Client / Backend / Core Module / External Gateway) | Numbered steps (`①②③`) + solid sync calls / dashed async callbacks; `alt/else` for happy path vs. bailout |
+| **4. How does a domain object transition across states, suspensions, and terminal outcomes? (Lifecycle)** | **Business State Lifecycle (`stateDiagram-v2`)**<br>(Template 3 below) | State name + one-line invariant (color-coded for initial, waiting, success, and terminal states) | Triggering domain event or guard condition |
+| **5. Why did a cascading failure occur, and which barrier intercepts it at each defense layer? (Postmortem)** | **SRE Swiss Cheese Fault & Defense Barrier**<br>(Template 4 below) | Hazard trigger, breached `❌ Hole` per slice, added `🛡️ Remediation Barrier` per slice, and terminal outcome | Thick red `==>` for fault penetration path; dashed/green edges for barrier interception and graceful degradation |
+| **6. How does a theoretical concept or mathematical transformation work step by step? (Cognition & Math)** | **Novak Concept Map** or **Mathematical Commutative Diagram**<br>(Templates 5 & 6 below) | Box-free (`0 subgraph`): macro concept or space name + micro intuition or formula | `[Node A] + linking verb phrase + [Node B]` forms a complete proposition; math arrows state operators and domain guards |
 
 ---
 
-## 四、六大经典场景标准代码模板 (Canonical Reference Examples)
+## 4. Six Canonical Reference Templates (Context-as-Sample Exemplars)
 
 ### Template 1: C4 Level 3 Component & Deep Module Contract (Simon Brown's Classic *Big Bank plc* Pattern)
 > **Standard**: Simon Brown C4 Component View & arc42 Section 5 Blackbox/Whitebox Rule (see [C4 Diagrams](references/c4-diagrams.md) for C1/C2 templates).
@@ -84,12 +85,12 @@ flowchart TB
     EmailSys["🌐 外部邮件服务 (E-mail System)<br/>[External Software System]"]:::ext
     Mainframe["🏦 银行核心账务大型机 (Mainframe Banking System)<br/>[External Software System]"]:::ext
 
-    subgraph ApiBoundary ["【C3 容器内部边界】网上银行后端服务 (API Application)"]
+    subgraph ApiBoundary ["【C3 容器内部白盒】网上银行后端服务 (API Application)"]
         direction TB
         SignInCtrl["<b>登录认证控制器 (Sign In Controller)</b><br/>[Component: Spring MVC RestController]<br/>职责：接收客户登录凭证并签发访问令牌"]:::comp
         AcctCtrl["<b>账户总览控制器 (Accounts Summary Controller)</b><br/>[Component: Spring MVC RestController]<br/>职责：向已认证客户返回账户余额与近期流水概览"]:::comp
-        SecComp["<b>安全与权限核验模块 (Security Component)</b><br/>[Component: Spring Bean]<br/>职责：统一校验密码哈希、会话令牌与权限边界"]:::comp
-        CoreAdapter["<b>核心账务系统防腐适配器 (Mainframe Banking System Facade)</b><br/>[Component: Spring Bean]<br/>职责：封装大型机遗留 XML 协议，对外提供稳定领域接口"]:::comp
+        SecComp["<b>安全与权限核验模块 (Security Component)</b><br/>[Component: Spring Bean]<br/>职责：统一校验密码哈希、会话令牌与权限接缝"]:::comp
+        CoreAdapter["<b>核心账务系统防腐适配器 (Mainframe Banking System Facade)</b><br/>[Component: Spring Bean]<br/>职责：封装大型机遗留 XML 协议，在接缝处对外提供稳定领域接口"]:::comp
     end
 
     UserDB[("🗄️ 用户与凭证数据库 (Database)<br/>[Container: Relational DB Schema]")]:::db
@@ -292,7 +293,7 @@ flowchart TB
     P -. "若直接在原空间硬套复合商求导法则，陷入" .-> Hard
     Hard -. "计算冗长且难以化简，阻碍抵达" .-> Q
 
-    P == "① 正变换 φ：两边取自然对数 ln |·|<br/>【适用边界：x ≠ 1, 2, 3 且根号内非负】" ==> T1
+    P == "① 正变换 φ：两边取自然对数 ln |·|<br/>【适用条件：x ≠ 1, 2, 3 且根号内非负】" ==> T1
     T1 == "② 变换域降维运算 D：对数性质将乘除幂降阶为线性加减" ==> T2
     T2 == "③ 逆变换 φ⁻¹：两边同乘原函数 f(x) 还原回原空间 (φ⁻¹ ∘ D ∘ φ = d/dx)" ==> Q
 ```
@@ -303,8 +304,8 @@ flowchart TB
 
 ---
 
-## 五、分图型语法手册、布局子零件与业界标杆出处
+## 5. Syntax References, Layout Child Part & Provenance
 
-- **Syntax & Type References**: [Flowcharts](references/flowcharts.md) · [Sequence Diagrams](references/sequence-diagrams.md) · [C4 Diagrams](references/c4-diagrams.md) · [Domain & Class Contracts](references/class-diagrams.md) · [ER & Data Ledgers](references/erd-diagrams.md) · [Cloud Topology](references/architecture-diagrams.md) · [Styling & De-Boxing](references/advanced-features.md) · [Batch Rendering (`render-batch.mjs`)](references/rendering.md)
-- **Layout Child Part**: [node-link-and-diagram-layout](../node-link-and-diagram-layout/SKILL.md)（复杂拓扑与连线路由优化）
-- **7 Authentic Industry Standard Diagrams & Provenance Links**: [业界权威图解标准与原版经典标杆库](../../参考资料/调研笔记/Diagram_Skills_Research/Diagram_Skill_Validation.md)
+- **Disclosed Type References (Load on Demand)**: [Flowcharts](references/flowcharts.md) · [Sequence Diagrams](references/sequence-diagrams.md) · [C4 Diagrams](references/c4-diagrams.md) · [Domain & Deep-Module Contracts](references/class-diagrams.md) · [ER & Data Ledgers](references/erd-diagrams.md) · [Cloud Topology](references/architecture-diagrams.md) · [Styling & De-Boxing](references/advanced-features.md) · [Batch Rendering (`render-batch.mjs`)](references/rendering.md)
+- **Layout Child Part**: [`node-link-and-diagram-layout`](../node-link-and-diagram-layout/SKILL.md) (layered, tree, and orthogonal routing for dense topologies)
+- **Industry Standard Exemplars & Provenance**: [Diagram_Skill_Validation.md](../../参考资料/调研笔记/Diagram_Skills_Research/Diagram_Skill_Validation.md)
