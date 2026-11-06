@@ -32,6 +32,10 @@
 
 RelayStudio 将**会话窗口视为随时可替换的临时执行器，将本地磁盘上的规格书（`SPEC.md`）、Git 提交历史与任务账本（`tsk_*.json`）作为唯一持久状态**，通过以下核心机制构成闭环：
 
+<p align="center">
+  <img src="docs/assets/diagram-c2-containers.png" width="96%" alt="RelayStudio C4 Level 2 容器边界与多平台软路由架构图" />
+</p>
+
 | 模块维度 | 常规 MCP 挂载模式 | RelayStudio 工作台机制（v1.3.0） |
 | :--- | :--- | :--- |
 | **本地网关与双隧道免确认执行** | 写文件与执行命令频繁触发确认弹窗；不同平台连接器要求 OAuth 2.1 认证或独立暴露隧道 | **单回环网关（`127.0.0.1:8766`）+ 双隧道与内置 OAuth 2.1**：支持 OpenAI Cloudflare 隧道与 Tailscale Funnel 固定域名双通道，内置零配置 OAuth 2.1（PKCE + 动态客户端注册）与 `readOnlyHint: true` 重写，集中收敛内置工具与 `engine-data/mcp` 扩展；仅在当前任务开启自动重发时动态注入免确认连跑尾注 |
@@ -46,6 +50,10 @@ RelayStudio 将**会话窗口视为随时可替换的临时执行器，将本地
 ## 规格驱动的长程开发工作流
 
 除底层连接与守护外，RelayStudio 在 [`builtin-skills/`](builtin-skills) 中随附了默认全局规则 [`AGENTS.md`](builtin-skills/AGENTS.md) 与 16 个工程及图解技能包，支持从需求澄清到集成回归的分阶段自动化推进（完整流程见 [`docs/long-horizon-workflow.md`](docs/long-horizon-workflow.md)）：
+
+<p align="center">
+  <img src="docs/assets/diagram-long-horizon-workflow.png" width="92%" alt="RelayStudio × AgentVault 长程开发深模块工作流图" />
+</p>
 
 1. **前置规格对齐（`grilling` → `to-spec` → `to-tickets`）**
    在编码前先通过结构化追问澄清边界条件，将模块接口契约、测试接缝与修订账本固化至仓库 `SPEC.md`，再拆解为带前置依赖边（`Blocked by`）的垂直切片工单，并映射为本地 `task_manage` 步骤账本。
