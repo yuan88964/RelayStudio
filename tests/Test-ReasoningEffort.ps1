@@ -180,23 +180,21 @@ Sync-ComposerModelAndEffortCombos -StateInfo $multiPlatState -AvailModels @() -C
 $multiContents = @($multiPlatState.ModelCombo.Items | ForEach-Object { [string]$_.Content })
 $groupItems = @($multiPlatState.ModelCombo.Items | Where-Object { [string]$_.Tag -like '__group_*' })
 Assert-Case ([string]$multiPlatState.ModelCombo.Items[0].Tag -eq '__group_chatgpt' -and [string]$multiPlatState.ModelCombo.Items[1].Tag -eq 'inherit' -and [string]$multiPlatState.ModelCombo.Items[1].ToolTip -eq 'chatgpt' -and [string]$multiPlatState.ModelCombo.Items[2].Tag -eq '__group_claude' -and [string]$multiPlatState.ModelCombo.Items[3].Tag -eq 'inherit' -and [string]$multiPlatState.ModelCombo.Items[3].ToolTip -eq 'claude') 'Multi-platform ModelCombo places each platform default item directly under its respective platform group header'
-Assert-Case ($groupItems.Count -eq 2 -and [string]$groupItems[0].Content -eq '▾ 🟢 ChatGPT · 主力隧道' -and [string]$groupItems[1].Content -eq '▾ ⚪ Claude · 默认') 'Multi-platform ModelCombo normalizes OpenAI -> ChatGPT and renders pure ▾ icon + breathing status headers (🟢/⚪)'
+Assert-Case ($groupItems.Count -eq 2 -and [string]$groupItems[0].Content -eq '▾ ChatGPT' -and [string]$groupItems[1].Content -eq '▾ Claude' -and $groupItems[0].Focusable -eq $false -and $groupItems[1].Focusable -eq $false) 'Multi-platform ModelCombo normalizes OpenAI -> ChatGPT and renders clean non-focusable ▾ <Platform> group headers without redundant status dots or profile suffixes'
 $selectableItems = @($multiPlatState.ModelCombo.Items | Where-Object { [string]$_.Tag -notlike '__group_*' })
-Assert-Case ($selectableItems.Count -eq 2 -and (@($selectableItems | Where-Object { [string]$_.Content -ne '🤖 默认 (跟随网页)' -or [string]$_.Tag -ne 'inherit' }).Count -eq 0)) 'Cold start multi-platform ModelCombo contains only 🤖 默认 (跟随网页) (Tag=inherit) under each enabled platform without fake models'
+Assert-Case ($selectableItems.Count -eq 2 -and [string]$selectableItems[0].Content -eq '🤖 ChatGPT · 默认 (跟随网页)' -and [string]$selectableItems[1].Content -eq '🤖 Claude · 默认 (跟随网页)' -and (@($selectableItems | Where-Object { [string]$_.Tag -ne 'inherit' }).Count -eq 0)) 'Cold start multi-platform ModelCombo contains platform-prefixed 🤖 <Platform> · 默认 (跟随网页) (Tag=inherit) under each enabled platform without fake models'
 
 # Pure arrow (▾ / ▸) in-place group folding without (已折叠) text
 Toggle-ComposerModelGroupFold $multiPlatState 'chatgpt'
-Assert-Case ([string]$multiPlatState.ModelCombo.Items[0].Content -eq '▸ 🟢 ChatGPT · 主力隧道' -and [string]$multiPlatState.ModelCombo.Items[0].Content -notmatch '折叠' -and $multiPlatState.ModelCombo.Items[1].Visibility -eq [Windows.Visibility]::Collapsed -and $multiPlatState.ModelCombo.Items[3].Visibility -eq [Windows.Visibility]::Visible) 'Toggle-ComposerModelGroupFold collapses ChatGPT group items in-place with pure ▸ icon and zero (已折叠) text'
+Assert-Case ([string]$multiPlatState.ModelCombo.Items[0].Content -eq '▸ ChatGPT' -and [string]$multiPlatState.ModelCombo.Items[0].Content -notmatch '折叠' -and $multiPlatState.ModelCombo.Items[1].Visibility -eq [Windows.Visibility]::Collapsed -and $multiPlatState.ModelCombo.Items[3].Visibility -eq [Windows.Visibility]::Visible) 'Toggle-ComposerModelGroupFold collapses ChatGPT group items in-place with pure ▸ icon and zero (已折叠) text'
 Toggle-ComposerModelGroupFold $multiPlatState 'chatgpt'
-Assert-Case ([string]$multiPlatState.ModelCombo.Items[0].Content -eq '▾ 🟢 ChatGPT · 主力隧道' -and $multiPlatState.ModelCombo.Items[1].Visibility -eq [Windows.Visibility]::Visible) 'Toggle-ComposerModelGroupFold expands ChatGPT group items back to Visible with ▾ icon'
+Assert-Case ([string]$multiPlatState.ModelCombo.Items[0].Content -eq '▾ ChatGPT' -and $multiPlatState.ModelCombo.Items[1].Visibility -eq [Windows.Visibility]::Visible) 'Toggle-ComposerModelGroupFold expands ChatGPT group items back to Visible with ▾ icon'
 
-$multiPlatState | Add-Member -NotePropertyName 'TunnelOnline' -NotePropertyValue $false -Force
-Sync-ComposerModelAndEffortCombos -StateInfo $multiPlatState -AvailModels @() -CurModel 'inherit' -WebModel '' -CurEffort 'inherit' -WebEffort '' -IsNarrow $false
-$offlineContents = @($multiPlatState.ModelCombo.Items | ForEach-Object { [string]$_.Content })
-Assert-Case (($offlineContents -join '|') -match '▾ ⚪ ChatGPT · 主力隧道') 'Multi-platform ModelCombo dynamically updates ChatGPT group dot to ⚪ when tunnel goes offline'
+Sync-ComposerModelAndEffortCombos -StateInfo $multiPlatState -AvailModels @() -CurModel 'inherit' -WebModel 'GPT-6 Thinking' -CurEffort 'inherit' -WebEffort '' -IsNarrow $false
+Assert-Case ([string]$multiPlatState.ModelCombo.Items[1].Content -eq '🤖 ChatGPT · 默认 (GPT-6 Thinking)') 'Multi-platform ModelCombo dynamically updates ChatGPT default item with web model name while keeping 🤖 ChatGPT · 默认 prefix'
 $script:profilesState = $null
 
-# Option A for Gemini/Claude model lists: strictly expose only 🤖 默认 (跟随网页) under Gemini/Claude groups
+# Option A for Gemini/Claude model lists: strictly expose only 🤖 <Platform> · 默认 (跟随网页) under Gemini/Claude groups
 $multi = Make-State 'multi'
 $multi | Add-Member ProfilesState ([pscustomobject]@{
     EnabledPlatforms = @('chatgpt', 'gemini', 'claude')
@@ -214,11 +212,11 @@ $multi | Add-Member AvailableModelsByProvider ([pscustomobject]@{
 })
 Sync-Test $multi $catalog 'inherit' 'inherit'
 $multiHdrs = @($multi.ModelCombo.Items | Where-Object { [string]$_.Tag -like '__group_*' } | ForEach-Object { [string]$_.Content })
-Assert-Case (($multiHdrs -contains '▾ 🟢 Gemini · 默认') -and ($multiHdrs -contains '▾ ⚪ Claude · 默认')) 'Gemini and Claude group header dots reflect PublicTunnelOnline + profile Enabled state'
+Assert-Case ((($multiHdrs -join '|') -eq '▾ ChatGPT|▾ Gemini|▾ Claude')) 'All three platform group headers render as clean ▾ ChatGPT, ▾ Gemini, ▾ Claude labels'
 $geminiItems = @($multi.ModelCombo.Items | Where-Object { [string]$_.ToolTip -eq 'gemini' })
 $claudeItems = @($multi.ModelCombo.Items | Where-Object { [string]$_.ToolTip -eq 'claude' })
-Assert-Case ($geminiItems.Count -eq 1 -and [string]$geminiItems[0].Tag -eq 'inherit' -and [string]$geminiItems[0].Content -eq '🤖 默认 (跟随网页)') 'Option A: Gemini group strictly exposes only 🤖 默认 (跟随网页) without fragile DOM-scraped models'
-Assert-Case ($claudeItems.Count -eq 1 -and [string]$claudeItems[0].Tag -eq 'inherit' -and [string]$claudeItems[0].Content -eq '🤖 默认 (跟随网页)') 'Option A: Claude group strictly exposes only 🤖 默认 (跟随网页) without fragile DOM-scraped models'
+Assert-Case ($geminiItems.Count -eq 1 -and [string]$geminiItems[0].Tag -eq 'inherit' -and [string]$geminiItems[0].Content -eq '🤖 Gemini · 默认 (跟随网页)') 'Option A: Gemini group strictly exposes only 🤖 Gemini · 默认 (跟随网页) without fragile DOM-scraped models'
+Assert-Case ($claudeItems.Count -eq 1 -and [string]$claudeItems[0].Tag -eq 'inherit' -and [string]$claudeItems[0].Content -eq '🤖 Claude · 默认 (跟随网页)') 'Option A: Claude group strictly exposes only 🤖 Claude · 默认 (跟随网页) without fragile DOM-scraped models'
 
 # 2nd Dropdown (EffortCombo) cross-platform linkage for Gemini & Claude
 $multi.Provider = 'gemini'

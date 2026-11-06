@@ -257,12 +257,15 @@ try {
     $retainedSess | Add-Member -NotePropertyName 'CarrierByProvider' -NotePropertyValue @{ chatgpt = 'Desktop:ChatGPT'; gemini = 'Edge:Default' } -Force
     $podMulti = Build-PlanBComposerPod -SessionObj $retainedSess -IsNarrow $false -IsZeroTask $false -PaneId 101
     $geminiDefaultItem = @($podMulti.Tag.ModelCombo.Items | Where-Object { [string]$_.ToolTip -eq 'gemini' -and [string]$_.Tag -eq 'inherit' }) | Select-Object -First 1
-    Assert ($null -ne $geminiDefaultItem) 'Multi-platform ComposerPod exposes Gemini default item under Gemini group header'
+    $geminiGroupHeader = @($podMulti.Tag.ModelCombo.Items | Where-Object { [string]$_.Tag -eq '__group_gemini' }) | Select-Object -First 1
+    Assert ($null -ne $geminiDefaultItem -and [string]$geminiDefaultItem.Content -eq '🤖 Gemini · 默认 (跟随网页)' -and $null -ne $geminiGroupHeader -and [string]$geminiGroupHeader.Content -eq '▾ Gemini') 'Multi-platform ComposerPod exposes clean ▾ Gemini group header and 🤖 Gemini · 默认 (跟随网页) default item'
     $podMulti.Tag.ModelCombo.SelectedItem = $geminiDefaultItem
     $wbAfterGemSwitch = Get-WebBridgeState $script:context
     $gemBind = $wbAfterGemSwitch.session_bindings.'tsk_retained_ui_06'
     $profComboTagsAfterGem = @($podMulti.Tag.ProfCombo.Items | ForEach-Object { [string]$_.Tag })
     Assert ($podMulti.Tag.Provider -eq 'gemini' -and $podMulti.Tag.EffortCombo.IsEnabled -eq $false -and [string]$podMulti.Tag.EffortCombo.Items[0].Content -eq '🧠 跟随网页设置' -and ($profComboTagsAfterGem -notcontains 'Desktop:ChatGPT') -and $gemBind.provider -eq 'gemini' -and $null -ne $gemBind.carrier_by_provider) 'Selecting Gemini model in ModelCombo atomically updates Provider, disables EffortCombo, excludes Desktop:ChatGPT from ProfCombo, and persists provider + carrier_by_provider'
+    $podMulti.Tag.ModelCombo.SelectedItem = $geminiGroupHeader
+    Assert ([string]$podMulti.Tag.ModelCombo.SelectedItem.Tag -notlike '__group_*' -and [object]::ReferenceEquals($podMulti.Tag.ModelCombo.SelectedItem, $geminiDefaultItem)) 'Group header item (__group_gemini) is non-selectable and immediately snaps back to the active selectable item'
 
     Write-Host (@{ result = 'PASS'; assertions = $script:assertions } | ConvertTo-Json -Compress)
 } finally {

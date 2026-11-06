@@ -5417,39 +5417,10 @@ function Sync-ComposerModelAndEffortCombos($StateInfo, $AvailModels, [string]$Cu
             'gemini'   { 'Gemini' }
             default    { $normCode }
         }
-        $actP = $null
-        if ($profStateRef -and $profStateRef.PSObject.Properties['Profiles'] -and $profStateRef.Profiles) {
-            $actP = $profStateRef.Profiles | Where-Object {
-                $pl = if ($_.PSObject.Properties['Platform'] -and $_.Platform) { Resolve-UiPlatformCode ([string]$_.Platform) } else { 'chatgpt' }
-                $pl -eq $normCode -and ($_.PSObject.Properties['IsActive'] -and [bool]$_.IsActive)
-            } | Select-Object -First 1
-            if (-not $actP) {
-                $actP = $profStateRef.Profiles | Where-Object {
-                    $pl = if ($_.PSObject.Properties['Platform'] -and $_.Platform) { Resolve-UiPlatformCode ([string]$_.Platform) } else { 'chatgpt' }
-                    $pl -eq $normCode
-                } | Select-Object -First 1
-            }
-        }
-        $pName = if ($actP -and $actP.PSObject.Properties['Name'] -and $actP.Name) { [string]$actP.Name } else { '默认' }
-        $pEn = if ($actP -and $actP.PSObject.Properties['Enabled']) { [bool]$actP.Enabled } else { $true }
-        $pHk = if ($actP -and $actP.PSObject.Properties['HasKey']) { [bool]$actP.HasKey } else { $false }
-        $pKind = if ($actP -and $actP.PSObject.Properties['Kind'] -and $actP.Kind) { [string]$actP.Kind } elseif ($normCode -eq 'chatgpt') { 'tunnel' } else { 'public_tunnel' }
-        $pTid = if ($actP -and $actP.PSObject.Properties['TunnelId']) { [string]$actP.TunnelId } else { '' }
-        $isReady = if ($normCode -eq 'chatgpt' -or $pKind -eq 'tunnel') {
-            $pEn -and $pHk -and [bool]$pTid -and $tunOnlineNow
-        } elseif ($null -ne $pubTunOnlineNow) {
-            $pEn -and [bool]$pubTunOnlineNow
-        } else {
-            $pEn -and ($pHk -or $pKind -eq 'public_tunnel')
-        }
-        $dotIcon = if ($isReady) { '🟢' } else { '⚪' }
         return [pscustomobject]@{
             Code = $normCode
             Title = $pTitle
-            Name = $pName
-            Ready = $isReady
-            Dot = $dotIcon
-            Sig = "${normCode}:${pName}:${isReady}"
+            Sig = $normCode
         }
     }
     $platsSig = (@($enabledPlats | ForEach-Object { (& $resolvePlatGroupSummary $_).Sig }) -join '|')
@@ -5463,8 +5434,13 @@ function Sync-ComposerModelAndEffortCombos($StateInfo, $AvailModels, [string]$Cu
     if ($StateInfo.LastCatalogSig -eq $catalogSig -and $modelCombo.Items.Count -gt 0 -and $effortCombo.Items.Count -gt 0 -and -not $modelCombo.IsDropDownOpen -and -not $effortCombo.IsDropDownOpen) {
         if ([string]$modelCombo.Items[0].Tag -eq 'inherit') {
             $modelCombo.Items[0].Content = $(if ($IsNarrow) { '🤖 默认' } else { "🤖 默认 ($webModelDisplay)" })
-        } elseif ($modelCombo.Items.Count -gt 1 -and [string]$modelCombo.Items[1].Tag -eq 'inherit' -and [string]$modelCombo.Items[1].ToolTip -eq 'chatgpt') {
-            $modelCombo.Items[1].Content = $(if ($IsNarrow) { '🤖 默认' } else { "🤖 默认 ($webModelDisplay)" })
+        } else {
+            foreach ($mIt in @($modelCombo.Items)) {
+                if ($mIt -and [string]$mIt.Tag -eq 'inherit' -and (Resolve-UiPlatformCode ([string]$mIt.ToolTip)) -eq 'chatgpt') {
+                    $mIt.Content = $(if ($IsNarrow) { '🤖 ChatGPT · 默认' } else { "🤖 ChatGPT · 默认 ($webModelDisplay)" })
+                    break
+                }
+            }
         }
         if ($activeProvider -in @('gemini', 'claude')) {
             $effortCombo.IsEnabled = $false
@@ -5596,10 +5572,13 @@ function Sync-ComposerModelAndEffortCombos($StateInfo, $AvailModels, [string]$Cu
         'standard'
     }
 
+    $modelListSig = "$connectedSig||$catalogsSig||$modelSlugsSig||webM=$WebModel||plats=$platsSig||fold=$collapsedSig||narrow=$IsNarrow"
     $StateInfo | Add-Member -NotePropertyName 'LastWebEffortDisplay' -NotePropertyValue $webEffortDisplay -Force
     if ($StateInfo.LastCatalogSig -ne $catalogSig -and -not $modelCombo.IsDropDownOpen -and -not $effortCombo.IsDropDownOpen) {
         $StateInfo.LastCatalogSig = $catalogSig
         $StateInfo.AvailableModels = $modelsArr
+        $needModelRebuild = (-not $StateInfo.PSObject.Properties['LastModelListSig']) -or ($StateInfo.LastModelListSig -ne $modelListSig) -or ($modelCombo.Items.Count -eq 0)
+        $StateInfo | Add-Member -NotePropertyName 'LastModelListSig' -NotePropertyValue $modelListSig -Force
 
         $buildPlatGroupHeader = {
             param([string]$PlatCode)
@@ -5608,7 +5587,7 @@ function Sync-ComposerModelAndEffortCombos($StateInfo, $AvailModels, [string]$Cu
             $isCollapsed = [bool]$StateInfo.CollapsedProviders[$normCode]
             $arrowIcon = if ($isCollapsed) { '▸' } else { '▾' }
             $hdrItem = New-Object Windows.Controls.ComboBoxItem
-            $hdrItem.Content = "$arrowIcon $($summary.Dot) $($summary.Title) · $($summary.Name)"
+            $hdrItem.Content = "$arrowIcon $($summary.Title)"
             $hdrItem.Tag = "__group_$normCode"
             $hdrItem.FontWeight = 'SemiBold'
             $hdrItem.IsEnabled = $true
@@ -5619,10 +5598,19 @@ function Sync-ComposerModelAndEffortCombos($StateInfo, $AvailModels, [string]$Cu
                 $pCode = ([string]$s.Tag) -replace '^__group_', ''
                 Toggle-ComposerModelGroupFold $StateInfo $pCode
             })
+            $hdrItem.Add_PreviewMouseLeftButtonUp({
+                param($s, $e)
+                $e.Handled = $true
+            })
+            $hdrItem.Add_MouseLeftButtonUp({
+                param($s, $e)
+                $e.Handled = $true
+            })
             return $hdrItem
         }
 
         $modelCombo.ToolTip = "选择本任务使用的平台与模型（默认继承原网页当前模型：$webModelDisplay）"
+        if ($needModelRebuild) {
         $modelCombo.Items.Clear()
         $allowWebDomModels = ($StateInfo.PSObject.Properties['AllowWebDomModelList'] -and [bool]$StateInfo.AllowWebDomModelList)
 
@@ -5652,15 +5640,16 @@ function Sync-ComposerModelAndEffortCombos($StateInfo, $AvailModels, [string]$Cu
         } else {
             for ($pi = 0; $pi -lt $enabledPlats.Count; $pi++) {
                 $provider = Resolve-UiPlatformCode $enabledPlats[$pi]
+                $summary = & $resolvePlatGroupSummary $provider
                 $isGroupCollapsed = [bool]$StateInfo.CollapsedProviders[$provider]
                 $childVis = if ($isGroupCollapsed) { 'Collapsed' } else { 'Visible' }
                 [void]$modelCombo.Items.Add((& $buildPlatGroupHeader $provider))
 
                 $pDefItem = New-Object Windows.Controls.ComboBoxItem
                 $pDefItem.Content = if ($provider -eq 'chatgpt') {
-                    if ($IsNarrow) { '🤖 默认' } else { "🤖 默认 ($webModelDisplay)" }
+                    if ($IsNarrow) { "🤖 $($summary.Title) · 默认" } else { "🤖 $($summary.Title) · 默认 ($webModelDisplay)" }
                 } else {
-                    if ($IsNarrow) { '🤖 默认' } else { '🤖 默认 (跟随网页)' }
+                    if ($IsNarrow) { "🤖 $($summary.Title) · 默认" } else { "🤖 $($summary.Title) · 默认 (跟随网页)" }
                 }
                 $pDefItem.Tag = 'inherit'
                 $pDefItem.ToolTip = $provider
@@ -5686,6 +5675,7 @@ function Sync-ComposerModelAndEffortCombos($StateInfo, $AvailModels, [string]$Cu
                     [void]$modelCombo.Items.Add($item)
                 }
             }
+        }
         }
 
         if ($activeProvider -in @('gemini', 'claude')) {
@@ -6282,7 +6272,32 @@ function Build-PlanBComposerPod($SessionObj = $null, [bool]$IsNarrow = $false, [
         $sel = $sender.SelectedItem
         if (-not $info -or -not $info.TaskKey -or -not $sel -or -not $sel.Tag) { return }
         $newModelVal = [string]$sel.Tag
-        if ($newModelVal -like '__group_*') { return }
+        if ($newModelVal -like '__group_*') {
+            $fallbackProv = if ($info.PSObject.Properties['Provider'] -and $info.Provider) { Resolve-UiPlatformCode ([string]$info.Provider) } else { 'chatgpt' }
+            $fallbackIdx = -1
+            for ($fi = 0; $fi -lt $sender.Items.Count; $fi++) {
+                $fit = $sender.Items[$fi]
+                if (-not $fit -or [string]$fit.Tag -like '__group_*') { continue }
+                if ((Resolve-UiPlatformCode ([string]$fit.ToolTip)) -eq $fallbackProv) {
+                    $fallbackIdx = $fi
+                    break
+                }
+            }
+            if ($fallbackIdx -lt 0) {
+                for ($fi = 0; $fi -lt $sender.Items.Count; $fi++) {
+                    $fit = $sender.Items[$fi]
+                    if ($fit -and [string]$fit.Tag -notlike '__group_*') {
+                        $fallbackIdx = $fi
+                        break
+                    }
+                }
+            }
+            if ($fallbackIdx -ge 0) {
+                $script:suppressComposerEvents = $true
+                try { $sender.SelectedIndex = $fallbackIdx } finally { $script:suppressComposerEvents = $false }
+            }
+            return
+        }
         $selectedProvider = Resolve-UiPlatformCode ([string]$sel.ToolTip)
         $info.Provider = $selectedProvider
         if ($info.AvailableModelsByProvider -and $info.AvailableModelsByProvider.PSObject.Properties[$selectedProvider]) {
