@@ -1,0 +1,5 @@
+interface:
+  display_name: "Develop"
+  short_description: "End-to-end software development and testing orchestrator"
+policy:
+  allow_implicit_invocation: false

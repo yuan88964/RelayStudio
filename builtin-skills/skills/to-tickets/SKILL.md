@@ -1,95 +1,97 @@
 ---
 name: to-tickets
-description: 将计划、规格文档或当前对话拆解为一组曳光弹垂直切片工单（tracer-bullet tickets），每张工单显式声明前置阻塞依赖边，并发布到已配置的议题追踪器（本地采用单工单单文件的文本依赖，外部追踪器采用原生阻塞关联）。
+description: Break a plan, spec, or the current conversation into a set of tracer-bullet tickets, each declaring its blocking edges, published to the configured tracker (edges as text in one file per ticket locally, or native blocking links on a real tracker).
 disable-model-invocation: true
+metadata:
+  upstream: mattpocock/skills
+  upstream-path: skills/engineering/to-tickets/SKILL.md
+  upstream-commit: 4ae2317ddb22b046e26455e4f9c9b3aaaf62212d
+  local-adaptation: "2026-11-06"
 ---
 
-# 拆解为实施工单
+# To Tickets
 
-将计划、规格文档（spec）或当前对话拆解为一组**实施工单（tickets）**：每一张工单都是一条贯穿全层的**曳光弹垂直切片（tracer-bullet vertical slice）**，并显式声明阻塞它的前置工单。
+Break a plan, spec, or conversation into a set of **tickets**: tracer-bullet vertical slices, each declaring the tickets that **block** it.
 
-议题追踪器（issue tracker）与分诊标签（triage label）配置通常已在上下文中提供；若尚未配置，请提示用户先运行 `/setup-matt-pocock-skills`。
+The issue tracker and triage label vocabulary should have been provided to you. If not, default to local ticket files under `.scratch/<feature-slug>/issues/<NN>-<slug>.md` (or tell the user to run `/setup-matt-pocock-skills` if an external tracker is required).
 
-## 流程
+## Process
 
-### 1. 收集上下文
+### 1. Gather context
 
-直接利用当前会话上下文中已有的讨论成果。若用户将参考目标（规格文件路径、议题编号或 URL）作为参数传入，则拉取并完整读取其正文与全部评论。
+Work from whatever is already in the conversation context. If the user passes a reference (a spec path, an issue number or URL) as an argument, fetch it and read its full body and comments.
 
-### 2. 探索代码库（按需）
+### 2. Explore the codebase (optional)
 
-若尚未探索代码仓库，先扫描了解代码库当前结构。工单标题与正文描述必须严格使用项目领域术语表（`GLOSSARY.md`）中的标准词汇，并遵守相关架构决策记录（ADR）。
+If you have not already explored the codebase, do so to understand the current state of the code. Ticket titles and descriptions should use the project's domain glossary vocabulary, and respect ADRs in the area you're touching.
 
-留意是否存在可通过**前置重构（prefactoring）**降低后续实施难度的机会——“先让变更变得容易，再实施这处容易的变更（Make the change easy, then make the easy change）。”
+Look for opportunities to prefactor the code to make the implementation easier. "Make the change easy, then make the easy change."
 
-### 3. 起草垂直切片工单
+### 3. Draft vertical slices
 
-将整块工作拆解为**曳光弹（tracer bullet）**式的垂直切片工单。
+Break the work into **tracer bullet** tickets.
 
 <vertical-slice-rules>
 
-- 每个切片都必须纵向打通涉及的各个层次（数据模型 schema、API、UI、测试），形成一条窄而完整的端到端通路；必须是纵向贯通的垂直切片，绝不能按单一技术层做水平切分
-- 每个完成的切片都必须能够独立演示（demo）或独立验证（verify）
-- 每个切片的体量必须能够轻松装进一个全新的单次上下文窗口内
-- 任何铺路性质的前置重构（prefactoring）都应作为前置工单优先完成
+- Each slice cuts a narrow but COMPLETE path through every layer (schema, API, UI, tests): vertical, NOT a horizontal slice of one layer
+- A completed slice is demoable or verifiable on its own
+- Each slice is sized to fit in a single fresh context window
+- Any prefactoring should be done first
 
 </vertical-slice-rules>
 
-为每张工单指明**阻塞依赖边（blocking edges）**：即在该工单动工前必须先完成的其他工单。没有任何前置阻塞项的工单可以立即动工。
+Give each ticket its **blocking edges**: the other tickets that must complete before it can start. A ticket with no blockers can start immediately. Also note if two tickets touch overlapping files or a shared contract so the orchestrator serializes them.
 
-**大范围机械重构（Wide refactors）是垂直切片规则的唯一例外。** **大范围重构**是指波及整个代码库的机械性变更（例如重命名数据库列或修改高频共享符号的类型签名）：一处修改就会瞬间破坏成百上千个调用点，使任何单一垂直切片都无法独立保持测试绿灯。此时切勿强行套用曳光弹切片，而应改按**先扩展、后收缩（expand–contract）**的顺序编排工单：
-1. **先扩展（Expand）**：在保留旧形式的同时并排引入新形式，确保现有功能与测试全部保持绿灯；
-2. **按变更波及面分批迁移（Migrate）**：按**变更波及面**（如按包、目录或子系统）分批迁移调用点，每批一张工单，且均以“扩展工单”为前置阻塞项；由于旧形式依然保留，每批迁移合入后 CI 均能独立保持绿灯；
-3. **最后收缩（Contract）**：待所有调用方迁移完毕、不再有任何旧调用残留后，由一张被所有“迁移批次工单”共同阻塞的收尾工单统一删去旧形式。
-若遇到极端情况，连单个迁移批次都无法独立保持绿灯，仍须维持这套分批顺序，但让这些工单共享同一条集成开发分支（integration branch），并令它们共同阻塞最后一张“集成与整体验证”工单——仅在最后收尾工单处承诺全量绿灯。
+**Wide refactors are the exception to vertical slicing.** A **wide refactor** is one mechanical change (rename a column, retype a shared symbol) whose **blast radius** fans across the whole codebase, so a single edit breaks thousands of call sites at once and no vertical slice can land green. Don't force it into a tracer bullet; sequence it as **expand–contract**. First expand: add the new form beside the old so nothing breaks. Then migrate the call sites over in batches sized by blast radius (per package, per directory), each batch its own ticket blocked by the expand, keeping CI green batch to batch because the old form still exists. Finally contract: delete the old form once no caller remains, in a ticket blocked by every migrate batch. When even the batches can't stay green alone, keep the sequence but let them share an integration branch that all block a final integrate-and-verify ticket; green is promised only there.
 
-### 4. 与用户快速核对拆分方案
+### 4. Quiz the user
 
-将拟定的工单拆分方案以编号列表形式呈现给用户。每张工单展示以下三项信息：
+Present the proposed breakdown as a numbered list. For each ticket, show:
 
-- **Title（标题）**：简短清晰的描述性名称
-- **Blocked by（前置阻塞项）**：动工前必须先完成的其他工单（如有）
-- **What it delivers（交付行为）**：本张工单所打通的端到端可观测行为
+- **Title**: short descriptive name
+- **Blocked by**: which other tickets (if any) must complete first
+- **What it delivers**: the end-to-end behaviour this ticket makes work
 
-向用户确认：
+Ask the user:
 
-- 拆分粒度是否恰当（是否过粗或过细）？
-- 阻塞依赖边是否准确，每张工单是否仅依赖真正卡住它的前置工单？
-- 是否有工单需要进一步合并或拆细？
+- Does the granularity feel right? (too coarse / too fine)
+- Are the blocking edges correct: does each ticket only depend on tickets that genuinely gate it?
+- Should any tickets be merged or split further?
 
-根据反馈迭代调整，直至用户批准拆分方案。
+Iterate until the user approves the breakdown.
 
-### 5. 将工单发布到已配置的议题追踪器
+### 5. Publish the tickets to the configured tracker
 
-将获批的工单发布出去。具体发布方式取决于 `/setup-matt-pocock-skills` 所配置的追踪器类型；工单实质内容完全一致，仅阻塞依赖边的物理表达形式有所不同：
+Publish the approved tickets. **How** depends on the tracker `/setup-matt-pocock-skills` configured; the tickets are the same either way, only the shape of the blocking edges changes:
 
-- **本地文件追踪器（Local files）** → 在 `.scratch/<feature-slug>/issues/<NN>-<slug>.md` 路径下为每张工单单独创建一个文件，按依赖拓扑顺序（前置阻塞项优先）从 `01` 开始顺序编号。在每个文件的 `**Blocked by:**` 字段中列出其依赖的前置工单编号与标题。请使用下方的 `<local-ticket-template>` 模板；每个文件严格只放一张工单，绝不要把多张工单合并写进同一个文件。
-- **外部议题追踪器（GitHub、Linear 等）** → 按依赖拓扑顺序（前置阻塞项优先）逐张发布议题，确保后续工单的阻塞边能够引用已生成的真实议题 ID。若平台支持原生阻塞依赖关系（native blocking relationship），直接使用原生关联；否则将阻塞议题写入工单正文的 `## Blocked by` 小节。若本次拆解源自某个已存在的父议题（parent issue），则将每张工单挂载为该父议题的子议题（具体操作见追踪器文档）。除非另有指示，统一为每张工单打上 `ready-for-agent` 分诊标签——这些工单天生已具备供 Agent 直接认领实施的完整契约。
+- **Local files** → write one file per ticket under `.scratch/<feature-slug>/issues/<NN>-<slug>.md`, numbered from `01` in dependency order (blockers first). Each file's "Blocked by" lists the numbers/titles it depends on. Use the per-ticket file template below: one ticket per file, never a single combined file.
+- **A real issue tracker (GitHub, Linear, …)** → publish one issue per ticket in dependency order (blockers first) so each ticket's blocking edges can reference real identifiers. Use the platform's native blocking relationship where it has one; otherwise set each ticket's "Blocked by" to the blocking issues. If the source was an existing issue, make each ticket its sub-issue (tracker doc's operation). Apply the `ready-for-agent` triage label unless instructed otherwise; the tickets are agent-grabbable by construction.
 
-执行阶段始终推进当前的**可推进前沿**：即所有前置阻塞项均已完成的工单集合。若依赖图是一条纯线性链，则自然按从上到下的顺序依次推进。
+Work the **frontier**: any ticket whose blockers are all done. For a purely linear chain that means top to bottom.
 
-切勿关闭或修改任何父议题（parent issue）。
+Do NOT close or modify any parent issue.
 
 <local-ticket-template>
 
 # <NN>: <Ticket title>
 
-**What to build:** 从用户视角描述本张工单打通的端到端可观测行为，而非逐层罗列内部实现步骤。
+**What to build:** the end-to-end behaviour this ticket makes work, from the user's perspective, not a layer-by-layer implementation list.
 
-**Blocked by:** 阻塞本工单的前置工单编号与标题，若无则填 `None (can start immediately)`。
+**Blocked by:** the numbers/titles of the tickets that gate this one, or "None (can start immediately)".
 
-**Status:** ready-for-agent
+**Status:** pending
+<!-- Valid execution statuses: pending | in_progress | completed | two_strike_stop | quarantined -->
 
 - [ ] Acceptance criterion 1
 - [ ] Acceptance criterion 2
 
 ## Accepted Amendments & Internal Adaptations
 
-- （在此追加经用户批准的需求修订，以及保持用户可观测行为与既有验收判据不变的非破坏性内部实现调整或变更波及面适配。）
+- (Append Category 1 internal non-breaking adaptations or Category 2 approved test-radius updates here; the `develop` orchestrator consolidates these into `SPEC.md` on wave merge.)
 
 ## Attempt Log & Quarantine Status
 
-- （若实施子代理返回同因两次停手 `Status: Two-Strike-Stop` 或隔离待解 `Status: Quarantined`，在此记录：［1］已尝试的方案，［2］证伪该方案的具体报错或反证事实，［3］下一位接手代理必须遵守的避坑约束或待用户拍板的决策项。）
+- (If a subagent hits `two_strike_stop` or `quarantined`, record: [1] approach tried, [2] falsifying error/evidence, [3] `Route` constraint for the relay agent or user decision needed.)
 
 </local-ticket-template>
 
@@ -97,11 +99,11 @@ disable-model-invocation: true
 
 ## Parent
 
-议题追踪器上父议题的引用链接（仅当拆解来源为既有议题时填写；否则省略本小节）。
+A reference to the parent issue on the tracker (if the source was an existing issue, otherwise omit this section).
 
 ## What to build
 
-从用户视角描述本张工单打通的端到端可观测行为，而非逐层罗列内部实现步骤。
+The end-to-end behaviour this ticket makes work, from the user's perspective, not layer-by-layer implementation.
 
 ## Acceptance criteria
 
@@ -110,16 +112,16 @@ disable-model-invocation: true
 
 ## Blocked by
 
-- 每个前置阻塞工单的引用链接，若无则填 `None (can start immediately)`。当阻塞依赖已通过追踪器原生关联配置时，省略本小节。
+- A reference to each blocking ticket, or "None (can start immediately)". Omit this section when blockers were set as native edges.
 
 ## Accepted Amendments & Internal Adaptations
 
-- （在此追加经用户批准的需求修订，以及保持外部可观测行为不变的内部实现调整或变更波及面适配。）
+- (Append Category 1 internal adaptations or Category 2 approved test-radius updates here.)
 
 ## Attempt Log & Quarantine Status
 
-- （遇到同因两次停手 `Status: Two-Strike-Stop` 时在此记录已被证伪的尝试；遇到隔离待解 `Status: Quarantined` 时在此记录阻塞原因与待决问题。）
+- (Record falsified approaches on `two_strike_stop` or blocking reasons if `quarantined`.)
 
 </issue-template>
 
-无论采用哪种模板，均应避免写入具体文件路径或大段业务代码片段——它们极易随代码演进而过时。例外情况：若原型验证（prototype）产出的一小段代码比纯文字更精确地刻画了某项核心决策（如状态机、状态归约器 reducer、数据结构 schema 或类型签名），可将其内联到工单中，并简短注明其源自原型验证。仅保留浓缩了决策信息的最小片段，切勿粘贴完整的可运行演示代码。
+In either form, avoid specific file paths or code snippets: they go stale fast. Exception: if a prototype produced a snippet that encodes a decision more precisely than prose can (state machine, reducer, schema, type shape), inline it and note briefly that it came from a prototype. Trim to the decision-rich parts, not a working demo, just the important bits.

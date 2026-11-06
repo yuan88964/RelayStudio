@@ -2,13 +2,13 @@
 
 在跨数小时的软件开发、重构或回归排障中，单靠长提示词很难维持稳定产出：写操作权限弹窗与回合结束时的礼貌性追问会打断自动化执行；单一会话窗口随轮次增加积累大量报错输出后容易遗忘前置约束；局部难题上的反复盲目试错会破坏已有代码；而慢速测试一旦超过网页端 60～120 秒流式等待窗口，又极易引发重复提交踩踏。
 
-RelayStudio 将 **开局自动注入的全局规则（`engine-data/AGENTS.md`）、13 个内置工程技能包（`engine-data/skills`）、`:8766` 原生单步账本引擎以及解耦式停顿守护网桥** 组合成一套可无人值守推进的工程闭环。
+RelayStudio 将 **开局自动注入的全局规则（`engine-data/AGENTS.md`）、16 个内置工程与绘图技能包（`engine-data/skills`）、`:8766` 原生单步账本引擎以及解耦式停顿守护网桥** 组合成一套可无人值守推进的工程闭环。
 
 ---
 
 ## 一、长程协同工作流全景
 
-下图展示了底层接力网关如何配合上层规格与工单图（`implement-spec`）驱动跨窗口、多子代理协同开发：
+下图展示了底层接力网关如何配合上层开发深模块（`develop`）驱动跨窗口、多子代理协同开发：
 
 <p align="center">
   <img src="assets/diagram-long-horizon-workflow.png" width="96%" alt="RelayStudio 长程开发全景工作流图" />
@@ -23,7 +23,7 @@ RelayStudio 将 **开局自动注入的全局规则（`engine-data/AGENTS.md`）
 | 基础设施支柱 | 运行方式 | 解决的实际问题 |
 | :--- | :--- | :--- |
 | **1. 全局规则开局注入**<br>（[`builtin-skills/AGENTS.md`](../builtin-skills/AGENTS.md)） | 启动时自动挂载至 `engine-data/AGENTS.md`（支持软路由至外部知识库）；当会话开局调用工作区上下文工具时，由 `:8766` 网关自动附带注入。 | 引导主会话默认保持高噪上下文隔离，仅持工单前沿与路径指针调度子代理，避免在主窗口直接吞吐海量源码与报错日志。 |
-| **2. 薄目录按需技能库**<br>（[`builtin-skills/skills/`](../builtin-skills/skills)） | 内置 `grilling`、`to-spec`、`to-tickets`、`implement-spec`、`implement`、`tdd`、`code-review`、`engineering-decisions` 等 13 项技能；开局仅暴露名称与简介，触发时再按需读取对应 `SKILL.md`。 | 平时零上下文冗余占用；无论是按阶段点名调用还是自然语言描述工程任务，模型都能读取统一的执行标准与止损边界。 |
+| **2. 薄目录按需技能库**<br>（[`builtin-skills/skills/`](../builtin-skills/skills)） | 内置 `develop`、`writing-for-agents`、`mermaid-diagrams`、`research` 四大顶层深模块及 `codebase-design`、`tdd`、`code-review`、`diagnosing-bugs`、`to-spec`、`to-tickets`、`grilling` 等 16 项技能；开局仅暴露名称与简介，触发时再按需读取对应 `SKILL.md`。 | 平时零上下文冗余占用；无论是按阶段点名调用还是自然语言描述工程任务，模型都能读取统一的三态职责契约与止损边界。 |
 | **3. 单步账本与场景隔离网关**<br>（[`McpReadOnlyShield.py`](../McpReadOnlyShield.py)） | `127.0.0.1:8766` 统一重写 `readOnlyHint: true` 消除确认弹窗，原生托管 `task_manage` 七个动作；仅在开启自动重发的任务下追加免确认连跑尾注。 | 日间普通探讨可随时停下交互；夜间开启自动重发后模型连续推进，且所有步骤进入 `completed` 或 `quarantined` 后一步自动结单，不产生死循环催工。 |
 
 ---
@@ -36,13 +36,13 @@ RelayStudio 将 **开局自动注入的全局规则（`engine-data/AGENTS.md`）
 2. **单一事实源规格书（`to-spec`）**：将达成共识的方案写入仓库 `SPEC.md`，明确深模块对外接口契约、高层测试接缝以及只追加的修订账本（`Accepted Amendments`），后续实施与审查均以生效规格（`Original Spec ⊕ Accepted Amendments`）为准。
 3. **垂直切片工单与本地建账（`to-tickets` + `task_manage`）**：将需求拆解为带前置阻塞关系（`Blocked by`）的垂直切片工单（大范围重构采用 `Expand → Migrate → Contract` 分步演进），并调用 `task_manage(action="create")` 建立本地 `tsk_xxx.json` 步骤账本，映射至工作台分栏进度条。
 
-### 阶段 2：主从隔离与并发实施（`implement-spec` × `implement` × `tdd` × `code-review`）
+### 阶段 2：主从隔离与并发实施（`develop` × `tdd` × `code-review`）
 
-1. **锁定共享接缝**：先在集成分支落地必要的共享接口定义，作为并发工单的共同基线。
+1. **按规模自动分流并锁定共享接缝**：由唯一开发入口 `develop` 自动按改动规模分流单垂直切片流与多工单 DAG 流；多工单并发前先在集成分支落地必要的共享接口定义，作为并发工单的共同基线。
 2. **沿可推进前沿（Frontier）派发子代理**：
-   - 在 ChatGPT 网页端或桌面端宿主下，主会话默认优先并发调用**宿主原生云端子代理**（不显式指定额外模型参数，直接复用当前订阅并共享同一条本地 MCP 隧道，零额外本地 API 费用），在各自独立的本地 Git Worktree 上实施工单；需要跨模型验证时也可按需调用本地 `acp_prompt`（Codex / Claude）。
+   - 在 ChatGPT、Gemini 或 Claude 网页端与桌面端宿主下，主会话默认优先并发调用**宿主原生云端子代理**（不显式指定额外模型参数，直接复用当前订阅并共享同一条本地 MCP 隧道，零额外本地 API 费用），在各自独立的本地 Git Worktree 上实施工单；需要跨模型验证时也可按需调用本地 `acp_prompt`（Codex / Claude）。
    - 派发时仅传递指向 `SPEC.md`、工单文件与基准提交的路径指针，不整段拷贝长文本。
-3. **子代理紧反馈闭环**：在独立工作树内按 `tdd` 编写测试并仅运行当前单测试文件；转绿后检索接口调用方运行变更波及面（Blast Radius）测试；提交快照后执行编码规范与生效规格双轴 `code-review`，最终仅向主会话返回四行摘要（`Status / Pointers / Verified / ResidualRisk`），由主会话合入并调用 `task_manage(action="checkpoint")` 更新进度。
+3. **子代理紧反馈闭环**：在独立工作树内按 `tdd` 编写测试并仅运行当前单测试文件；转绿后检索接口调用方运行变更波及面（Blast Radius）测试；提交快照后执行编码规范与生效规格双轴 `code-review`，最终仅向主会话返回六行交接单（`Status / Pointers / Verified / Error / Route / ResidualRisk`），由主会话合入并调用 `task_manage(action="checkpoint")` 更新进度。
 
 ### 阶段 3：两轮止损回滚与 `quarantined` 隔离绕行
 
@@ -50,11 +50,11 @@ RelayStudio 将 **开局自动注入的全局规则（`engine-data/AGENTS.md`）
 
 | 防线阶段 | 触发判据 | 执行动作 |
 | :--- | :--- | :--- |
-| **同因两次停手**<br>（`Two-Strike-Stop`） | 针对同一根因连续 2 次修改仍未减少失败测试（已排除网关流式超时假失败） | 立即执行 `git reset` 回退至最近一次绿灯提交，在工单 `Attempt Log` 记录已试方案、反证报错与后续禁行约束，交回主会话 |
-| **限次升级接力** | 该工单首次触发两轮停手 | 主会话携带 `Attempt Log` 指针派发一个干净上下文的升级子代理，避开已证伪路径重新求解 |
+| **同因两次停手**<br>（`two_strike_stop`） | 针对同一根因连续 2 次修改仍未减少失败测试（已排除网关流式超时假失败） | 立即执行 `git reset` 回退至最近一次绿灯提交，在工单 `Attempt Log` 记录已试方案、反证报错与后续禁行约束，以 `Status: two_strike_stop` 交回主会话 |
+| **限次净室接力** | 该工单首次触发两轮停手 | 主会话携带 `Attempt Log` 指针派发一个干净上下文的升级子代理，避开已证伪路径重新求解 |
 | **隔离待解并一步结单**<br>（`quarantined`） | 升级接力仍未解决，或触及用户验收规格冲突、缺失外部凭据 | 通过 `task_manage` 将该步骤标记为 `quarantined`，仅冻结其直接下游依赖，主会话继续推进其余未阻塞前沿；当所有步骤均处于 `completed` 或 `quarantined` 时，任务一步自动结单并停止催工，集中输出待人工拍板项 |
 
-### 阶段 4：分层测试节奏与慢测防踩踏（`engineering-decisions`）
+### 阶段 4：分层测试节奏与慢测防踩踏（`develop/testing.md`）
 
 1. **三层测试粒度**：修改期仅跑单测试文件；单工单收尾跑变更波及面测试；全部未阻塞工单合入集成分支后仅执行 1 次全量回归。
 2. **流式断连收据核验（`run.json`）**：当本地长测试耗时超过网页端 60～120 秒等待窗口导致连接断开时，禁止盲目重发相同命令；先检查本机在途进程与持久化终态收据（`run.json`），进程仍在运行则等待收据落盘，已有同版本收据则直接复用。

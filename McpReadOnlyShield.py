@@ -1948,7 +1948,7 @@ _PURGED_TASK_SCHEMA_FIELDS = (
     "review_revision",
 )
 _TASK_MANAGE_CLEAN_DESCRIPTION = (
-    "管理可恢复工程工单进度账本（仅在用户明确下达多步开发工单、调用 /implement-spec 或要求建卡追踪时创建；"
+    "管理可恢复工程工单进度账本（仅在用户明确下达多步开发工单、调用 /develop 或要求建卡追踪时创建；"
     "当全部步骤标记为 completed 或 quarantined 时，账本一步自动结单为 completed）。"
 )
 
@@ -2827,6 +2827,8 @@ def _normalize_step_status(raw_status: str) -> str:
         "complete": "completed",
         "running": "in_progress",
         "active": "in_progress",
+        "two_strike_stop": "in_progress",
+        "two-strike-stop": "in_progress",
         "quarantine": "quarantined",
         "isolated": "quarantined",
     }.get(clean, "pending")

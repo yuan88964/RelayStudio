@@ -1,94 +1,108 @@
 ---
 name: codebase-design
-description: 以深模块、接口契约、可替换接缝、接缝适配实现、接口杠杆效应与变更局部性设计或重构代码结构。适用于设计或改进模块接口契约、寻找模块深化机会、规划可替换接缝位置、提升可测试性与 AI 可导航性，或供其他技能调取架构词汇与原则时。
+description: Shared vocabulary and structural principles for designing deep modules across code, AI skills/prompt orchestrators, and knowledge bases. Use when the user wants to design or improve a module's interface, flatten complex if/else branching, find deepening opportunities, decide where a seam goes, make code or skills more testable, parallelizable, or AI-navigable, or when another skill needs the deep-module vocabulary.
+metadata:
+  upstream: mattpocock/skills
+  upstream-path: skills/engineering/codebase-design/SKILL.md
+  upstream-commit: 4ae2317ddb22b046e26455e4f9c9b3aaaf62212d
+  local-adaptation: "2026-11-06"
 ---
 
-# 代码库设计
+# Codebase Design
 
-设计**深模块**：将复杂的业务规则与协调行为封装在精简的**接口契约**之后，将**接口契约**置于清晰的**可替换接缝**上，并直接通过该**接口契约**进行验证。在设计或重构代码时统一使用本技能的词汇与原则，为调用方提供高**接口杠杆效应**，为维护者提供强**变更局部性**，并降低整体测试成本。
+Design **deep modules**: a lot of behaviour behind a small interface, placed at a clean seam, testable through that interface. Use this language and these principles wherever code, skills, or knowledge-base subsystems are being designed or restructured. The aim is leverage for callers, locality for maintainers, and fast `1–3s` verification for everyone.
 
-## 术语表
+## Glossary
 
-**统一使用本表规定的中文领航词及其精确定义**（以“模块”“接口契约”“可替换接缝”“接缝适配实现”取代泛化的日常混称）。术语的一致性本身就是设计要求。
+Use these terms exactly: don't substitute "component," "service," "API," or "boundary." Consistent language is the whole point.
 
-- **模块**：任何同时具有接口契约和内部实现的代码单元。尺度按需伸缩：可以是函数、类、包，也可以是跨越多个层次的一条功能切片。统一称为“模块”。
-- **接口契约**：调用方要正确使用模块所需知道的一切事实。除类型签名外，还完整涵盖不变量、调用顺序约束、错误模式、必需配置与性能特征。
-- **内部实现**：模块内部封装的代码逻辑。讨论可替换接缝槽位上的具体填充物时使用“接缝适配实现”（例如数据库仓库或内存替身），讨论模块内部逻辑时使用“内部实现”。
-- **接口深度**：接口契约带来的**接口杠杆效应**，即调用方或测试每学习一单位接口知识，就能获得多少行为能力。**深模块**把大量复杂行为封装在精简接口契约之后；**浅模块**的接口开销几乎与内部实现相当。接口深度由能力与接口认知成本之比衡量。
-- **可替换接缝**：保持调用位置代码恒定即可切换其背后行为的铰接点，即模块接口契约所在的**结构位置**。可替换接缝放在哪里，是独立于其背后具体实现的设计决策。
-- **接缝适配实现**：在某个可替换接缝处满足接口契约的具体实现体。它描述的是**槽位角色**（填入哪个可替换接缝），与内部实现规模解耦。
-- **接口杠杆效应**：调用方从接口深度获得的收益：掌握少量接口契约即可调动丰富能力，同一内部实现让多个调用点和测试同时受益。
-- **变更局部性**：维护者从深模块获得的收益：修改、缺陷定位、领域知识与验证集中在单一模块内部；一处修复，所有调用位置同步受益。
-- **接口测试面**：调用方与测试共同对准的对外接口契约表面。
-- **删除检验**：评估模块是否真正承担深化价值的检验方法——设想移除该模块，观察原本的复杂度是重新散落到多个调用方中，还是随之消失。
+**Module**: anything with an interface and an implementation. Deliberately scale-agnostic: a function, class, package, tier-spanning slice, an AI skill/prompt orchestrator, or a knowledge-base subsystem. _Avoid_: unit, component, service.
 
-## 深模块与浅模块对比
+**Interface**: everything a caller must know to use the module correctly: the type signature, but also invariants, ordering constraints, error modes, required configuration, and performance characteristics. _Avoid_: API, signature (too narrow, they refer only to the type-level surface).
 
-| 评估维度 | 深模块（推荐目标） | 浅模块（重构信号） |
-| :--- | :--- | :--- |
-| **接口契约** | **精简紧凑**：入口少、入参简单、前置条件与状态约定清晰 | **宽泛繁琐**：入口众多、入参复杂，调用方需知晓大量步骤细节 |
-| **内部实现** | **丰厚内聚**：在内部消化复杂业务规则、边界状态与协调逻辑 | **单薄透传**：主要做简单转发或轻量包装 |
-| **调用方收益** | **高接口杠杆效应**：学习极少契约即可获得完整能力，具备强变更局部性 | **低接口杠杆效应**：认知负担接近直接阅读和拼装底层代码 |
-| **删除检验** | 若移除该模块，原本被收敛的复杂度会重新散落到 $N$ 个调用方中 | 若移除该模块，系统整体复杂度随之减少，仅少了一层中间转发 |
+**Implementation**: what's inside a module, its body of code or internal workflow. Distinct from **Adapter**: a thing can be a small adapter with a large implementation (a Postgres repo) or a large adapter with a small implementation (an in-memory fake). Reach for "adapter" when the seam is the topic; "implementation" otherwise.
 
-设计接口契约时自检：
+**Depth**: leverage at the interface. The amount of behaviour a caller (or test) can exercise per unit of interface they have to learn. A module is **deep** when a large amount of behaviour sits behind a small interface, **shallow** when the interface is nearly as complex as the implementation.
 
-1. 能否进一步合并或减少对外入口数量？
-2. 能否进一步简化入参结构与配置负担？
-3. 能否将更多协调、校验与容错复杂度内化到模块内部？
+**Seam** _(Michael Feathers)_: a place where you can alter behaviour without editing in that place; the *location* at which a module's interface lives. Where to put the seam is its own design decision, distinct from what goes behind it. _Avoid_: boundary (overloaded with DDD's bounded context).
 
-## 核心原则
+**Adapter**: a concrete thing that satisfies an interface at a seam. Describes *role* (what slot it fills), not substance (what's inside).
 
-- **接口深度是接口契约的属性，由对外契约衡量。** 深模块内部可以由多个小巧、可替换的内部部件组成，只要它们保持在模块内部即可。一个模块可以同时拥有供自身测试使用的**内部可替换接缝**和位于对外接口契约处的**外部可替换接缝**。
-- **以删除检验识别真实深化价值。** 设想移除该模块：若系统整体复杂度随之降低，说明它只是透传层；若复杂度重新散落到 $N$ 个调用方中，说明它正在切实承担深化价值。
-- **接口契约即接口测试面。** 调用方与测试通过同一个可替换接缝交互。当测试对准对外接口契约即可充分验证可观测行为时，模块边界恰当；若测试频繁需要穿透接口契约去校验内部状态，应重新调整接口契约的切分位置。
-- **两个及以上的接缝适配实现构成真实的可替换接缝。** 仅当存在真实的跨接缝替换需求（例如生产外部依赖与测试内存替身、或多套运行时策略）时，才在模块边界设立可替换接缝；单一实现的边界直接内聚到模块内部。
+**Leverage**: what callers get from depth. More capability per unit of interface they learn. One implementation pays back across N call sites and M tests.
 
-## 为可测试性而设计
+**Locality**: what maintainers get from depth. Change, bugs, knowledge, and verification concentrate in one place rather than spreading across callers. Fix once, fixed everywhere.
 
-良好的接口契约让测试自然发生：
+## Why Deep Modules Matter
 
-1. **通过参数显式接收外部依赖**
+Complexity stems from **dependencies** (code that cannot be understood or modified in isolation) and **obscurity** (hidden assumptions and invariants), showing up as **change amplification**, **cognitive load**, and **unknown unknowns**. Deep modules fight complexity in three ways:
 
-   ```typescript
-   // 易于测试：通过参数显式注入接缝适配实现
-   function processOrder(order, paymentGateway) {}
+- **Fast verification at the seam (`1–3s` tight loop)**: Producing a globally correct solution in one shot is hard, but verifying a candidate at a clean seam is fast. When a module is deep, plugging a lightweight stand-in at its seam ([DEEPENING.md](DEEPENING.md)) lets a `1–3s` tight-loop test verify behaviour without booting the whole system.
+- **High leverage and locality**: Callers learn a minimal interface while all edge cases, multi-step coordination, and state invariants stay locked inside the implementation.
+- **Strategic refactoring trigger**: When a change forces you to copy branches across files, thread pass-through parameters across layers, or add boolean mode flags to an interface, stop patching tactically—compare alternatives first ([DESIGN-IT-TWICE.md](DESIGN-IT-TWICE.md)) and reshape the module.
 
-   // 难以测试：在内部硬编码具体外部实例
-   function processOrder(order) {
-     const gateway = new StripeGateway();
-   }
-   ```
+## Three Rules to Deepen Modules: Gather, Split, Polish
 
-2. **直接返回计算结果，将纯计算与状态变更分离**
+Locate the friction in the overview table below, then work the decision tree **top to bottom (`1 → 2 → 3`)**: first bound the module's external scope (`1. Gather` and `2. Split`), then refine its interface and internals from outside in (`3. Polish`).
 
-   ```typescript
-   // 易于测试：直接返回计算结果
-   function calculateDiscount(cart): Discount {}
+| Rule & Order | Smell (Trigger) | Core Move | Code Application | Skill & Knowledge-Base Application |
+| :--- | :--- | :--- | :--- | :--- |
+| **1. Gather: Scope Shared Secrets** | Two pieces always change together, or multiple sites maintain copies of the same rule or data | Merge steps that share a private design secret or align state at high frequency; consolidate shared data into a single source of truth | Merge protocol reading and parsing; cut pass-through wrappers; keep one authoritative config or state store | Package tightly coupled steps behind one orchestrator `SKILL.md`; keep one master file for global rules, `GLOSSARY.md`, and protocols |
+| **2. Split: Separate Frequency & Domain** | A module mixes high/low-frequency features or distinct domains, activating on every task and forcing callers to hunt through noise | **Vertically** split high-frequency general mechanisms from low-frequency special cases; **horizontally** split distinct domains for high cohesion and low coupling | Extract a somewhat general-purpose lower core; isolate domain modules so unrelated requests never pile onto one class | **Horizontally** split top-level domain skills; **vertically** keep every-run core contracts in `SKILL.md` and push rare branches to on-demand files |
+| **3. Polish: Refine from Outside In** | Sprawling `if/else` special cases, excessive config knobs, defensive exception storms, or convoluted docstrings | Enforce a 3-state contract, flatten `if/else` via seam adapters and canonical normalization, pull complexity down, and define errors out of existence | Guard out-of-scope inputs at line 1, normalize $M \to 1$ shapes at entry, auto-compute mechanism params, and absorb idempotent edge cases | Weave 3-state routing into orchestrators, step-1 defaults into pipeline skills, and flat routing tables into knowledge-base indexes; keep one canonical term per concept (see [`../writing-for-agents/SKILL.md`](../writing-for-agents/SKILL.md)) |
 
-   // 难以测试：隐式原地修改入参状态
-   function applyDiscount(cart): void {
-     cart.total -= discount;
-   }
-   ```
+### The Tree (Work Top to Bottom)
 
-3. **保持精简的接口测试面**：更少的对外入口意味着更精炼的测试矩阵；更简单的入参意味着更轻量的测试准备。
+#### 1. Gather: Scope by Shared Secrets & High-Frequency Alignment
+Decide whether two pieces belong together by **Parnas's information-hiding criterion** (whether they share a private design secret), never by execution order:
+- **Gather shared secrets (cure *Temporal Decomposition* & *Information Leakage*)**: If two steps rely on the same private data structure, wire/file format, or internal invariant (changing one always forces editing the other), merge them into one deep module even if they run at different times (e.g., reading and writing the same format).
+- **Merge conjoined methods and cut pass-through layers (cure *Conjoined Methods* & *Pass-Through*)**: If understanding method A requires reading method B, or if a wrapper layer merely forwards arguments without changing the abstraction, merge them so every layer provides a distinct abstraction.
+- **Consolidate duplicate copies and ambient context (*Single Source of Truth* & narrow `Context`)**: Keep shared rules, schemas, or reference data in one authoritative master. Bundle only cross-cutting runtime infrastructure (timeouts, read-only config snapshots, injected host adapters) into an explicit `Context`; keep domain inputs and outputs explicit on the interface signature so `1–3s` tight-loop tests need no heavy setup.
 
-## 核心概念关系
+#### 2. Split: Separate by Frequency Vertically & by Domain Horizontally
+Deepening never means stuffing unrelated features into a monolith. When a module grows bloated, split along two orthogonal axes:
+- **Vertical split — High-frequency general core vs. low-frequency special cases (cure *Overexposure* & *Special-General Mixture*)**: Extract high-frequency mechanisms into a *somewhat general-purpose* deep module (implementation reflects only current needs, while its interface stays general and keeps the critical path free of rare options). Push low-frequency scenario rules into upper callers or disclosed on-demand files.
+- **Horizontal split — Distinct business domains for high cohesion and low coupling**: Even when two steps run sequentially in a workflow (`A -> B`), keep them in separate deep modules behind a clean seam if they hide different domain secrets, serve different caller groups, or change at different rates. This prevents a single bloated module from activating on every scenario, forcing callers to search a massive context, and becoming a concurrency bottleneck.
+- **Method-level split rule**: Split a method only into an independent low-level subtask that needs minimal parent state, or into two mode-free sibling methods; if readers must flip back and forth between them, join them back together.
 
-- 一个**模块**恰好拥有一个对外**接口契约**（呈现给调用方与测试的统一**接口测试面**）。
-- **接口深度**是**模块**的属性，并以其**接口契约**衡量。
-- **可替换接缝**是**模块**的**接口契约**所在的结构位置。
-- **接缝适配实现**位于**可替换接缝**上，并满足**接口契约**。
-- **接口深度**为调用方产生**接口杠杆效应**，为维护者产生**变更局部性**。
+#### 3. Polish: Refine the Interface & Internals from Outside In
+Once scope is bounded by Steps 1 and 2, polish the module from its external seam inward:
+1. **Three-state interface contract (`Standard / Normalize / Error + Route`)**:
+   - *Standard path*: inputs meeting preconditions execute directly on the critical path;
+   - *Normalize at entry*: non-standard or partial inputs are normalized into canonical form at the entry before reaching core logic;
+   - *Guard & route at line 1 (`Error + Route`)*: out-of-scope inputs or blocked states are rejected at line 1 with a one-line `Error` and a structured next-step `Route` (`use`, `need`, `drop`, `amend-spec`, or `ask-user`).
+2. **Flatten `if/else` branching from outside in**:
+   - *Table-driven adapters at the seam*: replace multi-source or cross-host `else if` chains with a static lookup table of thin **Adapters**;
+   - *Canonical entry normalization ($M \to 1$)*: convert $M$ heterogeneous input formats into $1$ canonical internal data structure at the entry;
+   - *General internal model*: choose a data representation that treats edge cases as ordinary cases (e.g., representing an empty cursor as a selection of length `0`).
+3. **Pull complexity downwards & eliminate errors safely**:
+   - *Mechanism vs. policy*: auto-compute internal mechanism parameters (buffer sizes, backoff intervals, shard counts) from runtime state instead of exporting config knobs; keep domain policy configurable at the interface with zero-config defaults for the 90% case;
+   - *Idempotent 4-tier error ladder*: (a) *Define errors out of existence* (silent target-state convergence, such as deleting an already-absent item) and (b) *low-level retry masking* apply **strictly to idempotent operations** that preserve data invariants; (c) *aggregate* remaining exceptions at a single top-level handler; (d) *fail fast* with `Error + Route` on non-idempotent side effects, broken invariants, or out-of-scope inputs.
+4. **Write interface comments first as a complexity canary**:
+   - Write interface comments (preconditions, units, invariants, with zero implementation details) before coding method bodies. If a module or parameter is *Hard to Pick a Name* for or *Hard to Describe* concisely, the abstraction is shallow—redesign it before coding.
+   - Return results rather than mutating arguments, replace generic `Pair`/`Tuple` containers with named fields, and use one canonical term per concept (`GLOSSARY.md`).
 
-## 概念辨析与正向校准
+- **Completion criterion for a module design pass**: (1) Passes the **deletion test** (deleting it would scatter complexity across callers); (2) Exposes a 3-state interface with table-driven adapters and $M \to 1$ entry normalization (or role-appropriate structure for agent docs and knowledge-base indexes per [`../writing-for-agents/SKILL.md`](../writing-for-agents/SKILL.md)); (3) Binds a 1:1 `1–3s` tight-loop test command (or deterministic link/index verification script for knowledge-base subsystems) at its public seam.
 
-- **以“接口杠杆效应”衡量接口深度**：评估调用方每掌握一单位接口知识所能调动的有效行为价值，取代单纯统计实现代码行数与接口代码行数的比值。
-- **以“调用方需知晓的全部契约事实”定义接口契约**：涵盖类型签名、状态不变量、调用时序、错误语义与性能特征，超越单一语言层面的 `interface` 关键字或类公开方法列表。
-- **按语境精确使用标准领航词**：指代具有接口契约与内部实现的代码单元时统一使用**模块**（取代泛化的组件、服务、层或包装器）；指代对外承诺的调用规约时统一使用**接口契约**（取代泛化的 API 或签名）；指代行为可替换的结构位置时统一使用**可替换接缝**（取代泛化的边界，并与领域驱动设计的限界上下文保持清晰区分）。
+## Running Deep Modules in Parallel (Concurrent Tickets & Requests)
 
-## 进一步深化
+When multiple requests or tickets enter a system of deep modules simultaneously, run them through this four-stage pipeline:
 
-- **按依赖类别深化浅模块簇与可替换接缝测试策略**：见 [DEEPENING.md](DEEPENING.md)（进程内、本地可替换、远程自有与外部第三方四类依赖的深化方式及测试替换原则）。
-- **并行探索备选接口契约（设计两次）**：见 [DESIGN-IT-TWICE.md](DESIGN-IT-TWICE.md)（派发并行子代理按不同约束设计备选接口契约，并按接口深度、变更局部性与可替换接缝位置对比择优）。
+| Stage | Concurrency Smell Prevented | System Mechanism | Software Runtime Execution | Multi-Ticket & Subagent Execution |
+| :--- | :--- | :--- | :--- | :--- |
+| **1. Lock Seams & Route** | Mid-flight interface drift forcing global rework; concurrent writes colliding on the same module | Lock shared **Seams** before branching; dispatch disjoint modules in parallel and queue tasks touching the same module or shared contract serially | Gateways shard requests by domain module; stateless/disjoint actors run in parallel while same-shard writes queue in order | Lock shared interfaces on the integration baseline first; dispatch non-overlapping frontier tickets in isolated worktrees and serialize overlapping tickets |
+| **2. Isolated Tight Loop** | Loading full-system context and slow suites exhausts memory and buries workers in irrelevant noise | Load only the target module's minimal context and verify changes at its seam via a `1–3s` **Tight loop** | Worker threads/actors hold only local module state and validate steps locally without cross-service chatter | Each subagent receives a sparse pointer brief and runs only its 1:1 `1–3s` test file plus static typecheck inside its worktree |
+| **3. Read/Write Split & Queues** | Contention on shared ledgers causing deadlocks or corruption; unbounded queues or polling exhausting resources | Serve high-frequency reads from **immutable snapshots** (lock-free); route shared ledger writes through a **single writer**; offload slow work via **bounded queues (with backpressure)** or snapshot/patch batches | Read paths query MVCC/read-only views; write paths go through a bounded single-writer queue; slow I/O uses async events instead of polling | Subagents read shared specs/glossaries immutable and log local adaptations in their handoff for the orchestrator (single writer) to record; `>45s` commands use background sessions |
+| **4. Bulkhead & Staged Gate** | One wedged task halting the entire batch; green branches breaking when merged together | Roll back after two consecutive same-root-cause failures and isolate the blocked branch (**Bulkhead / Quarantine**) while unblocked work continues; sync baseline before merge and run one final gate | Failing modules trigger bounded retry and circuit-breaker bulkhead isolation, using idempotent commit or Saga compensation | After `two_strike_stop`, relay once in a clean window; if still blocked or needing human judgment, mark `quarantined`; merge latest integration tip before handoff and run the full suite once at the end |
+
+## Relationships & Rejected Framings
+
+- A **Module** has exactly one **Interface** (the surface it presents to callers and tests), living at a **Seam** and satisfied by an **Adapter**. **Depth** at that interface produces **Leverage** for callers and **Locality** for maintainers.
+- **Rejected framings**:
+  - *Depth as ratio of implementation-lines to interface-lines*: rewards padding the implementation; measure depth by **leverage** instead.
+  - *"Interface" as only the type signature*: interface includes every invariant, ordering constraint, and error mode a caller must know.
+  - *"Boundary"*: overloaded with DDD's bounded context; say **seam** or **interface**.
+
+## Going deeper
+
+- **Deepening a cluster given its dependencies**, see [DEEPENING.md](DEEPENING.md): the 4 dependency categories (`In-process`, `Local-substitutable`, `Remote but owned`, `True external`), seam discipline, and replace-don't-layer testing.
+- **Exploring alternative interfaces**, see [DESIGN-IT-TWICE.md](DESIGN-IT-TWICE.md): spawn parallel sub-agents to design the interface several radically different ways, then compare on depth, locality, and seam placement.

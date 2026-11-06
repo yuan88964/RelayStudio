@@ -1,35 +1,47 @@
-# ADR（架构决策记录）格式规范
+# ADR Format
 
-架构决策记录（ADR）存放于 `docs/adr/` 目录下，采用四位连续编号命名：`0001-slug.md`、`0002-slug.md` 等（扫描现有最大编号并递增 1；仅在首个 ADR 需要写入时按需创建 `docs/adr/` 目录）。
+ADRs live in `docs/adr/` and use sequential numbering: `0001-slug.md`, `0002-slug.md`, etc.
 
-## 核心极简模板
+Create the `docs/adr/` directory lazily: only when the first ADR is needed.
+
+## Template
 
 ```md
-# {决策的简短标题}
+# {Short title of the decision}
 
-{1～3 句话写清核心事实：面临什么背景约束、最终作出了什么决定、为什么这样选。}
+{1-3 sentences: what's the context, what did we decide, and why.}
 ```
 
-一份高质量的 ADR 可以仅由一个精炼段落构成——核心价值在于清晰留存**作出了哪项决定及其背后的权衡依据**。
+That's it. An ADR can be a single paragraph. The value is in recording *that* a decision was made and *why*, not in filling out sections.
 
-## 按需附加的可选章节
+## Optional sections
 
-仅在确实存在非显而易见的上下文需要交代时，才按需补充以下小节：
+Only include these when they add genuine value. Most ADRs won't need them.
 
-- **状态标记（Status）**：`proposed | accepted | deprecated | superseded by ADR-NNNN`（适用于后续可能重审或演进的决策）。
-- **备选方案对比（Considered Options）**：仅在被排除的备选方案具有迷惑性、值得留存排除理由时增补。
-- **下游影响（Consequences）**：仅在需要警示非显而易见的系统性副作用时增补。
+- **Status** frontmatter (`proposed | accepted | deprecated | superseded by ADR-NNNN`): useful when decisions are revisited
+- **Considered Options**: only when the rejected alternatives are worth remembering
+- **Consequences**: only when non-obvious downstream effects need to be called out
 
-## 适用场景与典型题材
+## Numbering
 
-符合 [SKILL.md](SKILL.md) 三项硬指标（逆转成本高、脱离背景易生困惑、源于真实方案权衡）的典型题材包括：
+Scan `docs/adr/` for the highest existing number and increment by one.
 
-| 决策类型 | 典型记录示例 |
-| :--- | :--- |
-| **1. 宏观架构形态** | 采用单体多包仓库（Monorepo）；写模型采用事件溯源、读模型投影至 PostgreSQL |
-| **2. 跨领域协同模式** | 订单域与计费域通过异步领域事件解耦通信，取代同步 HTTP 强耦合调用 |
-| **3. 高迁移成本的技术选型** | 核心数据库、消息总线、认证体系或部署平台等更换周期超过一个季度的底座选型 |
-| **4. 事实源归属与边界切割** | 客户主数据由客户域唯一执掌，其余领域仅通过客户 ID 引用 |
-| **5. 有意偏离常规默认做法** | 因特定性能或合规约束采用手写 SQL 替代 ORM（防止后续维护者误将其当成技术债“修掉”） |
-| **6. 代码无法自解释的外部硬约束** | 受合作方接口契约限制响应耗时必须控制在 200ms 内，或受合规要求限定部署区域 |
-| **7. 非显而易见的方案排除** | 评估过 GraphQL 但因特定缓存与网关约束选定 REST（避免半年后团队重复发起相同争论） |
+## When to offer an ADR
+
+All three of these must be true:
+
+1. **Hard to reverse**: the cost of changing your mind later is meaningful
+2. **Surprising without context**: a future reader will look at the code and wonder "why on earth did they do it this way?"
+3. **The result of a real trade-off**: there were genuine alternatives and you picked one for specific reasons
+
+If a decision is easy to reverse, skip it: you'll just reverse it. If it's not surprising, nobody will wonder why. If there was no real alternative, there's nothing to record beyond "we did the obvious thing."
+
+### What qualifies
+
+- **Architectural shape.** "We're using a monorepo." "The write model is event-sourced, the read model is projected into Postgres."
+- **Integration patterns between contexts.** "Ordering and Billing communicate via domain events, not synchronous HTTP."
+- **Technology choices that carry lock-in.** Database, message bus, auth provider, deployment target. Not every library: just the ones that would take a quarter to swap out.
+- **Boundary and scope decisions.** "Customer data is owned by the Customer context; other contexts reference it by ID only." The explicit no-s are as valuable as the yes-s.
+- **Deliberate deviations from the obvious path.** "We're using manual SQL instead of an ORM because X." Anything where a reasonable reader would assume the opposite. These stop the next engineer from "fixing" something that was deliberate.
+- **Constraints not visible in the code.** "We can't use AWS because of compliance requirements." "Response times must be under 200ms because of the partner API contract."
+- **Rejected alternatives when the rejection is non-obvious.** If you considered GraphQL and picked REST for subtle reasons, record it; otherwise someone will suggest GraphQL again in six months.

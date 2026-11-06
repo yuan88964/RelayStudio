@@ -206,6 +206,9 @@ class SpecV46SeamTests(unittest.TestCase):
         tm_tool = next(t for t in tools if t["name"] == "task_manage")
         self.assertNotIn("2 步以上", tm_tool.get("description", ""))
         self.assertNotIn("final_review", tm_tool.get("description", ""))
+        self.assertIn("/develop", tm_tool.get("description", ""))
+        self.assertEqual(shield._normalize_step_status("two_strike_stop"), "in_progress")
+        self.assertEqual(shield._normalize_step_status("two-strike-stop"), "in_progress")
         props = tm_tool["inputSchema"]["properties"]
         self.assertEqual(
             props["action"]["enum"],

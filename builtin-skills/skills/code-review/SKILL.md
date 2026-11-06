@@ -1,96 +1,108 @@
 ---
 name: code-review
-description: "从固定基准点（提交、分支、标签或合并基点）开始，按编码规范（Standards：代码是否符合本仓库记录的编码规范？）与功能规格（Spec：代码是否符合来源工单或规格要求？）两条轴线审查变更。两条审查轴线在并行子代理中独立运行并并排报告。适用于用户要求审查分支、PR、进行中的变更，或指定固定基准点审查时。"
+description: "Review the changes since a fixed point (commit, branch, tag, or merge-base) along two axes: Standards (does the code follow this repo's documented coding standards?) and Spec (does the code match what the originating issue/spec asked for?). Runs both reviews in parallel sub-agents and reports them side by side. Use when the user wants to review a branch, a PR, work-in-progress changes, or asks to \"review since X\"."
+metadata:
+  upstream: mattpocock/skills
+  upstream-path: skills/engineering/code-review/SKILL.md
+  upstream-commit: 4ae2317ddb22b046e26455e4f9c9b3aaaf62212d
+  local-adaptation: "2026-11-06"
 ---
 
-# 双轴代码审查
+Two-axis review of the diff between `HEAD` and a fixed point:
 
-对用户指定的固定基准点（`<fixed-point>`）与 `HEAD` 之间的代码差异执行双轴审查：
+- **Standards**: does the code conform to this repo's documented coding standards?
+- **Spec**: does the code faithfully implement the originating issue / spec?
 
-- **编码规范（Standards）**：代码是否符合本仓库书面记录的编码规范与坏味道基线？
-- **功能规格（Spec）**：代码是否忠实实现来源工单或规格文档的要求？
+Both axes run as **parallel sub-agents** when subagent dispatch is available (or as two separate serial passes in the main window when running on a host without subagents), then this skill aggregates their findings.
 
-两条审查轴线分别作为**并行只读子代理**独立运行，避免上下文互相污染，最后由本技能汇总双方的审查发现。
+## Process
 
-工单跟踪器应当已在上下文中提供；若尚未配置，请提示用户运行 `/setup-matt-pocock-skills`。
+### 1. Pin the fixed point
 
-## 流程
+Use the fixed point provided by the caller or user (a commit SHA, branch name, tag, `main`, `integration` base SHA, `HEAD~1`, etc.). If none was specified, resolve the merge-base against the default base branch (`integration` or `main` / `master`) rather than blocking on user input.
 
-### 1. 确定固定基准点
+Before capturing the diff, run `git status --porcelain` to verify whether uncommitted modifications or untracked new files exist in the worktree:
+- In the standard ticket workflow, all candidate changes (including newly created files) must be committed to `HEAD` on the ticket branch *before* `code-review` is called so `git diff <fixed-point>...HEAD` inspects the exact immutable snapshot.
+- If the worktree is dirty and the caller intended to review uncommitted work, either create a candidate checkpoint commit on the branch first or explicitly capture staged, unstaged, and untracked files alongside `<fixed-point>...HEAD` so no modified or newly created file is silently omitted.
 
-用户指定的任意 Git 引用均可作为固定基准点：提交 SHA、分支名、标签、`main`、`HEAD~5` 等。若用户未指定，先向用户询问。
+Capture the diff command once: `git diff <fixed-point>...HEAD` (three-dot, so the comparison is against the merge-base). Also note the list of commits via `git log <fixed-point>..HEAD --oneline`.
 
-**先运行 `git status --porcelain`**，核查工作树中是否存在未提交的修改或未跟踪的新文件：
+Before going further, confirm the fixed point resolves (`git rev-parse <fixed-point>`) and the candidate diff is non-empty. A bad ref or empty diff should fail here, not inside two parallel sub-agents.
 
-- 按标准工单工作流，调用 `code-review` **之前**，必须把所有候选修改（包括新文件）提交到工单分支的 `HEAD`，使 `git diff <fixed-point>...HEAD` 审查的是确切且不可变的快照。
-- 如果工作树不干净，而调用者希望审查未提交的工作，则应先在分支创建候选检查点提交；否则必须在 `<fixed-point>...HEAD` 之外，**明确纳入已暂存、未暂存和未跟踪文件**，避免任何修改或新文件被静默漏掉。
+### 2. Identify the spec source
 
-只捕获一次差异命令：`git diff <fixed-point>...HEAD`（三点比较，以合并基点 `merge-base` 为基准）。同时通过 `git log <fixed-point>..HEAD --oneline` 记录提交列表。
+Look for the originating spec and any recorded `## Accepted Amendments & Internal Adaptations` (`Effective Spec = Original Spec ⊕ Accepted Amendments`), in this order:
 
-继续前，确认固定基准点能够正常解析（`git rev-parse <fixed-point>`），且**候选差异**非空。错误的引用或空差异必须在此处直接拦截报错，不得等到启动两个并行子代理后才失败。
+1. A spec or ticket path passed by the caller (dispatch brief or user argument).
+2. Issue references in the commit messages (`#123`, `Closes #45`, GitLab `!67`, etc.), fetched via the workflow in the tracker doc (including appended amendments/comments).
+3. A spec or ticket file under `docs/`, `specs/`, or `.scratch/` matching the branch name or feature.
+4. If nothing is found, do **not** block waiting for the user: skip the **Spec** sub-agent and explicitly report `"Spec axis: skipped (no spec source found)"` in the final report.
 
-### 2. 定位功能规格来源
+### 3. Identify the standards sources
 
-按以下顺序查找来源规格，以及 `## Accepted Amendments & Internal Adaptations` 中已登记的修订（**生效规格** = `Original Spec ⊕ Accepted Amendments`，即原始规格 ⊕ **已接受修订**）：
+Search the repo for every file that documents how code should be written. When `CODING_STANDARDS.md` or `CONTRIBUTING.md` exists, it must be on the list.
 
-1. 提交说明中的工单引用（`#123`、`Closes #45`、GitLab `!67` 等），按工单跟踪器文档中的流程获取（包含已追加的修订与评论）。
-2. 用户作为参数传入的文件路径。
-3. `docs/`、`specs/` 或 `.scratch/` 下与分支名或功能名称匹配的规格或工单文件。
-4. 若以上均未找到，询问用户规格位于何处。若用户确认没有规格文档，则跳过 **Spec** 审查子代理，并在最终报告中注明“无可用规格（no spec available）”。
+On top of whatever the repo documents, the Standards axis always carries the **smell baseline** below: a fixed set of Fowler code smells (_Refactoring_, ch.3) that applies even when a repo documents nothing. Two rules bind it:
 
-### 3. 定位编码规范来源
+- **The repo overrides.** A documented repo standard always wins; where it endorses something the baseline would flag, suppress the smell.
+- **Always a judgement call.** Each smell is a labelled heuristic ("possible Feature Envy"), never a hard violation. Like any standard here, skip anything tooling already enforces.
 
-搜索仓库中所有规定代码编写规范的文档。若存在 `CODING_STANDARDS.md` 或 `CONTRIBUTING.md`，必须纳入审查清单。
+Each smell reads *what it is* → *how to fix*; match it against the diff:
 
-除仓库自身记录的编码规范外，**编码规范（Standards）**轴线始终附带以下**代码坏味道基线**（源自 Fowler《重构》第 3 章的固定坏味道清单），即使仓库没有任何书面规范也默认生效。适用两条基本原则：
+- **Mysterious Name**: a function, variable, or type whose name doesn't reveal what it does or holds. → rename it; if no honest name comes, the design's murky.
+- **Duplicated Code**: the same logic shape appears in more than one hunk or file in the change. → extract the shared shape, call it from both.
+- **Feature Envy**: a method that reaches into another object's data more than its own. → move the method onto the data it envies.
+- **Data Clumps**: the same few fields or params keep travelling together (a type wanting to be born). → bundle them into one type, pass that.
+- **Primitive Obsession**: a primitive or string standing in for a domain concept that deserves its own type. → give the concept its own small type.
+- **Repeated Switches**: the same `switch`/`if`-cascade on the same type recurs across the change. → replace with polymorphism, or one map both sites share.
+- **Shotgun Surgery**: one logical change forces scattered edits across many files in the diff. → gather what changes together into one module.
+- **Divergent Change**: one file or module is edited for several unrelated reasons. → split so each module changes for one reason.
+- **Speculative Generality**: abstraction, parameters, or hooks added for needs the spec doesn't have. → delete it; inline back until a real need shows.
+- **Message Chains**: long `a.b().c().d()` navigation the caller shouldn't depend on. → hide the walk behind one method on the first object.
+- **Middle Man**: a class or function that mostly just delegates onward. → cut it, call the real target direct.
+- **Refused Bequest**: a subclass or implementer that ignores or overrides most of what it inherits. → drop the inheritance, use composition.
 
-- **仓库规范优先**：仓库书面记录的编码规范永远具有最高优先级；若仓库规范明确允许某项会被基线标记的做法，直接压制该坏味道提示。
-- **属于工程判断而非死律**：每项坏味道都是带标签的启发式线索（如“疑似依恋情结 Feature Envy”），而非硬性违规；与本节其他规范一样，凡已由格式化或静态检查工具自动强制执行的项目一律跳过。
+### 4. Dispatch both review axes
 
-对照差异阅读每项坏味道（按“症状表现 → 修正方向”判定）：
+Select the dispatch mode based on the active host's capabilities (or caller override):
+- **Web-native or local role subagents available**: issue both read-only sub-agent calls together in parallel (in web hosts, use host defaults with no model or reasoning-effort arguments; in local CLI/IDE hosts, select the `reviewer` custom agent role).
+- **Main-window serial fallback (no subagent tool exposed, or running inside a subagent worktree)**: execute the Standards pass and Spec pass sequentially as two independent checks in the current window, and state `subagent dispatch: none — serial execution` in the report header.
 
-- **命名含糊（Mysterious Name）**：函数、变量或类型的名称未能准确表达其职责或所承载的数据 → 重命名；若始终起不出坦诚清晰的名字，往往说明模块设计本身职责浑浊。
-- **重复代码（Duplicated Code）**：相同的逻辑结构出现在多个差异块或文件中 → 提炼共享逻辑，由各处统一调用。
-- **依恋情结（Feature Envy）**：函数访问另一个对象的数据比访问自身数据还频繁 → 将该函数移至它所依恋的数据所属**模块**中。
-- **数据泥团（Data Clumps）**：相同的几个字段或参数总是一起成组出现 → 封装为独立类型统一传递。
-- **基本类型偏执（Primitive Obsession）**：用基础类型或裸字符串代替值得拥有独立类型的领域概念 → 为该领域概念定义专门的轻量类型。
-- **重复的条件分支（Repeated Switches）**：针对同一类型的相同 `switch`/`if` 分支链在多处重复出现 → 替换为多态分发或共享映射表。
-- **霰弹式修改（Shotgun Surgery）**：一次单一的逻辑变更迫使差异分散修改大量文件 → 将共同变化的代码内聚到同一个**模块**中（提升**变更局部性**）。
-- **发散式变化（Divergent Change）**：同一个文件或**模块**因为多个互不相关的原因被频繁修改 → 按职责拆分，使每个模块只因单一原因而变化。
-- **夸夸其谈通用性（Speculative Generality）**：为规格未要求的假想需求提前增加抽象层、参数或钩子 → 直接删除并内联回调用处，直到真实需求出现。
-- **过长的消息链（Message Chains）**：调用方依赖了不该知晓的长链式导航 `a.b().c().d()` → 将内部导航封装在首个对象的对外方法之后。
-- **中间人（Middle Man）**：类或函数除了把调用原样转发给其他对象外几乎不做实质工作（**浅模块**） → 移除中间层，直接调用真实目标或内聚为**深模块**。
-- **被拒绝的遗赠（Refused Bequest）**：子类或实现者忽略、覆写屏蔽了从父类继承的大部分内容 → 移除继承关系，改用组合。
+**Standards sub-agent prompt** should include:
 
-### 4. 并行启动两个只读审查子代理
+- The full diff command and commit list.
+- The list of standards-source files you found in step 3, **plus the smell baseline from step 3** pasted in full (the sub-agent has no other access to it).
+- The brief: "Perform this review directly in this single context; never call skills or spawn sub-agents. Report, per file/hunk where relevant, (a) every place the diff violates a documented standard: cite the standard (file + the rule); and (b) any baseline smell you spot: name it and quote the hunk. Distinguish hard violations from judgement calls: documented-standard breaches can be hard, but baseline smells are always judgement calls, and a documented repo standard overrides the baseline. Skip anything tooling enforces. Under 400 words."
 
-将两个**只读**子代理调用同时发出，在前台运行并聚合返回报告。通过宿主原生编排派发：网页宿主使用默认模型与推理强度（不要显式传参）；本地 CLI/IDE 宿主选择 `reviewer` 自定义代理角色。
+**Spec sub-agent prompt** should include:
 
-**标准审查子代理（Standards）提示词**必须包含：
+- The diff command and commit list.
+- The path or fetched contents of the spec, plus any entries recorded under `## Accepted Amendments & Internal Adaptations` (or mid-session user instructions).
+- The brief: "Perform this review directly in this single context; never call skills or spawn sub-agents. Evaluate the diff against the Effective Spec (Original Spec ⊕ Accepted Amendments). Internal implementation adaptations (Category 1) or approved blast-radius test syncs (Category 2) recorded under `Accepted Amendments & Internal Adaptations` that preserve user-observable behaviour and existing acceptance criteria are valid implementation details and must NOT be flagged as scope creep. Report: (a) requirements the effective spec asked for that are missing or partial; (b) user-visible behaviour in the diff that wasn't asked for (scope creep); (c) requirements that look implemented but where the implementation looks wrong; (d) any test in the diff that is tautological, weakens pre-existing acceptance assertions without an approved amendment, or mocks internal collaborators under test instead of verifying the spec's behaviour at the agreed seam. Every finding must quote the exact spec line it violates (for a–c) or the flawed test hunk (for d). Under 400 words."
 
-- 完整的差异命令和提交列表。
-- 第 3 步找到的编码规范文件路径，**以及第 3 步的全部代码坏味道基线**（原样包含；子代理无法从其他地方获得）。
-- 明确的执行要求：**在当前单一上下文直接审查，不调用技能、不派发子代理**。按文件和差异块分别报告：（a）违反书面编码规范的所有位置，并引用规范来源（文件及具体规则）；（b）基线中的代码坏味道，给出名称和具体差异。区分硬性违规与判断性建议：书面规范可构成硬性违规，但坏味道只能作为判断性线索；书面规范优先于坏味道基线。跳过工具已自动执行的检查。报告不超过 400 个英文单词对应的信息量。
+If the spec is missing, skip the Spec sub-agent and note this in the final report.
 
-**规格审查子代理（Spec）提示词**必须包含：
+### 5. Aggregate
 
-- 完整的差异命令和提交列表。
-- 规格的路径或完整内容，以及 `## Accepted Amendments & Internal Adaptations` 内所有记录（或会话中用户追加的要求）。
-- 明确的执行要求：**在当前单一上下文直接审查，不调用技能、不派发子代理**。以**生效规格**（`Original Spec ⊕ Accepted Amendments`，即原始规格 ⊕ **已接受修订**）作为判定基准。记录在**已接受修订**中、且保留用户可观察行为和既有验收判据的内部适配或**变更波及面**调用方更新，属于有效实现细节，**不得**判为范围蔓延。分别检查：（a）规格要求却缺失或不完整的部分；（b）未要求的面向用户的新增行为（范围蔓延）；（c）看似实现却可能有误的要求；（d）差异中的测试是否同义反复、是否未经批准削弱已有验收断言，或是否模拟了待测**模块**内部协作者、而非在事先约定的**可替换接缝**上验证规格行为。对于（a）至（c），每条发现必须引用违反的准确规格行；对于（d），引用有缺陷的测试差异。报告不超过 400 个英文单词对应的信息量。
+Present the two reports under `## Standards` and `## Spec` headings, verbatim or lightly cleaned. Do **not** merge or rerank findings, because the two axes are deliberately separate (see _Why two axes_).
 
-若缺少规格文档，则跳过 Spec 审查子代理，并在最终报告中说明。
+End with a one-line summary: total findings per axis, and the worst issue _within each axis_ (if any). Don't pick a single winner across axes: that's the reranking the separation exists to prevent.
 
-### 5. 汇总报告
+## Why two axes
 
-在 `## Standards` 和 `## Spec` 标题下分别展示两份审查报告，可原样呈现或做轻微排版清理。**切勿**合并或混排两条轴线的审查发现；这两条轴线刻意保持正交分离（见下文*为什么拆成两条独立轴线*）。
+A change can pass one axis and fail the other:
 
-最后用一行总结：每条轴线的发现总数，以及各轴线内最严重的问题（若有）。不要跨轴线评选单一“最严重问题”；保持双轴分离正是为了避免跨维度重排优先级。
+- Code that follows every standard but implements the wrong thing → **Standards pass, Spec fail.**
+- Code that does exactly what the issue asked but breaks the project's conventions → **Spec pass, Standards fail.**
 
-## 为什么拆成两条独立轴线
+Reporting them separately stops one axis from masking the other.
 
-一项变更完全可能在一条轴线上顺利通过，却在另一条轴线上彻底失败：
+## Container Seams (Unattended & Orchestrated Execution)
 
-- 代码严守所有编码规范，却实现了错误的功能 → **Standards 通过，Spec 失败。**
-- 代码完全满足工单功能要求，却破坏了项目工程约定 → **Spec 通过，Standards 失败。**
+`code-review` exposes three seams so an orchestrator or direct caller can run it unattended without interactive prompts:
 
-并排独立报告能防止任一轴线的结论掩盖另一轴线的问题。
+| Seam | Caller Override (When Orchestrated) | Unattended Default (When Unspecified) |
+| :--- | :--- | :--- |
+| **1. Fixed Point** | Base SHA of the ticket branch or `integration` branch. | Merge-base against `integration`, `main`, or `master` (`git merge-base HEAD <base>`). |
+| **2. Effective Spec Source** | `SPEC.md` (`Original Spec ⊕ Accepted Amendments`) and/or the ticket file. | Search commit refs and `.scratch/`/`docs/`/`specs/`; if none found, skip Spec axis and note it in the report without blocking. |
+| **3. Dispatch Adapter** | Parallel web-native subagents, parallel local `reviewer` subagents, or main-window serial two-pass review. | Parallel subagents if available; otherwise two sequential passes in the current window. |

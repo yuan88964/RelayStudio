@@ -1,57 +1,60 @@
-# GLOSSARY.md 格式规范
+# GLOSSARY.md Format
 
-## 标准模板结构
-
-```md
-# {领域上下文名称}
-
-{用一两句话说明该领域上下文的核心职责与存在目的。}
-
-## 核心领域词汇
-
-**订单（Order）**：
-客户提交的商品购买请求及履约追踪单据。
-_统一收敛（取代旧混称）_：采购单、交易单
-
-**结算单（Invoice）**：
-商品交付后向客户发出的应收款项凭证。
-_统一收敛（取代旧混称）_：账单、请款单
-
-**客户（Customer）**：
-发起订单并承担付款义务的个人或组织。
-_统一收敛（取代旧混称）_：买方、委托方、客户账户
-```
-
-## 编写规则
-
-- **明确唯一标准词**：当多个日常用词指向同一业务概念时，选定最精准的一个作为唯一标准词，并在 `_统一收敛（取代旧混称）_` 下注明被收拢的同义旧称。
-- **定义紧凑凝练**：每个词条控制在 1～2 句话内，直接定义“它在业务上是什么”，将底层代码实现细节留在源码中。
-- **聚焦项目专属领域概念**：仅收录当前业务领域特有的概念；通用编程机制（如超时重试、错误类型、工具函数模式）由代码自解释，无需列入领域术语表。
-- **按自然聚类分组**：当词条较多并形成天然业务子域时，使用二级或三级小标题分组归类；词条较少时保持平铺列表即可。
-
-## 单上下文与多上下文仓库路由
-
-- **单上下文仓库（默认）**：在仓库根目录下维护唯一一份 `GLOSSARY.md`。
-- **多上下文仓库**：在仓库根目录下维护一份 `GLOSSARY-MAP.md`，列出各子领域的术语表路径及跨领域交互关系：
+## Structure
 
 ```md
-# 领域术语表导航（Glossary Map）
+# {Context Name}
 
-## 领域上下文列表
+{One or two sentence description of what this context is and why it exists.}
 
-- [订单域（Ordering）](./src/ordering/GLOSSARY.md) — 接收并追踪客户订单生命周期
-- [计费域（Billing）](./src/billing/GLOSSARY.md) — 生成结算单并处理支付清算
-- [履约域（Fulfillment）](./src/fulfillment/GLOSSARY.md) — 管理仓库拣货与物流发货
+## Language
 
-## 跨领域交互关系
+**Order**:
+{A one or two sentence description of the term}
+_Avoid_: Purchase, transaction
 
-- **订单域 -> 履约域**：订单域发布“订单已创建”事件，履约域消费该事件启动拣货
-- **履约域 -> 计费域**：履约域发布“已发货”事件，计费域消费该事件生成结算单
-- **订单域 -> 计费域**：共享“客户标识（CustomerId）”与“金额（Money）”值对象契约
+**Invoice**:
+A request for payment sent to a customer after delivery.
+_Avoid_: Bill, payment request
+
+**Customer**:
+A person or organization that places orders.
+_Avoid_: Client, buyer, account
 ```
 
-按以下顺序自动判定仓库结构：
+## Rules
 
-1. 若根目录存在 `GLOSSARY-MAP.md`，先读取该文件定位目标子领域的 `GLOSSARY.md`（若当前话题归属不明确，先向用户确认）。
-2. 若仅存在根目录 `GLOSSARY.md`，按单上下文仓库直接读写。
-3. 若两者均不存在，在首个领域术语敲定时于根目录创建 `GLOSSARY.md`。
+- **Be opinionated.** When multiple words exist for the same concept, pick the best one and list the others under `_Avoid_`.
+- **Keep definitions tight.** One or two sentences max. Define what it IS, not what it does.
+- **Only include terms specific to this project's context.** General programming concepts (timeouts, error types, utility patterns) don't belong even if the project uses them extensively. Before adding a term, ask: is this a concept unique to this context, or a general programming concept? Only the former belongs.
+- **Group terms under subheadings** when natural clusters emerge. If all terms belong to a single cohesive area, a flat list is fine.
+
+## Single vs multi-context repos
+
+**Single context (most repos):** One `GLOSSARY.md` at the repo root.
+
+**Multiple contexts:** A `GLOSSARY-MAP.md` at the repo root lists the contexts, where they live, and how they relate to each other:
+
+```md
+# Glossary Map
+
+## Contexts
+
+- [Ordering](./src/ordering/GLOSSARY.md): receives and tracks customer orders
+- [Billing](./src/billing/GLOSSARY.md): generates invoices and processes payments
+- [Fulfillment](./src/fulfillment/GLOSSARY.md): manages warehouse picking and shipping
+
+## Relationships
+
+- **Ordering → Fulfillment**: Ordering emits `OrderPlaced` events; Fulfillment consumes them to start picking
+- **Fulfillment → Billing**: Fulfillment emits `ShipmentDispatched` events; Billing consumes them to generate invoices
+- **Ordering ↔ Billing**: Shared types for `CustomerId` and `Money`
+```
+
+The skill infers which structure applies:
+
+- If `GLOSSARY-MAP.md` exists, read it to find contexts
+- If only a root `GLOSSARY.md` exists, single context
+- If neither exists, create a root `GLOSSARY.md` lazily when the first term is resolved
+
+When multiple contexts exist, infer which one the current topic relates to. If unclear, ask.

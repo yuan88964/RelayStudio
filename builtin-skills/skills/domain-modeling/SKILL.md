@@ -1,49 +1,74 @@
 ---
 name: domain-modeling
-description: 以领域术语表（GLOSSARY.md）与架构决策记录（ADR）构建并打磨项目领域模型。适用于对齐代码库业务概念、消除多义模糊词汇、编写或更新 GLOSSARY.md 与 GLOSSARY-MAP.md，以及记录或审阅 docs/adr/ 下的架构决策时。
+description: Build and sharpen a project's domain model. Use when discussing codebase terminology, writing or editing a GLOSSARY.md, or recording or editing an ADR.
 ---
 
-# 领域建模
+# Domain Modeling
 
-在架构设计与需求讨论过程中，主动构建并持续打磨项目的领域模型：实时质询模糊或多义术语、通过边界场景检验概念定义，并在概念与取舍成形的当下就地写入领域术语表（`GLOSSARY.md`）与架构决策记录（`docs/adr/`）。
+Actively build and sharpen the project's domain model as you design. This is the *active* discipline: challenging terms, inventing edge-case scenarios, and writing the glossary and decisions down the moment they crystallise. (Merely *reading* `GLOSSARY.md` for vocabulary is not this skill: that's a one-line habit any skill can do. This skill is for when you're changing the model, not just consuming it.)
 
-## 目录布局与按需创建原则
+## File structure
 
-根据仓库的限界上下文（context）数量，采用对应的文件结构（详细模板与多上下文映射规范见 [GLOSSARY-FORMAT.md](./GLOSSARY-FORMAT.md) 与 [ADR-FORMAT.md](./ADR-FORMAT.md)）：
+Most repos have a single context:
 
-- **单上下文仓库（默认）**：仓库根目录下放置一份 `GLOSSARY.md`，`docs/adr/` 下按序存放 `0001-slug.md` 等决策记录。
-- **多上下文仓库**：当仓库根目录存在 `GLOSSARY-MAP.md` 时，由该文件索引各子目录（如 `src/ordering/`、`src/billing/`）专属的 `GLOSSARY.md` 与 `docs/adr/`，根目录 `docs/adr/` 仅存放跨全局的系统级决策。
-- **按需懒创建**：仅在首个领域术语敲定时创建 `GLOSSARY.md`，仅在首个架构决策需要落盘时创建 `docs/adr/`。
+```
+/
+├── GLOSSARY.md
+├── docs/
+│   └── adr/
+│       ├── 0001-event-sourced-orders.md
+│       └── 0002-postgres-for-write-model.md
+└── src/
+```
 
-## 会话中的主动建模动作
+If a `GLOSSARY-MAP.md` exists at the root, the repo has multiple contexts. The map points to where each one lives:
 
-### 1. 对照既有术语表核验一致性
+```
+/
+├── GLOSSARY-MAP.md
+├── docs/
+│   └── adr/                          ← system-wide decisions
+├── src/
+│   ├── ordering/
+│   │   ├── GLOSSARY.md
+│   │   └── docs/adr/                 ← context-specific decisions
+│   └── billing/
+│       ├── GLOSSARY.md
+│       └── docs/adr/
+```
 
-当用户或代码中使用的词语与 `GLOSSARY.md` 已确立的定义冲突时，立即用中文向用户点明分歧并请求对齐：
-> 示例：“项目 `GLOSSARY.md` 中将‘撤单’定义为整单作废，但这里似乎指单品部分退订——我们应当沿用原定义，还是为部分退订确立一个独立术语？”
+Create files lazily: only when you have something to write. If no `GLOSSARY.md` exists, create one when the first term is resolved. If no `docs/adr/` exists, create it when the first ADR is needed.
 
-### 2. 收敛模糊与过载用语
+## During the session
 
-当遇到一词多义或含义宽泛的日常用语时，立即提议精确的单一领域标准词：
-> 示例：“这里提到的‘账户’在实际业务中同时涉及‘下单客户（Customer）’和‘登录操作员（User）’两个不同角色，建议直接按具体角色拆分命名。”
+### Challenge against the glossary
 
-### 3. 用具体边界场景做压力测试
+When the user uses a term that conflicts with the existing language in `GLOSSARY.md`, call it out immediately. "Your glossary defines 'cancellation' as X, but you seem to mean Y. Which is it?"
 
-讨论领域对象关系时，主动构造极端或临界业务场景来验证概念边界，推动用户明确概念之间的归属关系与状态不变量。
+### Sharpen fuzzy language
 
-### 4. 与一手源码交叉印证
+When the user uses vague or overloaded terms, propose a precise canonical term. "You're saying 'account': do you mean the Customer or the User? Those are different things."
 
-当讨论某个业务机制的运作方式时，直接核对代码库一手实现。若发现口头描述与代码实现不一致，立即指出并请用户拍板以哪一方为准：
-> 示例：“当前代码实现仅支持整单取消，但刚才提到允许部分取消——此处属于待改造需求，还是既有业务限制？”
+### Discuss concrete scenarios
 
-### 5. 随概念成形就地更新 `GLOSSARY.md`
+When domain relationships are being discussed, stress-test them with specific scenarios. Invent scenarios that probe edge cases and force the user to be precise about the boundaries between concepts.
 
-每当一个领域术语在对话中达成共识，立即按 [GLOSSARY-FORMAT.md](./GLOSSARY-FORMAT.md) 的格式写入或更新 `GLOSSARY.md`，确保术语定义聚焦于纯粹的业务概念本质（将具体技术实现与数据结构留在代码或设计文档中）。
+### Cross-reference with code
 
-### 6. 按三项硬指标审慎提议 ADR
+When the user states how something works, check whether the code agrees. If you find a contradiction, surface it: "Your code cancels entire Orders, but you just said partial cancellation is possible. Which is right?"
 
-仅当某项决策同时满足以下三项条件时，才向用户提议按 [ADR-FORMAT.md](./ADR-FORMAT.md) 记录为 ADR（缺少任意一项则直接跳过）：
+### Update GLOSSARY.md inline
 
-1. **逆转成本高昂**：后续推翻或更改该决定的工程代价显著。
-2. **脱离背景易生困惑**：未来维护者仅看代码会不解“当初为什么要这样设计”。
-3. **源于真实的方案权衡**：存在多个合理备选方案，且基于明确的业务或工程约束作出了取舍。
+When a term is resolved, update `GLOSSARY.md` right there. Don't batch these up: capture them as they happen. Use the format in [GLOSSARY-FORMAT.md](./GLOSSARY-FORMAT.md).
+
+`GLOSSARY.md` should be totally devoid of implementation details. Do not treat `GLOSSARY.md` as a spec, a scratch pad, or a repository for implementation decisions. It is a glossary and nothing else.
+
+### Offer ADRs sparingly
+
+Only offer to create an ADR when all three are true:
+
+1. **Hard to reverse**: the cost of changing your mind later is meaningful
+2. **Surprising without context**: a future reader will wonder "why did they do it this way?"
+3. **The result of a real trade-off**: there were genuine alternatives and you picked one for specific reasons
+
+If any of the three is missing, skip the ADR. Use the format in [ADR-FORMAT.md](./ADR-FORMAT.md).

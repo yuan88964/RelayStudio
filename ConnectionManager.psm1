@@ -562,11 +562,22 @@ function Start-OfficialCoreIfNeeded {
             $agentsMdPath = Join-Path $engineHome 'AGENTS.md'
             if ($Settings.PSObject.Properties['agents_md_target'] -and $Settings.agents_md_target) {
                 $agentsTarget = [string]$Settings.agents_md_target
-                if ((Test-Path -LiteralPath $agentsTarget) -and -not (Test-Path -LiteralPath $agentsMdPath)) {
-                    try {
-                        New-Item -ItemType HardLink -Path $agentsMdPath -Target $agentsTarget -ErrorAction Stop | Out-Null
-                    } catch {
-                        try { Copy-Item -LiteralPath $agentsTarget -Destination $agentsMdPath -Force -ErrorAction SilentlyContinue } catch {}
+                if (Test-Path -LiteralPath $agentsTarget) {
+                    $needRefreshLink = -not (Test-Path -LiteralPath $agentsMdPath)
+                    if (-not $needRefreshLink) {
+                        try {
+                            $srcHash = (Get-FileHash -LiteralPath $agentsTarget -Algorithm SHA256 -ErrorAction Stop).Hash
+                            $dstHash = (Get-FileHash -LiteralPath $agentsMdPath -Algorithm SHA256 -ErrorAction Stop).Hash
+                            if ($srcHash -ne $dstHash) { $needRefreshLink = $true }
+                        } catch { $needRefreshLink = $true }
+                    }
+                    if ($needRefreshLink) {
+                        try {
+                            if (Test-Path -LiteralPath $agentsMdPath) { Remove-Item -LiteralPath $agentsMdPath -Force -ErrorAction SilentlyContinue }
+                            New-Item -ItemType HardLink -Path $agentsMdPath -Target $agentsTarget -ErrorAction Stop | Out-Null
+                        } catch {
+                            try { Copy-Item -LiteralPath $agentsTarget -Destination $agentsMdPath -Force -ErrorAction SilentlyContinue } catch {}
+                        }
                     }
                 }
             } else {

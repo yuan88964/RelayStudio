@@ -1,42 +1,57 @@
 ---
 name: tdd
-description: 测试驱动开发。适用于用户希望以先写测试的方式构建功能或修复缺陷、提到“红—绿—重构”，或需要集成测试时。
+description: Test-driven development. Use when the user wants to build features or fix bugs test-first, mentions "red-green-refactor", or wants integration tests.
+metadata:
+  upstream: mattpocock/skills
+  upstream-path: skills/engineering/tdd/SKILL.md
+  upstream-commit: 4ae2317ddb22b046e26455e4f9c9b3aaaf62212d
+  local-adaptation: "2026-11-06"
 ---
 
-# 测试驱动开发
+# Test-Driven Development
 
-TDD 是“红灯 → 绿灯”的验证循环。本技能提供该循环产出高留存价值测试的基准规范：什么是好测试、测试应置于何处、常见反模式，以及循环执行纪律。在每轮循环开始前与执行中随时对照本规范，而非事后补看。
+TDD is the red → green loop. This skill is the reference that makes that loop produce tests worth keeping: what a good test is, where tests go, the anti-patterns, and the rules of the loop. Every section applies on every cycle: consult them before and during the loop, not after.
 
-探索代码库时，若存在 `GLOSSARY.md` 则先行读取，使测试命名与**接口契约**词汇对齐项目领域语言，并遵守所触及区域的架构决策记录（ADR）。
+When exploring the codebase, read `GLOSSARY.md` (if it exists) so test names and interface vocabulary match the project's domain language, and respect ADRs in the area you're touching.
 
-## 什么是好测试
+## What a good test is
 
-测试应通过对外**接口契约**验证可观测行为，而非耦合**内部实现**细节。内部实现可以彻底重写，测试不应随之改动。好测试读起来像一份行为规格说明：例如 `"user can checkout with valid cart"` 直观表明系统具备何种能力；正因为它不关心内部结构，所以在重构时依然稳健。
+Tests verify behavior through public interfaces, not implementation details. Code can change entirely; tests shouldn't. A good test reads like a specification: "user can checkout with valid cart" tells you exactly what capability exists, and it survives refactors because it doesn't care about internal structure.
 
-具体示例见 [tests.md](tests.md)，替身与模拟（Mock）规则见 [mocking.md](mocking.md)。
+See [tests.md](tests.md) for examples and [mocking.md](mocking.md) for mocking guidelines.
 
-## 可替换接缝：测试置于何处
+## Seams: where tests go
 
-**可替换接缝**是测试所对准的对外边界：能够观测模块行为、却不伸手探入内部实现的**接口契约**。测试应始终置于**可替换接缝**上，绝不直接针对模块内部。
+A **seam** is the public boundary you test at: the interface where you observe behavior without reaching inside. Tests live at seams, never against internals.
 
-**只测试预先确认的可替换接缝。** 编写任何测试前，先列出拟测试的**可替换接缝**并与用户确认；未经确认的可替换接缝不写测试。你不可能穷尽测试所有细节，提前对齐可替换接缝才能将测试精力集中在关键路径与复杂逻辑上，而非机械覆盖每一个边缘分支。
+**Test only at pre-agreed seams.** When the caller (`develop`, `SPEC.md`, a ticket file, or a dispatch brief) specifies the seams under test, use those seams directly. If no seam was specified, select the highest existing public seam that exercises the target behavior and record that choice under `## Accepted Amendments & Internal Adaptations` (or state it as an explicit assumption) rather than stopping mid-run to ask the user.
 
-向用户提问：“对外接口契约是什么？我们应当对准哪处可替换接缝编写测试？”并为每个提议的可替换接缝附上一行说明：它能捕获什么问题，又会漏掉什么问题。
+When the shape of that interface is itself in question (how deep the module is, where the seam belongs, what the interface should expose, or how to flatten branching), call the Skill tool with `"codebase-design"` ([`../codebase-design/SKILL.md`](../codebase-design/SKILL.md)). It is the shared source of the module, interface, depth, seam, adapter, leverage, and locality terms, plus the `Gather / Split / Polish` deepening rules, and it is a reference to consult, not a session to run.
 
-当**接口契约**的形态本身有待推敲时（**模块**应做多深、**可替换接缝**应放在何处、**接口契约**应暴露什么），调用 Skill 工具加载 `codebase-design` 获取架构词汇。它是**模块**、**接口契约**、**接口深度**、**可替换接缝**、**接缝适配实现**、**接口杠杆效应**与**变更局部性**等术语的**单一事实源**，作为按需查阅的参考基准，而非独立运行的会话流程。
+## Anti-patterns
 
-## 反模式
+- **Implementation-coupled**: mocks internal collaborators, tests private methods, or verifies through a side channel (querying the database instead of using the interface). The tell: the test breaks when you refactor but behavior hasn't changed.
+- **Tautological**: the assertion recomputes the expected value the way the code does (`expect(add(a, b)).toBe(a + b)`, a snapshot derived by hand the same way, a constant asserted equal to itself), so it passes by construction and can never disagree with the code. Expected values must come from an independent source of truth: a known-good literal, a worked example, the spec.
+- **Horizontal slicing**: writing all tests first, then all implementation. Bulk tests verify _imagined_ behavior: you test the _shape_ of things rather than user-facing behavior, the tests go insensitive to real changes, and you commit to test structure before understanding the implementation. Work in **vertical slices** instead: one test → one implementation → repeat, each test a **tracer bullet** that responds to what the last cycle taught you.
 
-- **耦合内部实现**：模拟内部协作者、测试私有方法，或通过旁路通道验证（例如绕过**接口契约**直接查询数据库）。典型特征是重构后外部行为未变，测试却随之挂掉。
-- **同义反复断言**：断言用与被测代码相同的逻辑重新计算期望值（如 `expect(add(a, b)).toBe(a + b)`、按同一逻辑生成快照，或断言常量等于其自身），因而天然通过、永远无法检验出代码错误。期望值必须来自独立的**单一事实源**：已知正确的字面量、手算推演实例或规格文档。
-- **横向批量切片**：先一次性写完所有测试，再一次性写完所有实现。批量编写的测试验证的是*想象中*的行为——测的是代码的*结构形状*而非面向用户的真实行为；这会让测试对真实变化迟钝，并在理解**内部实现**前过早锁死测试结构。应改用**纵向切片**：一条测试 → 一项最小实现 → 循环往复，让每条测试都成为回应上一轮认知的**探路弹**。
+## Rules of the loop
 
-## 红绿回路的规则
+- **Red before green.** Write the failing test first, then only enough code to pass it. Don't anticipate future tests or add speculative features.
+- **One slice at a time.** One seam, one test, one minimal implementation per cycle.
+- **Tight feedback.** Run only the single 1:1 test file under edit (`Tight Loop`, `1–3s`) on each cycle, plus the project's static typechecker (if configured) once the slice is green; defer broader verification (`Blast Radius` or full suite) to the scope configured by the caller (see `## Container Seams` below).
+- **Isolated fixtures.** Bind each test to its own temp directory, config, and ephemeral port (`127.0.0.1:0`), and tear down spawned processes or headless browsers in `finally` / `teardown` so parallel worktrees never collide.
+- **Specification-bound assertions.** Fix production code to pass existing tests; update an existing assertion only when the requirement at that seam genuinely changed (Category 2 test-radius sync or user-approved amendment recorded under `Accepted Amendments & Internal Adaptations`).
+- **Two-strike stop (`two_strike_stop`).** After two consecutive attempts on the same root error without progress (failing test count not decreasing; excluding normal red-green steps and transport timeouts), revert the broken edit to the last green commit (`git reset --hard`), log the falsified approach in the ticket's `Attempt Log`, and exit via the Blocked/Failure Exit seam (`Status: two_strike_stop`, `Error`, and `Route`).
+- **Refactoring is not part of the loop.** It belongs to the review stage (see the `code-review` skill), not the red → green implementation cycle.
 
-- **红灯先于绿灯**。先写失败测试，再写恰好让它通过的生产代码；不要提前设计未来测试或加入推测性功能。
-- **一次一条纵向切片**。每轮只处理一个事先约定的**可替换接缝**、一条测试及对应最小实现。
-- **紧反馈回路**。每轮只运行当前正在修改的单个测试文件；完整测试套件只在全部工作收尾时运行一次。
-- **隔离测试夹具**。每项测试绑定独立临时目录、配置和短生命周期端口（`127.0.0.1:0`），并在 `finally` / `teardown` 中清理已启动进程或无头浏览器，避免并行工作树互相冲突。
-- **断言受规格约束**。修正生产代码以通过现有测试；唯有对应**可替换接缝**的需求确实变更且已登记在 `Accepted Amendments` 中时，才允许修改既有断言。
-- **同因两次停手**。对同一根因连续两次尝试无实质进展（失败测试数量未下降；正常红绿步骤及传输超时不计）时，立即将失败编辑回退到最近一次绿灯提交，在工单 `Attempt Log`（`AttemptLog`）中记录被证伪的方法，并通过**上下文触发指针**交接。每张工单最多接力一个子代理；若仍失败则将工单标记为**隔离待解**（`Status: Quarantined`），继续推进任务图中其他已就绪的工作。
-- **重构不属于红绿回路**。重构放在代码审查阶段（参见 `code-review`），不混入“红灯 → 绿灯”的实现循环。
+## Container Seams (Unattended & Orchestrated Execution)
+
+`tdd` leaves five execution seams open so any caller (an orchestrator, a worktree subagent, or direct invocation) can plug in without interactive human prompts:
+
+| Seam | Caller Override (When Orchestrated) | Unattended Default (When Unspecified) |
+| :--- | :--- | :--- |
+| **1. Decision / Seam Source** | `SPEC.md` (`Original Spec + Accepted Amendments`), ticket file, or dispatch brief. | Pick the highest existing public interface seam and log it under `## Accepted Amendments & Internal Adaptations`; never block on user confirmation. |
+| **2. Tight-Loop Command** | Passed in the dispatch brief (with worktree-local `PYTHONPATH` / module path and optional static typecheck command). | Discover from repo config (`package.json`, `pytest.ini`, `pyproject.toml`, `tsconfig.json`) targeting only the single test file under edit plus static typecheck if configured. |
+| **3. Verification Scope** | **Worktree Mode**: `1–3s` 1:1 `Tight Loop` test file + static typecheck only.<br>**Single-Slice Mode**: `Tight Loop` + static typecheck + `Blast Radius` + closeout full suite. | Run the 1:1 `Tight Loop` test file and static typecheck (if configured) only. |
+| **4. Blocked / Failure Exit** | Revert to last green commit (`git reset --hard`), log 3 lines in `Attempt Log`, and emit `Status: two_strike_stop` or `Status: quarantined` (`Route: ask-user <decision>`). | Same (`git reset --hard` + emit `Error` and `Route`; never pause mid-loop waiting for human input). |
+| **5. Output / Ledger Destination** | Caller-specified handoff schema (e.g. 6-line handoff) + ticket file (`Accepted Amendments` / `Attempt Log`). | Concise summary of slices completed, test files verified, and any `Error` / `Route`. |

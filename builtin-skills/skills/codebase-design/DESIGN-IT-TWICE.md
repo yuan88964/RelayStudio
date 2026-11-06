@@ -1,44 +1,47 @@
-# 设计两次（并行探索备选接口契约）
+# Design It Twice
 
-当需要为某个深化候选项探索备选**接口契约**时，采用本并行子代理工作流。本方法源自 John Ousterhout 的“设计两次（Design It Twice）”原则：通过对比截然不同的契约形态，避免陷入首个直觉方案的局部最优。全程统一使用 [SKILL.md](SKILL.md) 定义的架构词汇与项目 `GLOSSARY.md` 定义的领域词汇。
+When the user wants to explore alternative interfaces for a chosen deepening candidate, use this parallel sub-agent pattern. Based on "Design It Twice" (Ousterhout): your first idea is unlikely to be the best.
 
-## 流程
+Uses the vocabulary in [SKILL.md](SKILL.md): **module**, **interface**, **seam**, **adapter**, **leverage**, **locality**.
 
-### 1. 框定问题空间
+## Process
 
-在启动并行子代理之前，先面向用户简要说明当前深化候选项的问题空间（采用平实中文业务叙事，将底层源码路径收纳为括号直链）：
+### 1. Frame the problem space
 
-- **核心职责与契约约束**：深化后的**深模块**对外承担什么业务职责、必须守住哪些状态不变量与边界条件。
-- **依赖分类与接缝边界**：涉及哪些外部依赖，分别属于 [DEEPENING.md](DEEPENING.md) 中的哪一类，需要在何处设立**可替换接缝**。
+Before spawning sub-agents, write a brief user-facing summary of the problem space for the chosen candidate:
 
-向用户呈现问题空间说明后，立即进入步骤 2 并行派发子代理。
+- The constraints and invariants any new interface would need to satisfy
+- The dependencies it would rely on, and which category they fall into (see [DEEPENING.md](DEEPENING.md))
+- A rough illustrative sketch to ground the constraints—not a proposal, just a way to make the constraints concrete
 
-**完成判据**：已向用户清晰呈现深化模块的核心业务职责、契约约束与依赖分类说明。
+Show this to the user, then immediately proceed to Step 2. The user reads and thinks while the sub-agents work in parallel.
 
-### 2. 并行派发子代理推演备选方案
+### 2. Spawn sub-agents
 
-并行启动 3 个及以上独立子代理。每个子代理在各自独立上下文中接收完整的技术简报（含涉及的源码文件路径、现有耦合痛点、[DEEPENING.md](DEEPENING.md) 依赖类别、**可替换接缝**背后的实现细节，以及 [SKILL.md](SKILL.md) 与 `GLOSSARY.md` 词汇规范），并按以下不同设计方向各产出一套截然不同的**接口契约**：
+Spawn 3–4 sub-agents in parallel. Each must produce a **radically different** interface for the deepened module.
 
-- **子代理 1（极简契约导向）**：将对外**接口契约**压缩至极致（最多 1～3 个业务入口），最大化单入口的**接口杠杆效应**，将全部协调与校验收归**内部实现**。
-- **子代理 2（通用扩展导向）**：支持多场景组合与策略扩展，保证不同调用上下文下的灵活性。
-- **子代理 3（高频场景零摩擦导向）**：针对最常见的调用方场景做极致简化，使默认主路径零配置即可调用。
-- **子代理 4（跨接缝端口适配导向，按需启用）**：围绕跨网络或外部依赖的**可替换接缝**设计端口与多套**接缝适配实现**（生产实现 + 内存测试替身）。
+Prompt each sub-agent with a separate technical brief (file paths, coupling details, dependency category from [DEEPENING.md](DEEPENING.md), what sits behind the seam). Give each agent a different design constraint:
 
-每个子代理在内部完成推演后，向主窗口回传包含以下 5 项的高密度结构化摘要：
+- **Agent 1 (Minimal surface)**: "Minimize the interface: aim for 1–3 entry points max. Maximise leverage per entry point."
+- **Agent 2 (Composable / extensible)**: "Maximise flexibility: support many use cases and composition across caller contexts."
+- **Agent 3 (Zero-friction default path)**: "Optimise for the most common caller: make the default case trivial with zero configuration."
+- **Agent 4 (Ports & adapters, if applicable)**: "Design around ports & adapters for cross-seam dependencies (production adapter + in-memory test adapter)."
 
-1. **对外接口契约**：入口签名、入参出参、状态不变量、调用顺序约束与错误退路。
-2. **调用方式示例**：调用方如何通过该契约发起业务动作。
-3. **内部实现封装面**：在**可替换接缝**背后吸收并隐藏了哪些复杂逻辑与历史胶水代码。
-4. **依赖与测试策略**：对应的 [DEEPENING.md](DEEPENING.md) 依赖处理方式与**接缝适配实现**配置。
-5. **契约取舍分析**：何处**接口杠杆效应**最高、何处仍存在认知负担。
+Include both [SKILL.md](SKILL.md) vocabulary and `GLOSSARY.md` vocabulary in the brief so each sub-agent names things consistently with the architecture language and the project's domain language.
 
-**完成判据**：全部并行子代理均已返回完整涵盖上述 5 项的独立备选**接口契约**方案。
+Each sub-agent outputs:
 
-### 3. 汇总对比与给出首选建议
+1. Interface (types, methods, params, plus invariants, ordering, error modes)
+2. Usage example showing how callers use it
+3. What complexity the implementation hides behind the seam
+4. Dependency strategy and adapters (see [DEEPENING.md](DEEPENING.md))
+5. Trade-offs: where leverage is high, where it's thin
 
-主窗口收到各子代理方案后，滤除底层代码实现噪声，切回平实中文向用户汇报：
+### 3. Compare and recommend
 
-1. **结论与首选推荐先行**：首段直接给出你推荐的**首选设计方案**（或吸收各方案优点的组合方案），并用两三句话点明它为何在**接口深度**与**变更局部性**上胜出。
-2. **备选方案多维对比表**：用一张 Markdown 对比表格并列展示各备选方案，包含列：**方案名称与设计取向**、**对外接口契约与调用规则**、**内部隐藏的复杂性**、**可替换接缝与测试方式**、**接口杠杆效应与变更局部性评估**（底层函数与文件路径统一收纳为括号直链）。
+Lead with your own recommendation: which design (or hybrid synthesis) you think is strongest and why it wins on **depth** (leverage at the interface), **locality** (where change concentrates), and **seam placement**. Be opinionated: the user wants a strong read, not a menu.
 
-**完成判据**：已向用户呈现首选推荐结论及涵盖全部备选方案的 Markdown 多维对比表，并等待用户拍板选定方案。
+Follow with a single Markdown comparison table across all options:
+
+| Option & design posture | Interface & usage | Hidden complexity | Seam & test strategy | Trade-offs (leverage & locality) |
+| :--- | :--- | :--- | :--- | :--- |

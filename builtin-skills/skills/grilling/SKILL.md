@@ -1,30 +1,35 @@
 ---
 name: grilling
-description: 围绕计划、决策或想法对用户开展穷尽追问。适用于用户希望借追问打磨思路、对方案做压力测试，或使用“追问 / grill”等触发措辞时。
+description: Grill the user relentlessly about a plan, decision, or idea. Use when the user wants to stress-test their thinking, or uses any 'grill' trigger phrases.
+metadata:
+  upstream: mattpocock/skills
+  upstream-path: skills/productivity/grilling/SKILL.md
+  upstream-commit: 4ae2317ddb22b046e26455e4f9c9b3aaaf62212d
+  local-adaptation: "2026-11-06"
 ---
 
-持续访谈用户，直至双方达成完全一致的共同理解。将待澄清的事项映射为一棵**决策树**：每一项高层决策都会向下分叉出依赖于它的下级决策。
+Interview the user relentlessly until you reach a shared understanding. Map this as a **design tree**: every decision branches into the decisions that hang off it.
 
-按**轮次（rounds）**逐轮推进这棵**决策树**。**可推进前沿**是指所有前置条件均已敲定的待决问题集合——即你当下即可直接发问、无需靠猜测未决答案来铺垫的那些问题。在每一轮中一次性问完当前整条**可推进前沿**上的问题：为每个问题编号，并附上你的推荐方案；随后等待用户作答，再进入下一轮。
+Work the tree in **rounds**. The **frontier** is every decision whose prerequisites are already settled: the questions you can ask _now_ without guessing at answers you haven't heard yet. Always complete all autonomous fact-finding first, batch the entire current frontier together, and ask it in a single plain-Markdown message in the conversation body—**never invoke a host's native interactive question popup or modal tool** (such as `ask_question` or `AskUserQuestion`), and never trickle questions one by one. Number each question and give your recommended answer, then wait for the user's answers before the next round.
 
-每一轮提问采用如下格式：
+Format a round like so:
 
 ```
-❓ **Q1** - **<问题标题>**：<问题正文，可包含多段说明与多个备选方案>
+❓ **Q1** - **<question title>**: <question body, might be multiple paragraphs, including multiple choices>
 
-➡️ <你的推荐方案>
+➡️ <your recommended answer>
 
 ---
 
-❓ **Q2** - **<问题标题>**：<问题正文，可包含多段说明与多个备选方案>
+❓ **Q2** - **<question title>**: <question body, might be multiple paragraphs, including multiple choices>
 
-➡️ <你的推荐方案>
+➡️ <your recommended answer>
 ```
 
-每个问题的措辞都应确保用户只需回答“是 / 同意 / 按推荐”或“yes”即代表采纳推荐方案。
+Word each question so "yes" accepts your recommended answer.
 
-用户在每一轮给出的回答都会动态重塑这棵**决策树**：已敲定的决策会将**可推进前沿**向外推进，解锁原本依赖它们的下游问题。据此重新计算**可推进前沿**，发起下一轮追问。凡是答案依赖于本轮另一个尚未解决之问题的新问题，均归入**后续轮次**，绝不在本轮抢先发问。
+Each round the user answers reshapes the tree: settled decisions push the frontier outward and unblock questions that depended on them. Recompute the frontier and ask the next round. A question whose answer depends on another question still open in this round belongs to a _later_ round, not this one.
 
-查证**客观事实（facts）**是你的职责，绝不应抛给用户。当某个位于**可推进前沿**上的问题需要依赖环境事实（如文件系统、现有代码、工具配置等）时，立即派发子代理去查证，切勿向用户询问任何你自己能够查明的信息。同时不要被查证过程阻塞：一项正在进行中的探索相当于尚未就绪的前置条件，只有直接依赖该事实的下游问题才需要等待子代理回报，其余已就绪的**可推进前沿**问题应立即向用户发问。**主观决策（decisions）**则归属用户：逐轮呈交用户拍板，并静候答复。
+Finding _facts_ is your job, never the user's. When a frontier question needs a fact from the environment (filesystem, tools, etc.), dispatch a sub-agent to find it; don't ask the user for anything you could look up yourself. Don't block on it: a running exploration is an unsettled prerequisite, so only the questions downstream of it wait for the sub-agent to report; ask the rest of the frontier now. The _decisions_ are the user's: put each to them and wait.
 
-当**可推进前沿**为空时，本轮**穷尽追问**才算正式结束：此时**决策树**上的每一条分支均已遍历完毕，没有任何隐含假设被悄然放过。在用户明确确认双方已达成共同理解之前，不要执行任何后续实质动作。
+The session is done when the frontier is empty: every branch of the design tree visited, nothing left silently assumed. Do not act on it until the user confirms you have reached a shared understanding. Answering a round, even "yes" to every question, is not that confirmation. When the frontier is empty, list the settled decisions and ask whether to proceed; act only on an explicit go-ahead.

@@ -1,16 +1,14 @@
 ---
 name: research
-description: 对照高可信一手来源调查问题，并把发现写入仓库中的 Markdown 研究笔记。适用于用户要求专题调研、查阅官方文档或 API 事实，以及委派资料核查时。
+description: Investigate a question against high-trust primary sources and capture the findings as a Markdown file in the repo. Use when the user wants a topic researched, docs or API facts gathered, or reading legwork delegated to a background agent.
 ---
 
-# 一手来源调研
+Spin up **background subagents** (`explorer` in local CLI/IDE, host defaults in web hosts) to do the research, so you keep working while they read. When a question spans multiple independent vendors, APIs, or sub-topics, fan out parallel read-only subagents to investigate them concurrently rather than running one long serial chain.
 
-启动**后台研究子代理**（本地 CLI/IDE 宿主使用 `explorer` 角色，网页宿主使用默认设置），让主代理在子代理阅读期间继续推进其他工作。问题横跨多个独立厂商、API 或子主题时，并行派发多个**只读**研究子代理，而不是串行展开一条很长的调查链。
+Their job:
 
-子代理必须：
-
-1. 对照**一手来源**核查问题：官方文档、源代码、规格、第一方 API 和本机真实配置，而不是仅凭二手文章。每个断言都追溯到持有该事实的源头；**一经核实便停止**，已有官方文档或第一方配置可确认时，不去逆向分析压缩代码。
-2. 把结论写入**单份简洁且信息密集的 Markdown 文件**：结论前置，多项对比使用表格，每条事实注明来源。交回主代理的摘要不超过 15 行，避免在交接消息中重述整份报告。
-3. 保存在**专用子目录**，不把笔记零散放在根目录：
-   - **仓库专属研究**：放在现有研究笔记目录（或 `.scratch/research/`），遵循仓库约定。
-   - **跨项目的 AI 模型、工具、平台或工程研究**：放在中心化知识库的调研笔记目录（如 `docs/research/`），并在参考资料导览索引中登记新笔记链接。
+1. Investigate the question against **primary sources** (official docs, source code, specs, first-party APIs and local configs), not a secondary write-up of them. Follow every claim back to the source that owns it, and **stop once verified**—do not reverse-engineer minified bundles or source code when official docs or first-party configs already confirm the fact.
+2. Write the findings to a single concise, high-density Markdown file (lead with the conclusion, use tables for multi-item comparisons, and cite each claim's source). Return a brief pointer summary ($\le 15$ lines) to the parent agent rather than repeating the full file in the handoff message.
+3. Save the file in a **dedicated subfolder**, never scattered in a root directory:
+   - **Repo-specific research**: save where the repo already keeps research notes (or `.scratch/research/`), matching the repo's convention.
+   - **Cross-project AI models, tools, platforms, or engineering research**: save under the central knowledge base's research notes folder (e.g., `docs/research/`) and register the new note's link in its reference index.
