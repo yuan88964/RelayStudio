@@ -2425,9 +2425,6 @@ def load_all_tasks(tasks_root: str) -> list[dict]:
     return result
 
 
-_studio_list_tasks = load_all_tasks
-
-
 def list_active_unfinished_tasks(tasks_root: str, data_root: str) -> list[dict]:
     overrides, _ = load_task_archives(data_root)
     tasks = load_all_tasks(tasks_root)
@@ -3936,9 +3933,6 @@ def read_tunnel_log_incremental(tunnel_log_path: str) -> list[str]:
                 state["parsed_lines"] = kept_parsed
 
         return list(state["lines"])
-
-
-_collect_mcp_tunnel_Observation = read_tunnel_log_incremental
 
 
 def extract_mcp_call_telemetry(raw_bytes: bytes) -> dict | None:
@@ -5672,9 +5666,6 @@ def build_studio_snapshot(data_root: str, tasks_root: str, web_bridge_path: str 
             }
         )
     return out_snap
-
-
-_studio_collect_state = build_studio_snapshot
 
 
 def _build_wakeup_prompt(session: dict) -> str:

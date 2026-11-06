@@ -5415,8 +5415,6 @@ function Sync-ComposerModelAndEffortCombos($StateInfo, $AvailModels, [string]$Cu
             'chatgpt'  { 'ChatGPT' }
             'claude'   { 'Claude' }
             'gemini'   { 'Gemini' }
-            'deepseek' { 'DeepSeek' }
-            'opencode' { 'OpenCode' }
             default    { $normCode }
         }
         $actP = $null

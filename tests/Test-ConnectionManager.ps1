@@ -661,17 +661,6 @@ try {
     $uiData=Join-Path $testRoot 'ui'
 
     . (Join-Path $managerRoot '连接管理.ps1') -DataRoot $uiData -Preview -NoShow
-    if ((Get-CapsulePlatformMeta -Platform 'chatgpt').Code -eq 'openai') {
-        $script:activeCapsulePlatform = 'chatgpt'
-        foreach ($fnName in @('Get-CapsulePlatformMeta', 'Select-CapsulePlatform', 'Invoke-SelectOrAddCapsulePlatform', 'Invoke-RemoveCurrentCapsulePlatform', 'Refresh-ProfilePopoverState', 'Enter-ProfileEditMode', 'Select-ProfileCard', 'Start-NewProfileForm', 'Invoke-PopoverQuickConnect', 'Refresh-FormState', 'Update-PlatformHealthIndicator', 'Save-Form')) {
-            $cmdObj = Get-Command $fnName -CommandType Function -ErrorAction SilentlyContinue
-            if ($cmdObj) {
-                $newDef = $cmdObj.Definition -replace "'openai'", "'chatgpt'"
-                Set-Item -Path "Function:\$fnName" -Value ([scriptblock]::Create($newDef))
-            }
-        }
-        Refresh-ProfilePopoverState
-    }
 
     Assert ($script:controls.ShieldCheck.IsChecked -eq $true) 'GUI defaults ShieldCheck to checked'
 
