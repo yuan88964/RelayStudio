@@ -8494,6 +8494,28 @@ if (-not $script:context.Isolated) {
                         [void](Start-ConnectionTunnel $ctx $cfg)
                     }
                 }
+                $profState = Get-ConnectionProfiles $ctx $cfg
+                $enPlats = @(if ($profState -and $profState.EnabledPlatforms) { $profState.EnabledPlatforms })
+                if (($enPlats -contains 'gemini') -or ($enPlats -contains 'claude')) {
+                    $pubProf = $profState.Profiles | Where-Object { $_.Platform -in @('gemini', 'claude') -and $_.IsActive -and ($_.BaseUrl -or $_.PlainKey) } | Select-Object -First 1
+                    if (-not $pubProf) {
+                        $pubProf = $profState.Profiles | Where-Object { $_.Platform -in @('gemini', 'claude') -and ($_.BaseUrl -or $_.PlainKey) } | Select-Object -First 1
+                    }
+                    $hasTailscaleReady = [bool](Get-TailscaleFunnelSelfUrl)
+                    if ($pubProf -or $hasTailscaleReady) {
+                        $port = if ($cfg.shield_port) { [int]$cfg.shield_port } else { 8766 }
+                        $probe = Invoke-ConnectionProbe "http://127.0.0.1:$port/shieldz"
+                        if ($probe.Status -ne 200 -or $probe.Body -notmatch '"ok"\s*:\s*true') {
+                            [void](Start-ReadOnlyShield $ctx $cfg (Get-OfficialCoreEndpoint $cfg))
+                        }
+                        $pubState = Get-PublicMcpTunnelState $ctx
+                        if (-not $pubState.Running) {
+                            $fDom = if ($pubProf -and $pubProf.BaseUrl) { [string]$pubProf.BaseUrl } else { '' }
+                            $fTok = if ($pubProf -and $pubProf.PlainKey) { [string]$pubProf.PlainKey } else { '' }
+                            [void](Start-PublicMcpTunnel -Context $ctx -FixedDomain $fDom -Token $fTok -Port $port)
+                        }
+                    }
+                }
             } catch { }
         }).AddArgument($modPath).AddArgument($bootDataRoot)
         $script:bootAsyncHandle = $script:bootPs.BeginInvoke()

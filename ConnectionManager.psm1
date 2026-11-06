@@ -6482,6 +6482,45 @@ function Get-PublicMcpTunnelLogCacheStats {
     }
 }
 
+function Resolve-TailscaleClientPath {
+    param([string]$TailscalePath = '')
+    if ($TailscalePath -and (Test-Path -LiteralPath $TailscalePath)) {
+        return $TailscalePath
+    }
+    $cmd = Get-Command tailscale.exe -ErrorAction SilentlyContinue
+    if ($cmd -and $cmd.Source -and (Test-Path -LiteralPath $cmd.Source)) {
+        return $cmd.Source
+    }
+    foreach ($folder in @(${env:ProgramFiles}, ${env:ProgramFiles(x86)}, $env:LOCALAPPDATA)) {
+        if ($folder) {
+            $candidate = Join-Path $folder 'Tailscale\tailscale.exe'
+            if (Test-Path -LiteralPath $candidate) { return $candidate }
+        }
+    }
+    return ''
+}
+
+function Get-TailscaleFunnelSelfUrl {
+    param([string]$TailscalePath = '')
+    $tsExe = Resolve-TailscaleClientPath $TailscalePath
+    if (-not $tsExe) { return '' }
+    try {
+        $rawOut = & $tsExe status --json 2>$null
+        if (-not $rawOut) { return '' }
+        $jsonStr = ($rawOut -join "`n").Trim()
+        if (-not $jsonStr) { return '' }
+        $statusObj = $jsonStr | ConvertFrom-Json
+        $backendState = if ($statusObj -and $statusObj.PSObject.Properties['BackendState']) { [string]$statusObj.BackendState } else { '' }
+        if ($backendState -eq 'Running' -and $statusObj.PSObject.Properties['Self'] -and $statusObj.Self -and $statusObj.Self.PSObject.Properties['DNSName'] -and $statusObj.Self.DNSName) {
+            $dnsName = ([string]$statusObj.Self.DNSName).Trim().TrimEnd('.')
+            if ($dnsName) {
+                return (ConvertTo-PublicMcpUrl "https://$dnsName/")
+            }
+        }
+    } catch { }
+    return ''
+}
+
 function Get-PublicMcpTunnelState {
     param($Context)
     $path = Join-Path $Context.DataRoot 'public-mcp-tunnel.json'
@@ -6489,6 +6528,44 @@ function Get-PublicMcpTunnelState {
     if (Test-Path -LiteralPath $path) {
         try {
             $saved = [IO.File]::ReadAllText($path) | ConvertFrom-Json
+            $mode = if ($saved.PSObject.Properties['Mode'] -and $saved.Mode) { [string]$saved.Mode } else { 'cloudflared' }
+            if ($mode -in @('tailscale', 'external_fixed')) {
+                $fixedUrl = if ($saved.PSObject.Properties['FixedUrl'] -and $saved.FixedUrl) { [string]$saved.FixedUrl } else { '' }
+                if (-not $fixedUrl) { return $result }
+                $stateSig = Get-FileStatToken $path
+                $cacheKey = "$($Context.DataRoot)|mode=$mode|$fixedUrl"
+                $cachedEntry = if ($script:PublicMcpTunnelLogCache.ContainsKey($cacheKey)) { $script:PublicMcpTunnelLogCache[$cacheKey] } else { $null }
+                if ($cachedEntry -and $cachedEntry.LogSignature -eq $stateSig) {
+                    $script:PublicMcpTunnelLogCacheStats.Hits++
+                    return [pscustomobject]@{
+                        Running = [bool]$cachedEntry.Running
+                        Url = [string]$cachedEntry.Url
+                        ProcessId = [int]$cachedEntry.ProcessId
+                        StartedAt = $saved.StartTicks
+                        Status = [string]$cachedEntry.Status
+                        Mode = $mode
+                    }
+                }
+                $script:PublicMcpTunnelLogCacheStats.Misses++
+                $script:PublicMcpTunnelLogCacheStats.LastBytesRead = 0
+                $script:PublicMcpTunnelLogCache[$cacheKey] = @{
+                    LogSignature = $stateSig
+                    DiscoveredUrl = $fixedUrl
+                    DiscoveredReady = $true
+                    Running = $true
+                    Url = $fixedUrl
+                    ProcessId = -1
+                    Status = '在线'
+                }
+                return [pscustomobject]@{
+                    Running = $true
+                    Url = $fixedUrl
+                    ProcessId = -1
+                    StartedAt = $saved.StartTicks
+                    Status = '在线'
+                    Mode = $mode
+                }
+            }
             $proc = Get-Process -Id $saved.ProcessId -ErrorAction Stop
             if ($proc.StartTime.ToUniversalTime().Ticks -ne [long]$saved.StartTicks) { return $result }
             $result.ProcessId = $proc.Id
@@ -6567,7 +6644,7 @@ function Get-PublicMcpTunnelState {
 }
 
 function Start-PublicMcpTunnel {
-    param($Context, [string]$FixedDomain = '', [string]$Token = '', [string]$ClientPath = '', [int]$Port = 8766)
+    param($Context, [string]$FixedDomain = '', [string]$Token = '', [string]$ClientPath = '', [string]$TailscalePath = '', [int]$Port = 8766)
     $lockPath = Join-Path $Context.DataRoot 'public-mcp-tunnel.lock'
     $lock = $null
     try {
@@ -6579,6 +6656,55 @@ function Start-PublicMcpTunnel {
         $state = Get-PublicMcpTunnelState $Context
         if ($state.ProcessId) { return $state }
         $fixedUrl = if ($FixedDomain.Trim()) { ConvertTo-PublicMcpUrl $FixedDomain } else { '' }
+        $cleanToken = $Token.Trim()
+        if ($script:PublicMcpTunnelLogCache) { $script:PublicMcpTunnelLogCache.Clear() }
+
+        # Mode 1: Fixed HTTPS domain without Cloudflare Token (Tailscale Funnel *.ts.net or external static HTTPS tunnel)
+        if ($fixedUrl -and (-not $cleanToken)) {
+            $hostName = ([Uri]$fixedUrl).Host.ToLowerInvariant()
+            $tsExe = Resolve-TailscaleClientPath $TailscalePath
+            $tunMode = if ($hostName -like '*.ts.net' -or $TailscalePath) { 'tailscale' } else { 'external_fixed' }
+            if ($tunMode -eq 'tailscale' -and $tsExe) {
+                try { & $tsExe funnel --bg $Port 2>&1 | Out-Null } catch { }
+            }
+            Write-AtomicConnectionText (Join-Path $Context.DataRoot 'public-mcp-tunnel.json') (@{
+                Mode = $tunMode
+                ProcessId = -1
+                StartTicks = [DateTime]::UtcNow.Ticks
+                FixedUrl = $fixedUrl
+                TailscalePath = $tsExe
+                Port = $Port
+            } | ConvertTo-Json)
+            return (Get-PublicMcpTunnelState $Context)
+        }
+
+        # Mode 2: Auto-discover Tailscale Funnel permanent URL when FixedDomain/Token are blank and no explicit cloudflared ClientPath override was passed
+        if ((-not $fixedUrl) -and (-not $cleanToken) -and ((-not $ClientPath) -or $TailscalePath)) {
+            $tsExe = Resolve-TailscaleClientPath $TailscalePath
+            if ($tsExe) {
+                $autoTsUrl = Get-TailscaleFunnelSelfUrl $tsExe
+                if ($autoTsUrl) {
+                    $tsOk = $false
+                    try {
+                        & $tsExe funnel --bg $Port 2>&1 | Out-Null
+                        if ($LASTEXITCODE -eq 0) { $tsOk = $true }
+                    } catch { }
+                    if ($tsOk) {
+                        Write-AtomicConnectionText (Join-Path $Context.DataRoot 'public-mcp-tunnel.json') (@{
+                            Mode = 'tailscale'
+                            ProcessId = -1
+                            StartTicks = [DateTime]::UtcNow.Ticks
+                            FixedUrl = $autoTsUrl
+                            TailscalePath = $tsExe
+                            Port = $Port
+                        } | ConvertTo-Json)
+                        return (Get-PublicMcpTunnelState $Context)
+                    }
+                }
+            }
+        }
+
+        # Mode 3: Cloudflare Tunnel (Named Tunnel with FixedDomain + Token, or Quick Tunnel fallback)
         if (-not $ClientPath) {
             $cmd = Get-Command cloudflared.exe -ErrorAction SilentlyContinue
             if ($cmd) { $ClientPath = $cmd.Source }
@@ -6588,25 +6714,21 @@ function Start-PublicMcpTunnel {
                 }
             }
         }
-        if (-not $ClientPath -or -not (Test-Path -LiteralPath $ClientPath)) { throw '未找到 cloudflared.exe，请先安装 Cloudflare Tunnel。' }
+        if (-not $ClientPath -or -not (Test-Path -LiteralPath $ClientPath)) { throw '未找到 cloudflared.exe，请先安装 Cloudflare Tunnel 或启用 Tailscale Funnel。' }
         $info = New-Object Diagnostics.ProcessStartInfo
         $info.FileName = $ClientPath
         $info.UseShellExecute = $false; $info.CreateNoWindow = $true
         # cloudflared writes its own logfile, avoiding pipe-buffer deadlocks.
         $logPath = Join-Path $Context.DataRoot 'public-mcp-tunnel.log'
         [IO.File]::WriteAllText($logPath, '')
-        if ($script:PublicMcpTunnelLogCache) { $script:PublicMcpTunnelLogCache.Clear() }
-        if ($fixedUrl -and $Token) {
+        if ($fixedUrl -and $cleanToken) {
             $info.Arguments = 'tunnel --no-autoupdate --logfile "' + $logPath + '" run'
-            $info.EnvironmentVariables['TUNNEL_TOKEN'] = $Token
-        } elseif ($fixedUrl) {
-            $hostname = ([Uri]$fixedUrl).Host
-            $info.Arguments = 'tunnel --no-autoupdate --logfile "' + $logPath + '" --hostname ' + $hostname + ' --url http://127.0.0.1:' + $Port
+            $info.EnvironmentVariables['TUNNEL_TOKEN'] = $cleanToken
         } else {
             $info.Arguments = 'tunnel --no-autoupdate --logfile "' + $logPath + '" --url http://127.0.0.1:' + $Port
         }
         $proc = [Diagnostics.Process]::Start($info)
-        Write-AtomicConnectionText (Join-Path $Context.DataRoot 'public-mcp-tunnel.json') (@{ ProcessId = $proc.Id; StartTicks = $proc.StartTime.ToUniversalTime().Ticks; FixedUrl = $fixedUrl } | ConvertTo-Json)
+        Write-AtomicConnectionText (Join-Path $Context.DataRoot 'public-mcp-tunnel.json') (@{ Mode = 'cloudflared'; ProcessId = $proc.Id; StartTicks = $proc.StartTime.ToUniversalTime().Ticks; FixedUrl = $fixedUrl } | ConvertTo-Json)
         $deadline = [DateTime]::UtcNow.AddSeconds(12)
         do {
             Start-Sleep -Milliseconds 150
@@ -6621,9 +6743,21 @@ function Stop-PublicMcpTunnel {
     param($Context)
     $lock = [IO.File]::Open((Join-Path $Context.DataRoot 'public-mcp-tunnel.lock'), 'OpenOrCreate', 'ReadWrite', 'None')
     try {
-        $state = Get-PublicMcpTunnelState $Context
-        if ($state.ProcessId) { Stop-Process -Id $state.ProcessId -ErrorAction SilentlyContinue }
         $path = Join-Path $Context.DataRoot 'public-mcp-tunnel.json'
+        if (Test-Path -LiteralPath $path) {
+            try {
+                $saved = [IO.File]::ReadAllText($path) | ConvertFrom-Json
+                $mode = if ($saved.PSObject.Properties['Mode'] -and $saved.Mode) { [string]$saved.Mode } else { 'cloudflared' }
+                if ($mode -eq 'tailscale') {
+                    $tsExe = Resolve-TailscaleClientPath $(if ($saved.PSObject.Properties['TailscalePath']) { [string]$saved.TailscalePath } else { '' })
+                    if ($tsExe) {
+                        try { & $tsExe funnel --https=443 off 2>&1 | Out-Null } catch { }
+                    }
+                }
+            } catch { }
+        }
+        $state = Get-PublicMcpTunnelState $Context
+        if ($state.ProcessId -gt 0) { Stop-Process -Id $state.ProcessId -ErrorAction SilentlyContinue }
         if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force }
         if ($script:PublicMcpTunnelLogCache) { $script:PublicMcpTunnelLogCache.Clear() }
     } finally { $lock.Dispose() }

@@ -89,6 +89,20 @@ if ($PublicTunnelOnly) {
         $fixed = Start-PublicMcpTunnel -Context $ctx -ClientPath $exe -FixedDomain 'https://fixed.example/' -Token 'fixture-token'
         Assert ($fixed.Running -and $fixed.Url -eq 'https://fixed.example/mcp') 'fixed domain is used instead of temporary URL'
     } finally { Stop-PublicMcpTunnel $ctx }
+    $fakeTsCmd = Join-Path $testRoot 'fake-tailscale.cmd'
+    $fakeTsLog = Join-Path $testRoot 'fake-tailscale-args.log'
+    [IO.File]::WriteAllText($fakeTsCmd, "@echo off`r`necho %*>> `"$fakeTsLog`"`r`nif `"%1`"==`"status`" (`r`n  echo {`"BackendState`":`"Running`",`"Self`":{`"DNSName`":`"auto-box.tail9999.ts.net.`"}}`r`n  exit /b 0`r`n)`r`nexit /b 0`r`n", [Text.Encoding]::ASCII)
+    try {
+        $tsAuto = Start-PublicMcpTunnel -Context $ctx -TailscalePath $fakeTsCmd
+        $tsAutoHit = Get-PublicMcpTunnelState $ctx
+        $tsStats = Get-PublicMcpTunnelLogCacheStats
+        Assert ($tsAuto.Running -and $tsAuto.Url -eq 'https://auto-box.tail9999.ts.net/mcp' -and $tsAutoHit.Running -and $tsStats.Hits -ge 1) 'Tailscale Funnel auto-discovers permanent *.ts.net/mcp URL and caches online state'
+    } finally { Stop-PublicMcpTunnel $ctx }
+    Assert (-not (Get-PublicMcpTunnelState $ctx).Running -and ([IO.File]::ReadAllText($fakeTsLog) -match 'funnel --https=443 off')) 'Stop-PublicMcpTunnel turns off Tailscale Funnel and clears state'
+    try {
+        $extFixed = Start-PublicMcpTunnel -Context $ctx -FixedDomain 'https://static-box.tail1234.ts.net' -TailscalePath $fakeTsCmd
+        Assert ($extFixed.Running -and $extFixed.Url -eq 'https://static-box.tail1234.ts.net/mcp') 'Tokenless fixed HTTPS domain activates persistent tunnel without requiring Cloudflare token'
+    } finally { Stop-PublicMcpTunnel $ctx }
     $before = Get-ConnectionProfiles $ctx
     $storePath = Join-Path $ctx.DataRoot 'credential-profiles.json'
     $store = [IO.File]::ReadAllText($storePath) | ConvertFrom-Json
