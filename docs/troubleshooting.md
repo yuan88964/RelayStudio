@@ -9,8 +9,8 @@
 | 现象描述 | 常见原因 | 排查与处理步骤 |
 | :--- | :--- | :--- |
 | **1. 启动隧道提示 `8766` 端口占用或未找到 Python** | 旧 `python.exe` 护盾进程未退出，或 Python 3.11+ 未加入系统 `PATH` | 1. 在顶栏配置面板点击 **「↻ 重启内核」** 自动回收残留进程；<br>2. 若 Python 安装在非标准路径，在 `data/settings.json` 中指定 `"python_path": "D:\\Python311\\python.exe"`。 |
-| **2. 顶栏提示隧道连接告警或频繁重连** | API Key 失效、隧道 ID 不匹配，或本机网络代理阻断了 `api.openai.com` 长连接 | 1. 查看 `data/logs/tunnel.out.log` 末尾错误码；<br>2. 若报 `401 Unauthorized`，前往 [OpenAI API Keys](https://platform.openai.com/api-keys) 更新密钥并重新保存启动；<br>3. 若报连接被拒绝，检查系统代理端口是否正常监听。 |
-| **3. 选择浏览器宿主发送后，打开了网页但未自动填入内容** | 目标浏览器 Profile 未启用 `browser-bridge` 扩展，或页面尚未完成登录与心跳同步 | 1. 打开 `chrome://extensions` 或 `edge://extensions`，确认 **RelayStudio Browser Bridge** 已启用且允许访问 `chatgpt.com`；<br>2. 刷新一次 ChatGPT 页面，等待约 2 秒心跳上报后重试。 |
+| **2. 顶栏提示隧道连接告警或公网 MCP 无法连通** | OpenAI API Key / 隧道 ID 失效，或 Tailscale Funnel 未在后台开启 `8766` 端口映射 | 1. **OpenAI 隧道**：查看 `data/logs/tunnel.out.log`，若报 `401 Unauthorized` 前往 [OpenAI API Keys](https://platform.openai.com/api-keys) 更新密钥；<br>2. **Tailscale Funnel 隧道**：在终端运行 `tailscale funnel status`，确认已将公网 HTTPS 流量映射至 `http://127.0.0.1:8766`（并在连接器中填入 `https://<你的tailnet域名>/mcp`）。 |
+| **3. 选择浏览器宿主发送后，打开了网页但未自动填入内容** | 目标浏览器 Profile 未启用或未重载 `browser-bridge` 扩展，或页面尚未完成登录与心跳同步 | 1. 打开 `chrome://extensions` 或 `edge://extensions`，确认 **RelayStudio Browser Bridge** 已启用且拥有 `chatgpt.com`、`gemini.google.com`、`claude.ai` 站点访问权限；<br>2. 刷新一次目标对话页面，等待约 2 秒心跳上报后重试。 |
 | **4. 选择 `ChatGPT 桌面端` 时未能定位会话抽屉** | 桌面客户端此前由外部直接启动，未开启 `127.0.0.1:9222` 调试端口 | 退出系统托盘中的 ChatGPT 桌面端，随后在 RelayStudio 分栏点击 **「打开网页 / 打开宿主窗口 ↗」**，由工作台通过桌面包身份自动携带调试端口拉起客户端。 |
 | **5. 日常聊天调用了工具，但左侧任务栏未出现卡片，或未自动连跑** | 按场景隔离契约，零散只读问答不强制建卡；且未开启自动重发时不注入免确认连跑尾注 | 1. 从右侧 **「新建任务」** 发射台直接立项，或在对话中让模型调用 `task_manage(action="create")`；<br>2. 如需夜间无人值守连续执行，勾选分栏底部的 **「自动重发」**（如 `停顿 3 分钟` · `重试 1 次`）。 |
 | **6. 手工编辑 `.ps1` / `.psm1` 后启动报解析错误或中文乱码** | Windows PowerShell 5.1 要求含中文字符的脚本必须带 **UTF-8 with BOM** 文件头 | 将修改过的 `.ps1` / `.psm1` 文件保存为 **UTF-8 with BOM（`0xEF,0xBB,0xBF`）+ CRLF**，并运行下方编码与契约测试核验。 |

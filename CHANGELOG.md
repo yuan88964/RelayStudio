@@ -1,6 +1,23 @@
 # 更新日志（Changelog）
 
-本项目的重要版本演进记录于此。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，最新绿色便携发行包可前往 [Hugging Face 发行文件列表](https://huggingface.co/datasets/yuan88964/RelayStudio-Releases/tree/main) 免登录直接下载。
+本项目的重要版本演进记录于此。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，最新绿色便携发行包可前往 [GitHub Releases](https://github.com/yuan88964/RelayStudio/releases/latest) 直接下载。
+
+---
+
+## [v1.3.0] - 2026-11-06
+
+### 新增与增强（Added & Changed）
+- **多平台网页宿主桥接（ChatGPT · Gemini · Claude）与独立模型目录**：
+  - `browser-bridge` MV3 扩展新增对 Google Gemini（`gemini.google.com`）与 Anthropic Claude（`claude.ai`）网页端的探测、流式状态感知、自动填词投递与跨窗口交接支持。
+  - `:8766` 中枢按平台（`chatgpt / gemini / claude`）隔离维护动态模型与思考档位目录，支持跨窗交接时记忆平台入口 URL 与宿主载体；冷启动未连接网页时展示干净的默认冷态列表，连接后实时热更新。
+- **双公网隧道（Cloudflare + Tailscale Funnel）与内置零配置 OAuth 2.1 网关**：
+  - 除 OpenAI 官方 Cloudflare 隧道外，新增 **Tailscale Funnel** 免费固定域名公网隧道一键启停与健康自检支持。
+  - `:8766` 桥接中枢内置完整 **OAuth 2.1（PKCE + 动态客户端注册 DCR）** 授权协议栈（`/.well-known/oauth-authorization-server`、`/.well-known/oauth-protected-resource`、`/oauth/register`、`/oauth/authorize`、`/oauth/token`）及 `HEAD /mcp` 探针响应，使 Claude Web、Gemini 与 ChatGPT 自定义 MCP 连接器无需外部鉴权服务即可一键完成授权接入。
+- **内置工程与图解深模块体系升级（`develop` + 16 项技能包）**：
+  - 将随仓默认全局规则 [`builtin-skills/AGENTS.md`](builtin-skills/AGENTS.md) 与技能库升级为四大顶层深模块（`develop`、`mermaid-diagrams`、`writing-for-agents`、`research`）及 12 个配套工程子零件（共 16 项），统一采用三态接口契约（`Standard / Normalize / Error + Route`）与六行交接单（`Status / Pointers / Verified / Error / Route / ResidualRisk`）。
+  - `:8766` 原生账本引擎新增 `two_strike_stop -> in_progress` 状态归一化映射，并在 `ConnectionManager.psm1` 启动挂载时支持外部 `AGENTS.md` 硬链接 SHA256 自动校验保鲜。
+- **顶栏多隧道手风琴面板与三平台视觉对齐**：
+  - 统一顶栏配置弹窗的手风琴展开逻辑、冷暖色板水印与激活态卡片高亮，支持跨平台配置无缝切换。
 
 ---
 

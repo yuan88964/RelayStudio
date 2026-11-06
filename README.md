@@ -4,9 +4,9 @@
 
 **面向 ChatGPT · Gemini · Claude 桌面端与网页端的本地长程开发接力工作台**
 
-[![Release](https://img.shields.io/badge/Release-v1.2.0%20Portable-2563EB?style=flat-square)](https://huggingface.co/datasets/yuan88964/RelayStudio-Releases/tree/main)
+[![Release](https://img.shields.io/badge/Release-v1.3.0%20Portable-2563EB?style=flat-square)](https://github.com/yuan88964/RelayStudio/releases/latest)
 [![Platform](https://img.shields.io/badge/Platform-Windows%2010%2F11%20x64-0078D6?style=flat-square)](#快速开始quickstart)
-[![Architecture](https://img.shields.io/badge/Engine-Loopback%20MCP%20%2B%20CDP%20%2B%20MV3-16A34A?style=flat-square)](docs/architecture.md)
+[![Architecture](https://img.shields.io/badge/Engine-Loopback%20MCP%20%2B%20OAuth2.1%20%2B%20MV3-16A34A?style=flat-square)](docs/architecture.md)
 [![License](https://img.shields.io/badge/License-MIT-F59E0B?style=flat-square)](LICENSE)
 [![LINUX DO](https://img.shields.io/badge/Community-LINUX%20DO-0F172A?style=flat-square)](https://linux.do/)
 
@@ -32,7 +32,7 @@
 
 RelayStudio 将**会话窗口视为随时可替换的临时执行器，将本地磁盘上的规格书（`SPEC.md`）、Git 提交历史与任务账本（`tsk_*.json`）作为唯一持久状态**，通过以下核心机制构成闭环：
 
-| 模块维度 | 常规 MCP 挂载模式 | RelayStudio 工作台机制（v1.2.0） |
+| 模块维度 | 常规 MCP 挂载模式 | RelayStudio 工作台机制（v1.3.0） |
 | :--- | :--- | :--- |
 | **本地网关与双隧道免确认执行** | 写文件与执行命令频繁触发确认弹窗；不同平台连接器要求 OAuth 2.1 认证或独立暴露隧道 | **单回环网关（`127.0.0.1:8766`）+ 双隧道与内置 OAuth 2.1**：支持 OpenAI Cloudflare 隧道与 Tailscale Funnel 固定域名双通道，内置零配置 OAuth 2.1（PKCE + 动态客户端注册）与 `readOnlyHint: true` 重写，集中收敛内置工具与 `engine-data/mcp` 扩展；仅在当前任务开启自动重发时动态注入免确认连跑尾注 |
 | **原生单步任务账本**<br>（Spec v4.6） | 缺少持久化步骤状态，或受制于繁琐的多步复盘结单校验 | **`:8766` 原生 `task_manage` 引擎**：精简为 `create / update / checkpoint / list / get / block / resume` 7 个动作，支持 `pending`、`in_progress`（含 `two_strike_stop` 净室接力中间态）、`completed`、`quarantined`；所有步骤进入终态后一步自动结单并关停催工 |
@@ -82,23 +82,26 @@ RelayStudio 将**会话窗口视为随时可替换的临时执行器，将本地
 - **基础依赖**：
   - **Python 3.11+**（必需，用于运行本地 `:8766` 桥接中枢 `McpReadOnlyShield.py`，仅依赖标准库）。
   - **Node.js 20+**（可选，仅在本地调用 `@agentclientprotocol/codex-acp` 或 `@agentclientprotocol/claude-agent-acp` 子代理时需要）。
-- **下载解压**：点击直接下载最新绿色便携包 [**`RelayStudio-v1.2.0-win-x64-portable.zip`（免登录直链，19.0 MB）**](https://huggingface.co/datasets/yuan88964/RelayStudio-Releases/resolve/main/RelayStudio-v1.2.0-win-x64-portable.zip?download=true)（或浏览 [Hugging Face 发行文件列表](https://huggingface.co/datasets/yuan88964/RelayStudio-Releases/tree/main)，`SHA256: fbefeef8083daa80574c0c1abac78ffede4e87056e2ed0ea980b13ef4b317d63`；也可直接克隆本纯源码仓库），解压至普通读写权限目录。启动时程序会自动将 [`builtin-skills/`](builtin-skills) 下的 `AGENTS.md` 与 16 项技能同步至 `engine-data/`；如需链接外部 Obsidian 知识库或自定义第三方 MCP，可参考 [`docs/architecture.md`](docs/architecture.md) 配置 `data/settings.json` 与 `engine-data/mcp/`。
+- **下载解压（开箱即用，无需本地编译）**：
+  前往 [**GitHub Releases (v1.3.0 Latest)**](https://github.com/yuan88964/RelayStudio/releases/latest) 直接下载完整绿色便携包 [**`RelayStudio-v1.3.0-win-x64-portable.zip`**](https://github.com/yuan88964/RelayStudio/releases/download/v1.3.0/RelayStudio-v1.3.0-win-x64-portable.zip)（内含已编译好的 `RelayStudio.exe`、`bin/relaystudio-core.exe`、`bin/tunnel-client.exe` 及全套扩展与技能，附带 [`SHA256SUMS.txt`](https://github.com/yuan88964/RelayStudio/releases/download/v1.3.0/SHA256SUMS.txt) 校验单），解压至普通读写权限目录即可双击运行。启动时程序会自动将 [`builtin-skills/`](builtin-skills) 下的 `AGENTS.md` 与 16 项技能同步至 `engine-data/`；如需链接外部 Obsidian 知识库或自定义第三方 MCP，可参考 [`docs/architecture.md`](docs/architecture.md) 配置 `data/settings.json` 与 `engine-data/mcp/`。
 
-### 2. 配置隧道凭据与外观主题
+### 2. 配置公网 MCP 隧道（二选一）与外观主题
 
-1. 运行根目录下的 **`RelayStudio.exe`**（或通过 PowerShell 执行 `Launch-ConnectionManager.ps1`）。
+1. 双击运行根目录下的 **`RelayStudio.exe`**（或通过 PowerShell 执行 `Launch-ConnectionManager.ps1`）。
 2. 点击左上角顶栏的 **`● 主工作台 ▾`** 按钮，展开连接与内核配置面板：
 
 ![连接与内核配置面板](docs/assets/connection-hub-popover.png)
 
-3. 通过面板底部入口分别前往 [OpenAI Tunnels 设置页](https://platform.openai.com/settings/organization/tunnels) 获取隧道标识（`tun_xxx`），并在 [OpenAI API Keys](https://platform.openai.com/api-keys) 生成具备隧道控制权限的密钥。
-4. 填入隧道标识与密钥后点击 **「保存」** 与 **「▶ 启动隧道」**（密钥经 Windows DPAPI 加密存储于本机 `data/*.dpapi`）。你也可以在同一面板或右上角 `☀/🌙` 按钮（`Ctrl+Shift+D`）随时切换 **跟随系统 / 浅色 / 深色** 主题。
+3. **选择任一公网隧道方式暴露本机 `:8766` 网关**（`:8766` 已内置零配置 OAuth 2.1 + PKCE + 动态客户端注册，无需额外部署鉴权服务）：
+   - **方式 A：Tailscale Funnel 固定域名隧道（推荐，通用于 Claude / Gemini / ChatGPT）**：安装并登录 [Tailscale](https://tailscale.com/)，在面板中切换至 Tailscale 隧道页签一键开启（或执行 `tailscale funnel --bg 8766`），即可获得形如 `https://<设备名>.<tailnet>.ts.net/mcp` 的永久免费 HTTPS MCP 地址。
+   - **方式 B：OpenAI 官方 Cloudflare 隧道**：前往 [OpenAI Tunnels 设置页](https://platform.openai.com/settings/organization/tunnels) 获取隧道标识（`tun_xxx`），并在 [OpenAI API Keys](https://platform.openai.com/api-keys) 生成密钥，填入面板点击 **「保存」** 与 **「▶ 启动隧道」**（密钥经 Windows DPAPI 加密存储于本机 `data/*.dpapi`）。
+4. 你可以在同一面板或右上角 `☀/🌙` 按钮（`Ctrl+Shift+D`）随时切换 **跟随系统 / 浅色 / 深色** 主题。
 
 ### 3. 关联对话宿主与连接器
 
-- **使用 ChatGPT 桌面端（默认）**：无需额外插件，首次点击「打开宿主窗口」或发起任务时，RelayStudio 会通过桌面包身份自动携带调试端口拉起客户端。
-- **使用 Chrome / Edge 浏览器**：打开 `chrome://extensions` 或 `edge://extensions` 开启「开发者模式」，点击「加载已解压的扩展程序」并选择目录内的 **`browser-bridge`** 文件夹（或下载独立扩展包 [`relaystudio-browser-bridge-v1.2.0.zip`](https://huggingface.co/datasets/yuan88964/RelayStudio-Releases/resolve/main/relaystudio-browser-bridge-v1.2.0.zip?download=true) 解压加载），随后刷新 [`https://chatgpt.com/`](https://chatgpt.com/) 页面即可在宿主下拉列表中看到对应浏览器配置。
-- **启用 MCP 连接器**：在 ChatGPT 设置（Settings → Connectors / Developer mode）中绑定前面创建的隧道，并在会话输入框工具菜单中勾选启用。
+- **使用 Chrome / Edge 浏览器（支持 ChatGPT · Gemini · Claude）**：打开 `chrome://extensions` 或 `edge://extensions` 开启「开发者模式」，点击「加载已解压的扩展程序」并选择解压目录内的 **`browser-bridge`** 文件夹（或下载独立扩展包 [`relaystudio-browser-bridge-v1.3.0.zip`](https://github.com/yuan88964/RelayStudio/releases/download/v1.3.0/relaystudio-browser-bridge-v1.3.0.zip) 解压加载），随后刷新 [`chatgpt.com`](https://chatgpt.com/)、[`gemini.google.com`](https://gemini.google.com/) 或 [`claude.ai`](https://claude.ai/) 页面即可在宿主下拉列表中看到对应平台与浏览器配置。
+- **使用 ChatGPT 桌面端（Windows 官方客户端）**：无需额外插件，首次点击「打开宿主窗口」或发起任务时，RelayStudio 会通过桌面包身份自动携带调试端口拉起客户端。
+- **在网页端启用 MCP 连接器**：在 ChatGPT（Settings → Connectors）、Claude（Settings → Integrations → Add custom integration）或 Gemini 中填入你的公网隧道 `/mcp` 地址完成一键 OAuth 2.1 绑定，并在会话输入框工具菜单中勾选启用。
 
 ### 4. 启动长程任务
 
@@ -123,7 +126,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build-launcher.ps1
 #    - bin\relaystudio-core.exe : 由 Apache-2.0 开源仓库 uvwt/agentdock 执行 cargo build --release 编译放入
 
 # （可选）一键生成与官方一致的便携发行包与 SHA256SUMS.txt
-powershell -ExecutionPolicy Bypass -File .\scripts\build-release.ps1 -Version "1.2.0"
+powershell -ExecutionPolicy Bypass -File .\scripts\build-release.ps1 -Version "1.3.0"
 ```
 
 ---
