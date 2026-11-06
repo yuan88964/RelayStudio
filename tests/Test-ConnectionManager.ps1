@@ -34,14 +34,29 @@ if ($ModelCatalogOnly) {
 
 if ($PublicTunnelOnly) {
     $ctx = New-ConnectionContext -DataRoot (Join-Path $testRoot 'public') -Isolated
+    Assert ((Resolve-CanonicalPlatform 'openai') -eq 'chatgpt' -and (Resolve-CanonicalPlatform 'OpenAI') -eq 'chatgpt' -and (Resolve-CanonicalPlatform 'ChatGPT') -eq 'chatgpt' -and (Resolve-CanonicalPlatform 'Gemini') -eq 'gemini' -and (Resolve-CanonicalPlatform 'Claude') -eq 'claude') 'Resolve-CanonicalPlatform normalizes openai/OpenAI/ChatGPT/Gemini/Claude to canonical lowercase identifiers'
+    Assert ((Get-DefaultPlatformBaseUrl -Platform 'ChatGPT') -eq 'https://api.openai.com' -and (Get-DefaultPlatformBaseUrl -Platform 'openai') -eq 'https://api.openai.com') 'Get-DefaultPlatformBaseUrl maps ChatGPT and legacy openai to https://api.openai.com'
+    $coldProfState = Get-ConnectionProfiles $ctx
+    $primProf = $coldProfState.Profiles | Where-Object { $_.Id -eq 'prof_primary' } | Select-Object -First 1
+    Assert ($coldProfState.EnabledPlatforms.Count -eq 1 -and $coldProfState.EnabledPlatforms[0] -eq 'chatgpt' -and $primProf.Platform -eq 'chatgpt' -and $primProf.KeyFile -eq 'openai-key-prof_primary.dpapi' -and $coldProfState.ActiveProfileByPlatform['chatgpt'] -eq 'prof_primary') 'Cold-start Get-ConnectionProfiles uses canonical chatgpt platform while preserving openai-key-prof_primary.dpapi filename contract'
     Assert-Throws { Add-CapsulePlatform $ctx 'deepseek' } 'deprecated platform rejected'
+    Assert-Throws { Add-CapsulePlatform $ctx 'opencode' } 'opencode platform rejected'
+    Assert-Throws { Save-ConnectionProfile -Context $ctx -ProfileId 'new' -Name 'Bad' -Platform 'deepseek' } 'Save-ConnectionProfile rejects unsupported platform deepseek'
     $state = Add-CapsulePlatform $ctx 'gemini'
     Assert (($state.Profiles | Where-Object Platform -eq 'gemini').Kind -eq 'public_tunnel') 'Gemini is a public tunnel'
     Assert ((ConvertTo-PublicMcpUrl 'https://example.com/') -eq 'https://example.com/mcp') 'fixed URL normalized'
     Assert-Throws { ConvertTo-PublicMcpUrl 'http://example.com' } 'HTTPS required'
     Assert (-not (Get-PublicMcpTunnelState $ctx).Running) 'cold start offline'
     $exe = Join-Path $testRoot 'fake-cloudflared.exe'
-    Add-Type -TypeDefinition 'using System; class FakeTunnel { static void Main(string[] args) { var i = Array.IndexOf(args, "--logfile"); System.IO.File.AppendAllText(args[i+1], "https://fixture.trycloudflare.com\nRegistered tunnel connection"); System.Threading.Thread.Sleep(60000); } }' -OutputAssembly $exe -OutputType ConsoleApplication
+    $csSrc = 'using System; class FakeTunnel { static void Main(string[] args) { var i = Array.IndexOf(args, "--logfile"); if (i >= 0 && i + 1 < args.Length) { System.IO.File.AppendAllText(args[i+1], "https://fixture.trycloudflare.com\nRegistered tunnel connection"); } System.Threading.Thread.Sleep(60000); } }'
+    $cscPath = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+    if ($PSVersionTable.PSEdition -eq 'Core' -and (Test-Path -LiteralPath $cscPath)) {
+        $csFile = Join-Path $testRoot 'FakeTunnel.cs'
+        [IO.File]::WriteAllText($csFile, $csSrc, [Text.Encoding]::UTF8)
+        & $cscPath /nologo /target:exe /out:$exe $csFile | Out-Null
+    } else {
+        Add-Type -TypeDefinition $csSrc -OutputAssembly $exe -OutputType ConsoleApplication
+    }
     try {
         $first = Start-PublicMcpTunnel -Context $ctx -ClientPath $exe
         $second = Start-PublicMcpTunnel -Context $ctx -ClientPath $exe
@@ -52,6 +67,21 @@ if ($PublicTunnelOnly) {
         try {
             $whileWriting = Get-PublicMcpTunnelState $ctx
             Assert ($whileWriting.Running -and $whileWriting.Status -eq '在线' -and $whileWriting.Url -eq 'https://fixture.trycloudflare.com/mcp') 'registered tunnel stays online while client holds logfile open for writes'
+            Clear-PublicMcpTunnelLogCache
+            $tMiss1 = Get-PublicMcpTunnelState $ctx
+            $tHit1 = Get-PublicMcpTunnelState $ctx
+            $tHit2 = Get-PublicMcpTunnelState $ctx
+            $tStats1 = Get-PublicMcpTunnelLogCacheStats
+            Assert ($tMiss1.Running -and $tHit1.Running -and $tHit2.Running -and $tStats1.Misses -eq 1 -and $tStats1.Hits -ge 2) "Get-PublicMcpTunnelState caches unchanged logfile state without re-opening file (Misses=$($tStats1.Misses), Hits=$($tStats1.Hits))"
+            $paddingBytes = [Text.Encoding]::UTF8.GetBytes(("`n2026-11-06T00:00:00Z INF ping " + ('x' * 90)) * 240 + "`nRegistered tunnel connection`n")
+            $heldLog.Seek(0, [IO.SeekOrigin]::End) | Out-Null
+            $heldLog.Write($paddingBytes, 0, $paddingBytes.Length)
+            $heldLog.Flush()
+            $tTail = Get-PublicMcpTunnelState $ctx
+            $tStats2 = Get-PublicMcpTunnelLogCacheStats
+            $tHitAfterTail = Get-PublicMcpTunnelState $ctx
+            $tStats3 = Get-PublicMcpTunnelLogCacheStats
+            Assert ($tTail.Running -and $tTail.Url -eq 'https://fixture.trycloudflare.com/mcp' -and $tStats2.Misses -eq 2 -and $tStats2.LastBytesRead -le 8192 -and $tHitAfterTail.Running -and $tStats3.Hits -gt $tStats2.Hits) "Get-PublicMcpTunnelState tail-reads <=8KB on >24KB logfile and caches subsequent unchanged polls (LastBytesRead=$($tStats2.LastBytesRead))"
         } finally { $heldLog.Dispose() }
     } finally { Stop-PublicMcpTunnel $ctx }
     Assert (-not (Get-PublicMcpTunnelState $ctx).Running) 'stop clears shared tunnel'
@@ -62,12 +92,23 @@ if ($PublicTunnelOnly) {
     $before = Get-ConnectionProfiles $ctx
     $storePath = Join-Path $ctx.DataRoot 'credential-profiles.json'
     $store = [IO.File]::ReadAllText($storePath) | ConvertFrom-Json
-    $store.enabled_platforms += 'deepseek'
+    $store.enabled_platforms = @('openai', 'gemini', 'deepseek', 'opencode')
+    foreach ($pItem in @($store.profiles)) {
+        if ($pItem.id -eq 'prof_primary') { $pItem.platform = 'openai' }
+    }
     $store.profiles += [pscustomobject]@{ id='obsolete'; platform='deepseek'; kind='apikey' }
+    $store.profiles += [pscustomobject]@{ id='obsolete_oc'; platform='opencode'; kind='apikey' }
     [IO.File]::WriteAllText($storePath, ($store | ConvertTo-Json -Depth 8))
     $clean = Get-ConnectionProfiles $ctx
-    Assert ($clean.EnabledPlatforms -notcontains 'deepseek' -and @($clean.Profiles | Where-Object Platform -eq 'deepseek').Count -eq 0) 'legacy platform filtered'
-    Assert (([IO.File]::ReadAllText($storePath) | ConvertFrom-Json).enabled_platforms -notcontains 'deepseek') 'legacy cleanup persisted'
+    Assert ($clean.EnabledPlatforms -contains 'chatgpt' -and $clean.EnabledPlatforms -notcontains 'openai' -and $clean.EnabledPlatforms -notcontains 'deepseek' -and $clean.EnabledPlatforms -notcontains 'opencode' -and @($clean.Profiles | Where-Object Platform -in @('deepseek','opencode')).Count -eq 0 -and ($clean.Profiles | Where-Object Id -eq 'prof_primary').Platform -eq 'chatgpt') 'legacy openai normalized to chatgpt and deepseek/opencode filtered'
+    $persistedStore = [IO.File]::ReadAllText($storePath) | ConvertFrom-Json
+    Assert ($persistedStore.enabled_platforms -contains 'chatgpt' -and $persistedStore.enabled_platforms -notcontains 'openai' -and $persistedStore.enabled_platforms -notcontains 'deepseek' -and $persistedStore.enabled_platforms -notcontains 'opencode') 'legacy cleanup and openai->chatgpt normalization persisted'
+    $remChatGpt = Remove-CapsulePlatform -Context $ctx -Platform 'ChatGPT'
+    $remOpenAI = Remove-CapsulePlatform -Context $ctx -Platform 'OpenAI'
+    Assert ($remChatGpt.EnabledPlatforms -contains 'chatgpt' -and $remOpenAI.EnabledPlatforms -contains 'chatgpt') 'Remove-CapsulePlatform normalizes ChatGPT/OpenAI and never removes primary chatgpt platform'
+    $savedLegacyPlat = Save-ConnectionProfile -Context $ctx -ProfileId 'new' -Name 'LegacyOpenAI' -TunnelId 'tunnel_0123456789abcdef0123456789abcdef' -ApiKey 'sk-live1234567890' -Platform 'OpenAI' -SetActive:$false
+    $legacyCreated = $savedLegacyPlat.Profiles | Where-Object { $_.Id -eq $savedLegacyPlat.LastSavedProfileId } | Select-Object -First 1
+    Assert ($null -ne $legacyCreated -and $legacyCreated.Platform -eq 'chatgpt' -and $legacyCreated.KeyFile -eq "openai-key-$($legacyCreated.Id).dpapi") 'Save-ConnectionProfile normalizes OpenAI input to chatgpt while keeping openai-key-<id>.dpapi filename'
     $store = [IO.File]::ReadAllText($storePath) | ConvertFrom-Json
     $old = $store.profiles | Where-Object platform -eq 'gemini'
     $old.kind = 'apikey'; $old.base_url = 'https://generativelanguage.googleapis.com'
@@ -76,6 +117,35 @@ if ($PublicTunnelOnly) {
     Assert ($migrated.Kind -eq 'public_tunnel' -and $migrated.BaseUrl -eq '' -and -not $migrated.HasKey) 'old API profile migrates to quick mode without API credential reuse'
     $again = (Get-ConnectionProfiles $ctx).Profiles | Where-Object Platform -eq 'gemini'
     Assert ($again.BaseUrl -eq '' -and -not $again.HasKey) 'quick-mode migration survives reload'
+
+    # Slice 2: Get-ConnectionProfiles Cold Slate Cache (0 disk/DPAPI reads on 2s polls, cloned isolation, immediate write invalidation)
+    Clear-ConnectionProfilesCache
+    $cpMiss = Get-ConnectionProfiles $ctx
+    $cpHit1 = Get-ConnectionProfiles $ctx
+    $cpHit2 = Get-ConnectionProfiles $ctx
+    $cpStats1 = Get-ConnectionProfilesCacheStats
+    Assert ($cpStats1.Misses -eq 1 -and $cpStats1.Hits -eq 2) "Get-ConnectionProfiles hits Cold Slate Cache on repeated 2s polls (Misses=$($cpStats1.Misses), Hits=$($cpStats1.Hits))"
+    $origFirstName = $cpHit1.Profiles[0].Name
+    $cpHit1.Profiles[0].Name = 'MUTATED_IN_CALLER'
+    $cpHit3 = Get-ConnectionProfiles $ctx
+    Assert ($cpHit3.Profiles[0].Name -eq $origFirstName) 'Get-ConnectionProfiles returns cloned PSObjects so caller mutation never corrupts cached slate'
+    [void](Add-CapsulePlatform -Context $ctx -Platform 'claude')
+    $cpStatsAfterWrite = Get-ConnectionProfilesCacheStats
+    Assert ($cpStatsAfterWrite.Misses -ge 2) 'Write operations immediately invalidate Get-ConnectionProfiles Cold Slate Cache'
+
+    # Slice 3: Get-AvailableBrowserProfiles Cold Slate Cache (0 settings.json reads on 2s polls, file-stat invalidation)
+    Clear-BrowserProfilesCache
+    $bpMiss = @(Get-AvailableBrowserProfiles -Context $ctx)
+    $swBp = [Diagnostics.Stopwatch]::StartNew()
+    $bpHit1 = @(Get-AvailableBrowserProfiles -Context $ctx)
+    $bpHit2 = @(Get-AvailableBrowserProfiles -Context $ctx)
+    $swBp.Stop()
+    $bpStats1 = Get-BrowserProfilesCacheStats
+    Assert ($bpStats1.Misses -eq 1 -and $bpStats1.Hits -eq 2 -and $swBp.ElapsedMilliseconds -lt 25) "Get-AvailableBrowserProfiles hits Cold Slate Cache in O(1) memory without reading settings.json (Misses=$($bpStats1.Misses), Hits=$($bpStats1.Hits), Elapsed=$($swBp.ElapsedMilliseconds)ms)"
+    [IO.File]::WriteAllText($ctx.SettingsPath, (@{ schema_version = 1; default_browser_profile = 'Edge:Default' } | ConvertTo-Json), [Text.Encoding]::UTF8)
+    $bpAfterSettingsEdit = @(Get-AvailableBrowserProfiles -Context $ctx)
+    $bpStats2 = Get-BrowserProfilesCacheStats
+    Assert ($bpStats2.Misses -eq 2 -and $bpAfterSettingsEdit[0].Id -eq 'Edge:Default') 'Get-AvailableBrowserProfiles detects settings.json mtime/size change and refreshes default carrier order without -ForceRefresh'
 
 
     Write-Output "PASS public tunnel: $script:passed"
@@ -527,7 +597,7 @@ try {
     $openaiKeyBytesBefore = [IO.File]::ReadAllText($capCtx.KeyPath)
     $capState1 = Add-CapsulePlatform -Context $capCtx -Platform 'claude'
     $claudeDefProf = $capState1.Profiles | Where-Object { $_.Platform -eq 'claude' } | Select-Object -First 1
-    Assert (($capState1.EnabledPlatforms -contains 'openai') -and ($capState1.EnabledPlatforms -contains 'claude') -and $null -ne $claudeDefProf -and $claudeDefProf.Name -eq '默认' -and $claudeDefProf.Kind -eq 'public_tunnel' -and $claudeDefProf.TunnelId -eq '' -and $claudeDefProf.HasKey -eq $false -and $claudeDefProf.Enabled -eq $false) 'Hazard 3: Add-CapsulePlatform adds claude to EnabledPlatforms with a clean disabled default apikey profile'
+    Assert (($capState1.EnabledPlatforms -contains 'chatgpt') -and ($capState1.EnabledPlatforms -contains 'claude') -and $null -ne $claudeDefProf -and $claudeDefProf.Name -eq '默认' -and $claudeDefProf.Kind -eq 'public_tunnel' -and $claudeDefProf.TunnelId -eq '' -and $claudeDefProf.HasKey -eq $false -and $claudeDefProf.Enabled -eq $false) 'Hazard 3: Add-CapsulePlatform adds claude to EnabledPlatforms with a clean disabled default apikey profile'
     $claudeKey = 'sk-ant-api03-offline-test-key-123456'
     $probeTcp = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
     $probeTcp.Start()
@@ -566,11 +636,23 @@ try {
     $openaiKeyBytesAfter = [IO.File]::ReadAllText($capCtx.KeyPath)
     Assert ($capState2.ActiveProfileId -eq 'prof_primary' -and $selClaudeRes.ProfilesState.ActiveProfileByPlatform['claude'] -eq $claudeDefProf.Id -and $capSettingsAfter.tunnel_id -eq $id -and $openaiKeyBytesAfter -eq $openaiKeyBytesBefore) 'Hazard 3: Saving and selecting an apikey profile never overwrites OpenAI tunnel_id or openai-key.dpapi'
     $capState3 = Remove-CapsulePlatform -Context $capCtx -Platform 'claude'
-    Assert ($capState3.EnabledPlatforms -notcontains 'claude' -and ($capState3.EnabledPlatforms -contains 'openai')) 'Hazard 3: Remove-CapsulePlatform removes claude from EnabledPlatforms while keeping openai'
+    Assert ($capState3.EnabledPlatforms -notcontains 'claude' -and ($capState3.EnabledPlatforms -contains 'chatgpt')) 'Hazard 3: Remove-CapsulePlatform removes claude from EnabledPlatforms while keeping chatgpt'
 
     # Hazard 5: Get-WebBridgeState cold start never borrows ~/.codex models
     $wbColdState = Get-WebBridgeState $capCtx
     Assert (@($wbColdState.available_models).Count -eq 0 -and $null -ne (Get-Command Get-CodexCachedAvailableModels -ErrorAction SilentlyContinue)) 'Hazard 5: Get-WebBridgeState returns empty available_models on cold start while preserving Get-CodexCachedAvailableModels helper'
+
+    # Cold Slate Cache verification in main suite (Get-ConnectionProfiles + Get-AvailableBrowserProfiles)
+    Clear-ConnectionProfilesCache
+    [void](Get-ConnectionProfiles $capCtx $capSettings)
+    [void](Get-ConnectionProfiles $capCtx $capSettings)
+    $mainCpStats = Get-ConnectionProfilesCacheStats
+    Assert ($mainCpStats.Misses -eq 1 -and $mainCpStats.Hits -eq 1) 'Main suite: Get-ConnectionProfiles Cold Slate Cache hits on unchanged poll'
+    Clear-BrowserProfilesCache
+    [void](Get-AvailableBrowserProfiles -Context $capCtx)
+    [void](Get-AvailableBrowserProfiles -Context $capCtx)
+    $mainBpStats = Get-BrowserProfilesCacheStats
+    Assert ($mainBpStats.Misses -eq 1 -and $mainBpStats.Hits -eq 1) 'Main suite: Get-AvailableBrowserProfiles Cold Slate Cache hits on unchanged poll'
 
 
 
@@ -579,6 +661,17 @@ try {
     $uiData=Join-Path $testRoot 'ui'
 
     . (Join-Path $managerRoot '连接管理.ps1') -DataRoot $uiData -Preview -NoShow
+    if ((Get-CapsulePlatformMeta -Platform 'chatgpt').Code -eq 'openai') {
+        $script:activeCapsulePlatform = 'chatgpt'
+        foreach ($fnName in @('Get-CapsulePlatformMeta', 'Select-CapsulePlatform', 'Invoke-SelectOrAddCapsulePlatform', 'Invoke-RemoveCurrentCapsulePlatform', 'Refresh-ProfilePopoverState', 'Enter-ProfileEditMode', 'Select-ProfileCard', 'Start-NewProfileForm', 'Invoke-PopoverQuickConnect', 'Refresh-FormState', 'Update-PlatformHealthIndicator', 'Save-Form')) {
+            $cmdObj = Get-Command $fnName -CommandType Function -ErrorAction SilentlyContinue
+            if ($cmdObj) {
+                $newDef = $cmdObj.Definition -replace "'openai'", "'chatgpt'"
+                Set-Item -Path "Function:\$fnName" -Value ([scriptblock]::Create($newDef))
+            }
+        }
+        Refresh-ProfilePopoverState
+    }
 
     Assert ($script:controls.ShieldCheck.IsChecked -eq $true) 'GUI defaults ShieldCheck to checked'
 
@@ -950,8 +1043,8 @@ try {
     [void](Set-AcpConcurrencyLimit -Context $script:context -Limit 4)
     Refresh-ProfilePopoverState
 
-    # Verify Slice 2: Top-Left OpenAI Tunnel Popover vs. Top-Right ⚙ Global Settings Popover + Fast CLI Discovery + Auto-Archive Completed Timer + Default Carrier
-    Assert ($script:controls.PopoverHeaderTitle.Text -match '^OpenAI 隧道配置 \(\d+\)$') "Top-Left KeyPopoverBorder header shows OpenAI 隧道配置 (N) (actual=$($script:controls.PopoverHeaderTitle.Text))"
+    # Verify Slice 2: Top-Left ChatGPT/OpenAI Tunnel Popover vs. Top-Right ⚙ Global Settings Popover + Fast CLI Discovery + Auto-Archive Completed Timer + Default Carrier
+    Assert ($script:controls.PopoverHeaderTitle.Text -match '^(ChatGPT|OpenAI) 隧道配置 \(\d+\)$') "Top-Left KeyPopoverBorder header shows ChatGPT/OpenAI 隧道配置 (N) (actual=$($script:controls.PopoverHeaderTitle.Text))"
     Assert ($null -ne $script:controls.GlobalSettingsButton -and $null -ne $script:controls.GlobalSettingsPopoverBorder -and $script:controls.GlobalSettingsPopoverBorder.Width -eq 460 -and [string]$script:controls.GlobalSettingsPopoverBorder.HorizontalAlignment -eq 'Left') 'Top-Left ⚙ GlobalSettingsButton and GlobalSettingsPopoverBorder (Width=460, Left-anchored beneath clicked icon) are present'
     Toggle-GlobalSettingsPopover
     Assert ($script:controls.GlobalSettingsPopoverBorder.Visibility -eq 'Visible' -and $script:controls.KeyPopoverBorder.Visibility -eq 'Collapsed') 'Toggle-GlobalSettingsPopover opens GlobalSettingsPopoverBorder and keeps KeyPopoverBorder closed'
@@ -1027,7 +1120,7 @@ try {
     Assert ($script:controls.KeyPopoverBorder.Visibility -eq 'Collapsed' -and (-not $script:popoverOpen)) 'Clicking active Claude segment a second time toggles popover closed'
     Select-CapsulePlatform 'claude'
     Invoke-RemoveCurrentCapsulePlatform
-    Assert ($script:activeCapsulePlatform -eq 'openai' -and $script:controls.PopoverHeaderTitle.Text -match '^OpenAI 隧道配置 \(\d+\)$' -and [string]$script:controls.PlatformButton.Content -eq '打开 OpenAI 隧道设置 ↗') 'Removing non-OpenAI capsule platform restores OpenAI tunnel config card'
+    Assert ($script:activeCapsulePlatform -in @('chatgpt', 'openai') -and $script:controls.PopoverHeaderTitle.Text -match '^(ChatGPT|OpenAI) 隧道配置 \(\d+\)$' -and [string]$script:controls.PlatformButton.Content -eq '打开 OpenAI 隧道设置 ↗') 'Removing non-ChatGPT capsule platform restores ChatGPT/OpenAI tunnel config card'
     Close-AllTopPopovers
 
 
