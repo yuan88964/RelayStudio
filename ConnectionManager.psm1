@@ -2121,6 +2121,58 @@ function Get-WebRoomUrl {
     }
 }
 
+function Format-RelayLandingUrl {
+    param(
+        [string]$BaseUrl = '',
+        [string]$Provider = '',
+        [string]$ProjectPrefix = ''
+    )
+    if (-not $BaseUrl) {
+        if ($Provider) {
+            $BaseUrl = Get-WebRoomUrl -Record ([pscustomobject]@{ provider = $Provider }) -ProjectPrefix $ProjectPrefix
+        } else {
+            $BaseUrl = 'https://chatgpt.com'
+        }
+    }
+    $clean = ([string]$BaseUrl).Trim().TrimEnd('/')
+    if (-not $clean) { return 'https://chatgpt.com/' }
+    if ($clean -match '^https://chatgpt\.com$' -or $clean -match '/g/g-p-[a-zA-Z0-9_-]+$') {
+        return "$clean/"
+    }
+    return $clean
+}
+
+function Format-RelayHandoverUrl {
+    param(
+        [string]$BaseUrl = '',
+        [string]$MsgId = '',
+        [string]$ModelSlug = '',
+        [string]$BrowserProfile = '',
+        [string]$Provider = '',
+        [string]$SessionKey = '',
+        [string]$TargetModel = ''
+    )
+    if (-not $BaseUrl) {
+        if ($Provider) {
+            $BaseUrl = Get-WebRoomUrl -Record ([pscustomobject]@{ provider = $Provider })
+        } else {
+            $BaseUrl = 'https://chatgpt.com'
+        }
+    }
+    $prefix = Format-RelayLandingUrl $BaseUrl
+    $effModel = if ($ModelSlug) { $ModelSlug } elseif ($TargetModel -and $TargetModel -notin @('inherit', 'auto')) { $TargetModel } else { '' }
+    $qs = New-Object 'System.Collections.Generic.List[string]'
+    if ($effModel -and -not $MsgId -and $SessionKey) {
+        $qs.Add("model=$effModel")
+    }
+    $qs.Add('relay_handover=1')
+    if ($MsgId) { $qs.Add("msg_id=$MsgId") }
+    if ($SessionKey) { $qs.Add("session_key=$SessionKey") }
+    if ($effModel -and ($MsgId -or -not $SessionKey)) { $qs.Add("model=$effModel") }
+    if ($BrowserProfile) { $qs.Add('relay_profile=' + [Uri]::EscapeDataString($BrowserProfile)) }
+    return "$($prefix)?" + ($qs -join '&')
+}
+
 function Get-VerifiedBindingConvUuid {
     param($State, $Binding, [string]$WfrId = '')
     if (-not $Binding -or -not $Binding.PSObject.Properties['conv_uuid'] -or -not $Binding.conv_uuid) { return '' }
@@ -2317,6 +2369,7 @@ function Open-SessionWebPage {
     param(
         $Context,
         $Session,
+        [string]$Provider = '',
         [switch]$NoLaunchBrowser,
         [switch]$RequireBoundConversation
     )
@@ -2325,6 +2378,11 @@ function Open-SessionWebPage {
     $wfrId = if ($Session.PSObject.Properties['WfrId'] -and $Session.WfrId) { [string]$Session.WfrId } else { '' }
     $sTitle = if ($Session.PSObject.Properties['ShortTitle'] -and $Session.ShortTitle) { [string]$Session.ShortTitle } elseif ($Session.PSObject.Properties['Title']) { [string]$Session.Title } else { '' }
     $sessProf = if ($Session.PSObject.Properties['BrowserProfile'] -and $Session.BrowserProfile) { Resolve-RelayBrowserProfile ([string]$Session.BrowserProfile) $Context } else { '' }
+    $effProvider = if ($Provider) {
+        Resolve-CanonicalPlatform $Provider
+    } elseif ($Session.PSObject.Properties['Provider'] -and $Session.Provider) {
+        Resolve-CanonicalPlatform ([string]$Session.Provider)
+    } else { '' }
     $doForegroundLaunch = (-not $NoLaunchBrowser) -and (-not $Context.Isolated)
     # Only a real foreground launch is verified against the screen; isolated / no-launch runs report $true.
     $windowOk = $true
@@ -2335,6 +2393,9 @@ function Open-SessionWebPage {
         title = $sTitle
         require_bound = [bool]$RequireBoundConversation
         no_launch = $true
+    }
+    if ($effProvider) {
+        $hubPayload['provider'] = $effProvider
     }
     if ($sessProf) {
         $hubPayload['browser_profile'] = $sessProf
@@ -2386,6 +2447,10 @@ function Open-SessionWebPage {
     $bEntry = if ($state.session_bindings -and $state.session_bindings.PSObject.Properties[$sKey]) {
         $state.session_bindings.$sKey
     } else { $null }
+    if ($bEntry -and $effProvider) {
+        $bEntry | Add-Member -NotePropertyName 'provider' -NotePropertyValue $effProvider -Force
+    }
+    $recordForUrl = if ($bEntry) { $bEntry } elseif ($effProvider) { [pscustomobject]@{ provider = $effProvider } } else { $null }
 
     $retiredUuids = @(if ($bEntry -and $bEntry.PSObject.Properties['retired_uuids'] -and $bEntry.retired_uuids) { @($bEntry.retired_uuids) })
     $projPrefix = if ($bEntry -and $bEntry.PSObject.Properties['project_prefix'] -and $bEntry.project_prefix) { ([string]$bEntry.project_prefix).TrimEnd('/') } else { '' }
@@ -2411,9 +2476,8 @@ function Open-SessionWebPage {
                     if ($qm.PSObject.Properties[$tf] -and $qm.$tf) { $sessionTabIds[[string]$qm.$tf] = $true }
                 }
                 if (-not $convUuid -and $qm.PSObject.Properties['mode'] -and [string]$qm.mode -eq 'new_window_handover' -and [string]$qm.status -in @('pending', 'claimed') -and $qm.PSObject.Properties['id'] -and $qm.id) {
-                    $baseU = Get-WebRoomUrl -Record $bEntry -ProjectPrefix $projPrefix
-                    $profQs = if ($browserProf) { '&relay_profile=' + [Uri]::EscapeDataString($browserProf) } else { '' }
-                    $latestOfflineHandoverUrl = "$baseU/?relay_handover=1&msg_id=$([string]$qm.id)$profQs"
+                    $baseU = Get-WebRoomUrl -Record $recordForUrl -ProjectPrefix $projPrefix
+                    $latestOfflineHandoverUrl = Format-RelayHandoverUrl -BaseUrl $baseU -MsgId ([string]$qm.id) -BrowserProfile $browserProf
                 }
             }
         }
@@ -2569,10 +2633,11 @@ function Open-SessionWebPage {
         }
     }
 
-    $baseUrl = Get-WebRoomUrl -Record $bEntry -ProjectPrefix $projPrefix
+    $baseUrl = Get-WebRoomUrl -Record $recordForUrl -ProjectPrefix $projPrefix
+    $landingUrl = Format-RelayLandingUrl $baseUrl
     if ($matchedLiveTab) {
         $targetTabId = [string]$matchedLiveTab.tab_id
-        $resolvedTabUrl = if ($matchedLiveTab.PSObject.Properties['url'] -and $matchedLiveTab.url -and $matchedLiveTab.url -match '/c/') { [string]$matchedLiveTab.url } elseif ($convUuid) { (Get-WebRoomUrl -Record $bEntry -Room $convUuid -ProjectPrefix $projPrefix) } elseif ($latestOfflineHandoverUrl) { $latestOfflineHandoverUrl } else { "$baseUrl/" }
+        $resolvedTabUrl = if ($matchedLiveTab.PSObject.Properties['url'] -and $matchedLiveTab.url -and $matchedLiveTab.url -match '/(c|app|chat)/') { [string]$matchedLiveTab.url } elseif ($convUuid) { (Get-WebRoomUrl -Record $recordForUrl -Room $convUuid -ProjectPrefix $projPrefix) } elseif ($latestOfflineHandoverUrl) { $latestOfflineHandoverUrl } else { $landingUrl }
         $bName = if (($matchedLiveTab.PSObject.Properties['browser'] -and $matchedLiveTab.browser -eq 'Edge') -or $browserProf -match '^Edge:') { 'msedge' } else { 'chrome' }
         $state | Add-Member -NotePropertyName 'focus_tab_id' -NotePropertyValue $targetTabId -Force
         Save-WebBridgeState $Context $state
@@ -2601,7 +2666,7 @@ function Open-SessionWebPage {
         }
     }
 
-    $targetUrl = if ($convUuid) { (Get-WebRoomUrl -Record $bEntry -Room $convUuid -ProjectPrefix $projPrefix) } elseif ($latestOfflineHandoverUrl) { $latestOfflineHandoverUrl } else { "$baseUrl/" }
+    $targetUrl = if ($convUuid) { (Get-WebRoomUrl -Record $recordForUrl -Room $convUuid -ProjectPrefix $projPrefix) } elseif ($latestOfflineHandoverUrl) { $latestOfflineHandoverUrl } else { $landingUrl }
     if ($doForegroundLaunch) {
         $windowOk = [bool](Open-BridgeHandoverWindow -Url $targetUrl -BrowserProfile $browserProf -Context $Context)
     }
@@ -2979,7 +3044,9 @@ function Set-SessionBridgeBinding {
         [string]$TargetMode = '',
         [string]$ProjectPrefix = '',
         [string]$TargetModel = '',
-        [string]$ReasoningEffort = ''
+        [string]$Provider = '',
+        [string]$ReasoningEffort = '',
+        [hashtable]$CarrierByProvider = $null
     )
     if (-not $SessionKey) { return $null }
     $fwd = @{
@@ -2987,7 +3054,7 @@ function Set-SessionBridgeBinding {
         SessionKey = $SessionKey
         HubAction = 'bind_session'
     }
-    foreach ($k in @('ConvUuid','TabId','Title','BrowserProfile','TargetMode','ProjectPrefix','TargetModel','ReasoningEffort')) {
+    foreach ($k in @('ConvUuid','TabId','Title','BrowserProfile','TargetMode','ProjectPrefix','TargetModel','Provider','ReasoningEffort','CarrierByProvider')) {
         if ($PSBoundParameters.ContainsKey($k)) { $fwd[$k] = $PSBoundParameters[$k] }
     }
     $res = Set-TaskComposerConfig @fwd
@@ -3004,6 +3071,7 @@ function Set-TaskComposerConfig {
         [string]$TargetModel = '',
         [string]$Provider = '',
         [string]$ReasoningEffort = '',
+        [hashtable]$CarrierByProvider = $null,
         $AutoResendEnabled = $null,
         [int]$StallSeconds = 0,
         [double]$StallMinutes = 0,
@@ -3024,6 +3092,19 @@ function Set-TaskComposerConfig {
     if ($Provider) {
         $Provider = Resolve-CanonicalPlatform $Provider
         $payload['provider'] = $Provider
+    }
+    if ($CarrierByProvider -and $CarrierByProvider.Count -gt 0) {
+        $normCbpPayload = @{}
+        foreach ($ck in @($CarrierByProvider.Keys)) {
+            $cv = [string]$CarrierByProvider[$ck]
+            if (-not $cv) { continue }
+            $cpk = Resolve-CanonicalPlatform ([string]$ck)
+            if ($cpk -in @('gemini', 'claude') -and $cv -like 'Desktop:*') { continue }
+            $normCbpPayload[$cpk] = $cv
+        }
+        if ($normCbpPayload.Count -gt 0) {
+            $payload['carrier_by_provider'] = $normCbpPayload
+        }
     }
     if ($TargetModel) { $payload['target_model'] = $TargetModel }
     if ($ReasoningEffort) { $payload['reasoning_effort'] = $ReasoningEffort }
@@ -3066,11 +3147,75 @@ function Set-TaskComposerConfig {
         }
     }
 
+    $prevProvider = if ($existing) { Get-WebRoomProvider $existing } else { 'chatgpt' }
+    $effProvider = if ($Provider) { Resolve-CanonicalPlatform $Provider } else { $prevProvider }
+    $cbpMap = [ordered]@{}
+    if ($existing -and $existing.PSObject.Properties['carrier_by_provider'] -and $existing.carrier_by_provider) {
+        if ($existing.carrier_by_provider -is [System.Collections.IDictionary]) {
+            foreach ($ek in @($existing.carrier_by_provider.Keys)) {
+                $ev = [string]$existing.carrier_by_provider[$ek]
+                $epk = Resolve-CanonicalPlatform ([string]$ek)
+                if ($ev -and -not ($epk -in @('gemini', 'claude') -and $ev -like 'Desktop:*')) {
+                    $cbpMap[$epk] = $ev
+                }
+            }
+        } else {
+            foreach ($ep in $existing.carrier_by_provider.PSObject.Properties) {
+                $ev = [string]$ep.Value
+                $epk = Resolve-CanonicalPlatform ([string]$ep.Name)
+                if ($ev -and -not ($epk -in @('gemini', 'claude') -and $ev -like 'Desktop:*')) {
+                    $cbpMap[$epk] = $ev
+                }
+            }
+        }
+    }
+    if ($oldProfile -and -not ($prevProvider -in @('gemini', 'claude') -and $oldProfile -like 'Desktop:*')) {
+        $cbpMap[$prevProvider] = $oldProfile
+    }
+    if ($CarrierByProvider -and $CarrierByProvider.Count -gt 0) {
+        foreach ($ck in @($CarrierByProvider.Keys)) {
+            $cv = [string]$CarrierByProvider[$ck]
+            $cpk = Resolve-CanonicalPlatform ([string]$ck)
+            if ($cv -and -not ($cpk -in @('gemini', 'claude') -and $cv -like 'Desktop:*')) {
+                $cbpMap[$cpk] = $cv
+            }
+        }
+    }
+    if ($BrowserProfile -like 'Desktop:*' -and ($prevProvider -eq 'chatgpt' -or -not $cbpMap.Contains('chatgpt'))) {
+        $cbpMap['chatgpt'] = $BrowserProfile
+    }
     $resolvedConvUuid = if ($PSBoundParameters.ContainsKey('ConvUuid')) { $ConvUuid } else { $oldUuid }
     $resolvedTabId = if ($PSBoundParameters.ContainsKey('TabId')) { $TabId } elseif ($existing -and $existing.PSObject.Properties['tab_id']) { [string]$existing.tab_id } else { '' }
     $resolvedTitle = if ($PSBoundParameters.ContainsKey('Title')) { $Title } elseif ($existing -and $existing.PSObject.Properties['title']) { [string]$existing.title } else { '' }
-    $resolvedProfile = if ($BrowserProfile) { $BrowserProfile } else { $oldProfile }
-    $resolvedLocked = if ($BrowserProfile) { $true } else { $oldLocked }
+    $explicitValidProf = $false
+    if ($BrowserProfile) {
+        if ($effProvider -in @('gemini', 'claude') -and $BrowserProfile -like 'Desktop:*') {
+            if ($cbpMap.Contains($effProvider) -and $cbpMap[$effProvider] -and $cbpMap[$effProvider] -notlike 'Desktop:*') {
+                $resolvedProfile = [string]$cbpMap[$effProvider]
+            } elseif ($oldProfile -and $oldProfile -notlike 'Desktop:*') {
+                $resolvedProfile = $oldProfile
+            } else {
+                $defP = Resolve-RelayBrowserProfile '' $Context
+                $resolvedProfile = if ($defP -and $defP -notlike 'Desktop:*') { $defP } else { 'Chrome:Default' }
+            }
+        } else {
+            $resolvedProfile = $BrowserProfile
+            $explicitValidProf = $true
+        }
+    } elseif ($effProvider -ne $prevProvider -or ($effProvider -in @('gemini', 'claude') -and $oldProfile -like 'Desktop:*')) {
+        if ($cbpMap.Contains($effProvider) -and $cbpMap[$effProvider] -and -not ($effProvider -in @('gemini', 'claude') -and $cbpMap[$effProvider] -like 'Desktop:*')) {
+            $resolvedProfile = [string]$cbpMap[$effProvider]
+        } elseif ($oldProfile -and -not ($effProvider -in @('gemini', 'claude') -and $oldProfile -like 'Desktop:*')) {
+            $resolvedProfile = $oldProfile
+        } else {
+            $defP = Resolve-RelayBrowserProfile '' $Context
+            $resolvedProfile = if ($defP -and -not ($effProvider -in @('gemini', 'claude') -and $defP -like 'Desktop:*')) { $defP } else { 'Chrome:Default' }
+        }
+    } else {
+        $resolvedProfile = $oldProfile
+    }
+    $cbpMap[$effProvider] = $resolvedProfile
+    $resolvedLocked = if ($explicitValidProf) { $true } else { $oldLocked }
     $resolvedProjPrefix = if ($PSBoundParameters.ContainsKey('ProjectPrefix') -and $ProjectPrefix) {
         $ProjectPrefix.TrimEnd('/')
     } elseif ($existing -and $existing.PSObject.Properties['project_prefix'] -and $existing.project_prefix) {
@@ -3149,11 +3294,14 @@ function Set-TaskComposerConfig {
     $lastLiveEffort = if ($existing -and $existing.PSObject.Properties['last_live_effort'] -and $existing.last_live_effort) { [string]$existing.last_live_effort } else { '' }
 
     $newBinding = [pscustomobject]@{
+        provider = $effProvider
         conv_uuid = $resolvedConvUuid
         tab_id = $resolvedTabId
         title = $resolvedTitle
         browser = ($resolvedProfile -split ':')[0]
         browser_profile = $resolvedProfile
+        carrier = $resolvedProfile
+        carrier_by_provider = [pscustomobject]$cbpMap
         user_locked_browser = $resolvedLocked
         target_mode = $resolvedMode
         target_model = $resolvedModel
@@ -3379,6 +3527,7 @@ function Send-WebBridgeMessage {
         [string]$CustomUserText = '',
         [string]$BrowserProfile = '',
         [string]$TargetModel = '',
+        [string]$Provider = '',
         [string]$ReasoningEffort = '',
         [switch]$DeferUntilStopped,
         [switch]$StopAndRetire,
@@ -3415,6 +3564,12 @@ function Send-WebBridgeMessage {
         open_browser = [bool]($OpenBrowserOnHandover -and (-not $DeferUntilStopped) -and (-not $Context.Isolated))
         is_single_pane_replace = [bool]$IsSinglePaneReplace
     }
+    $effMsgProvider = if ($Provider) {
+        Resolve-CanonicalPlatform $Provider
+    } elseif ($Session.PSObject.Properties['Provider'] -and $Session.Provider) {
+        Resolve-CanonicalPlatform ([string]$Session.Provider)
+    } else { '' }
+    if ($effMsgProvider) { $hubPayload['provider'] = $effMsgProvider }
     if ($BrowserProfile) { $hubPayload['browser_profile'] = $BrowserProfile }
     if ($TargetModel) { $hubPayload['target_model'] = $TargetModel }
     if ($ReasoningEffort) { $hubPayload['reasoning_effort'] = $ReasoningEffort }
@@ -3456,6 +3611,10 @@ function Send-WebBridgeMessage {
     $bEntry = if ($state.session_bindings -and $state.session_bindings.PSObject.Properties[$Session.SessionKey]) {
         $state.session_bindings.$($Session.SessionKey)
     } else { $null }
+    if ($bEntry -and $effMsgProvider) {
+        $bEntry | Add-Member -NotePropertyName 'provider' -NotePropertyValue $effMsgProvider -Force
+    }
+    $recordForMsgUrl = if ($bEntry) { $bEntry } elseif ($effMsgProvider) { [pscustomobject]@{ provider = $effMsgProvider } } else { $null }
     $browserProf = if ($BrowserProfile) { Resolve-RelayBrowserProfile $BrowserProfile $Context } elseif ($bEntry -and $bEntry.PSObject.Properties['browser_profile'] -and $bEntry.browser_profile) { Resolve-RelayBrowserProfile ([string]$bEntry.browser_profile) $Context } else { Resolve-RelayBrowserProfile '' $Context }
     $projPrefix = if ($bEntry -and $bEntry.PSObject.Properties['project_prefix'] -and $bEntry.project_prefix) { ([string]$bEntry.project_prefix).TrimEnd('/') } else { '' }
     $effModel = if ($TargetModel) { $TargetModel } elseif ($bEntry -and $bEntry.PSObject.Properties['target_model'] -and $bEntry.target_model) { [string]$bEntry.target_model } else { 'inherit' }
@@ -3642,16 +3801,13 @@ function Send-WebBridgeMessage {
     }
 
     $msgId = 'msg_' + [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() + '_' + [Guid]::NewGuid().ToString('N').Substring(0, 4)
-    $baseUrl = Get-WebRoomUrl -Record $bEntry -ProjectPrefix $projPrefix
-    $handoverUrl = "$baseUrl/?relay_handover=1&msg_id=$msgId"
-    if ($modelSlug) {
-        $handoverUrl += "&model=$modelSlug"
-    }
+    $baseUrl = Get-WebRoomUrl -Record $recordForMsgUrl -ProjectPrefix $projPrefix
+    $handoverUrl = Format-RelayHandoverUrl -BaseUrl $baseUrl -MsgId $msgId -ModelSlug $modelSlug
 
     $effDefer = [bool]($DeferUntilStopped -and [string]$Session.SessionKey -ne '__new_task__')
     $newItem = [pscustomobject]@{
         id = $msgId
-        provider = (Get-WebRoomProvider $bEntry)
+        provider = (Get-WebRoomProvider $recordForMsgUrl)
         session_key = [string]$Session.SessionKey
         wfr_id = $wfrId
         conv_uuid = $(if ($Mode -eq 'new_window_handover') { '' } else { $convUuid })
@@ -6190,21 +6346,49 @@ function Resolve-NormalizedThemeMode {
     return 'system'
 }
 
+$script:cachedSystemThemeDark = $false
+$script:cachedSystemThemePref = ''
+$script:cachedSystemThemeAtUtc = $null
+
 function Get-SystemThemePreference {
-    param([Nullable[int]]$RegistryValue = $null)
+    param(
+        [Nullable[int]]$RegistryValue = $null,
+        [scriptblock]$RegistryProbe = $null,
+        [switch]$ResetCache
+    )
+    if ($ResetCache) {
+        $script:cachedSystemThemeDark = $false
+        $script:cachedSystemThemePref = ''
+        $script:cachedSystemThemeAtUtc = $null
+    }
     if ($null -ne $RegistryValue) {
         return $(if ([int]$RegistryValue -eq 0) { 'dark' } else { 'light' })
     }
+    $nowUtc = [DateTime]::UtcNow
+    if ($script:cachedSystemThemePref -and $null -ne $script:cachedSystemThemeAtUtc -and (($nowUtc - $script:cachedSystemThemeAtUtc).TotalSeconds -lt 10.0)) {
+        return $script:cachedSystemThemePref
+    }
+    $resolvedPref = 'light'
     try {
-        $regPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize'
-        if (Test-Path -LiteralPath $regPath) {
-            $prop = Get-ItemProperty -LiteralPath $regPath -Name 'AppsUseLightTheme' -ErrorAction SilentlyContinue
-            if ($null -ne $prop -and $prop.PSObject.Properties.Name -contains 'AppsUseLightTheme') {
-                return $(if ([int]$prop.AppsUseLightTheme -eq 0) { 'dark' } else { 'light' })
+        if ($null -ne $RegistryProbe) {
+            $probeVal = & $RegistryProbe
+            if ($null -ne $probeVal) {
+                $resolvedPref = $(if ([int]$probeVal -eq 0) { 'dark' } else { 'light' })
+            }
+        } else {
+            $regPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize'
+            if (Test-Path -LiteralPath $regPath) {
+                $prop = Get-ItemProperty -LiteralPath $regPath -Name 'AppsUseLightTheme' -ErrorAction SilentlyContinue
+                if ($null -ne $prop -and $prop.PSObject.Properties.Name -contains 'AppsUseLightTheme') {
+                    $resolvedPref = $(if ([int]$prop.AppsUseLightTheme -eq 0) { 'dark' } else { 'light' })
+                }
             }
         }
     } catch {}
-    return 'light'
+    $script:cachedSystemThemePref = $resolvedPref
+    $script:cachedSystemThemeDark = ($resolvedPref -eq 'dark')
+    $script:cachedSystemThemeAtUtc = $nowUtc
+    return $resolvedPref
 }
 
 function Resolve-EffectiveTheme {

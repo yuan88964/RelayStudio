@@ -1,5 +1,5 @@
-﻿# Offline WPF contract test for per-model reasoning effort selection.
-# Usage: pwsh -NoProfile -Sta -File tests/Test-ReasoningEffort.ps1
+﻿# Offline WPF contract test for per-model reasoning effort selection & Ticket 06 multi-platform composer linkage.
+# Usage: powershell.exe -NoProfile -Sta -File tests/Test-ReasoningEffort.ps1
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName PresentationFramework
 
@@ -10,15 +10,32 @@ $end = $source.IndexOf('function Build-PlanBComposerPod(', $start)
 if ($start -lt 0 -or $end -le $start) { throw 'Unable to find composer public UI synchronization seam' }
 . ([scriptblock]::Create($source.Substring($start, $end - $start)))
 
-$script:context = [pscustomobject]@{ TestOnly = $true }
+$script:context = [pscustomobject]@{ TestOnly = $true; Isolated = $true }
 $script:suppressComposerEvents = $false
 $script:saved = [System.Collections.Generic.List[object]]::new()
 $script:passed = 0
 
 # Capture persistence at the public UI->config seam; never open production files.
 function Set-TaskComposerConfig {
-    param($Context, [string]$SessionKey, [string]$ReasoningEffort)
-    $script:saved.Add([pscustomobject]@{ session_key = $SessionKey; reasoning_effort = $ReasoningEffort })
+    param(
+        $Context,
+        [string]$SessionKey,
+        [string]$TargetMode = '',
+        [string]$BrowserProfile = '',
+        [string]$TargetModel = '',
+        [string]$ReasoningEffort = '',
+        [string]$Provider = '',
+        [hashtable]$CarrierByProvider = $null
+    )
+    $script:saved.Add([pscustomobject]@{
+        session_key = $SessionKey
+        target_mode = $TargetMode
+        browser_profile = $BrowserProfile
+        target_model = $TargetModel
+        reasoning_effort = $ReasoningEffort
+        provider = $Provider
+        carrier_by_provider = $CarrierByProvider
+    })
     return [pscustomobject]@{ ok = $true }
 }
 function Assert-Case([bool]$Condition, [string]$Label) {
@@ -32,8 +49,15 @@ function Make-State([string]$TaskKey = 'offline_reasoning_test') {
         Session = [pscustomobject]@{ ReasoningEffort = 'inherit' }
         ModelCombo = [Windows.Controls.ComboBox]::new()
         EffortCombo = [Windows.Controls.ComboBox]::new()
+        ProfCombo = [Windows.Controls.ComboBox]::new()
         LastCatalogSig = ''
         AvailableModels = @()
+        Provider = 'chatgpt'
+        ConnectedProviders = $null
+        AvailableCarriers = @()
+        CollapsedProviders = @{}
+        CarrierByProvider = @{}
+        MutationEpoch = [DateTime]::MinValue
     }
 }
 function Get-Tags($Combo) { return @($Combo.Items | ForEach-Object { [string]$_.Tag }) }
@@ -58,6 +82,11 @@ $tags = Get-Tags $state.EffortCombo
 Assert-Case (($tags -join ',') -eq 'inherit,standard,max') 'Changing model removes unsupported light and extended choices'
 Assert-Case ([string]$state.EffortCombo.SelectedItem.Tag -eq 'inherit') 'Changing model resets unsupported selected effort to inherit'
 Assert-Case ($script:saved.Count -eq 1 -and $script:saved[0].reasoning_effort -eq 'inherit' -and $script:saved[0].session_key -eq 'offline_reasoning_test' -and $state.Session.ReasoningEffort -eq 'inherit') 'Invalid effort reset persists to task config and session snapshot'
+
+# Background poll (-FromBackgroundPoll) must be strictly read-only and never write to Set-TaskComposerConfig
+$script:saved.Clear()
+Sync-ComposerModelAndEffortCombos -StateInfo $state -AvailModels $catalog -CurModel 'gpt-6-pro' -WebModel 'gpt-6-thinking' -CurEffort 'light' -WebEffort 'standard' -IsNarrow $false -FromBackgroundPoll
+Assert-Case ([string]$state.EffortCombo.SelectedItem.Tag -eq 'inherit' -and $script:saved.Count -eq 0) 'Sync-ComposerModelAndEffortCombos -FromBackgroundPoll normalizes unsupported effort in memory without triggering Set-TaskComposerConfig disk/HTTP write'
 
 $script:saved.Clear()
 Sync-Test $state $catalog 'gpt-6-pro' 'max' 'standard'
@@ -136,52 +165,113 @@ Sync-ComposerModelAndEffortCombos -StateInfo $coldState -AvailModels @() -CurMod
 Assert-Case ($coldState.ModelCombo.Items.Count -eq 1 -and [string]$coldState.ModelCombo.Items[0].Content -eq '🤖 默认 (跟随网页)' -and [string]$coldState.ModelCombo.Items[0].Tag -eq 'inherit') 'Cold start with no web models renders only a single 🤖 默认 (跟随网页) item in ModelCombo'
 Assert-Case ($coldState.EffortCombo.Items.Count -eq 1 -and [string]$coldState.EffortCombo.Items[0].Content -eq '🧠 默认 (跟随网页)' -and [string]$coldState.EffortCombo.Items[0].Tag -eq 'inherit') 'Cold start with no web models renders only a single 🧠 默认 (跟随网页) item in EffortCombo without fallback min/standard/extended/max tiers'
 
-# Multi-platform capsule grouping in ModelCombo
+# Multi-platform capsule grouping in ModelCombo (ChatGPT naming unification + default item under each group header + pure ▾/▸ folding)
 $script:profilesState = [pscustomobject]@{
     ActiveProfileId = 'prof_1'
     EnabledPlatforms = @('openai', 'claude')
-    ActiveProfileByPlatform = @{ openai = 'prof_1'; claude = 'prof_claude_1' }
+    ActiveProfileByPlatform = @{ chatgpt = 'prof_1'; claude = 'prof_claude_1' }
     Profiles = @(
         [pscustomobject]@{ Id = 'prof_1'; Name = '主力隧道'; Platform = 'openai'; Kind = 'tunnel'; TunnelId = 'ab12cd34'; HasKey = $true; Enabled = $true; IsActive = $true },
-        [pscustomobject]@{ Id = 'prof_claude_1'; Name = '默认'; Platform = 'claude'; Kind = 'apikey'; TunnelId = ''; HasKey = $false; Enabled = $false; IsActive = $true }
+        [pscustomobject]@{ Id = 'prof_claude_1'; Name = '默认'; Platform = 'claude'; Kind = 'public_tunnel'; TunnelId = ''; HasKey = $false; Enabled = $false; IsActive = $true }
     )
 }
 $multiPlatState = Make-State 'multi_platform_cold_start_test'
 Sync-ComposerModelAndEffortCombos -StateInfo $multiPlatState -AvailModels @() -CurModel 'inherit' -WebModel '' -CurEffort 'inherit' -WebEffort '' -IsNarrow $false
-$firstDefaultRef = $multiPlatState.ModelCombo.Items[0]
 $multiContents = @($multiPlatState.ModelCombo.Items | ForEach-Object { [string]$_.Content })
-$groupItems = @($multiPlatState.ModelCombo.Items | Where-Object { -not $_.IsEnabled })
-Assert-Case ([string]$firstDefaultRef.Tag -eq 'inherit' -and [string]$firstDefaultRef.Content -eq '🤖 默认 (跟随网页)') 'Multi-platform ModelCombo keeps Items[0] as the primary inherit option'
-Assert-Case ($groupItems.Count -eq 2 -and ($multiContents -join '|') -match '🟢 OpenAI · 主力隧道' -and ($multiContents -join '|') -match '⚪ Claude · 默认') 'Multi-platform ModelCombo renders breathing status headers (🟢/⚪) corresponding to enabled capsule platforms'
-$selectableItems = @($multiPlatState.ModelCombo.Items | Where-Object { $_.IsEnabled })
+$groupItems = @($multiPlatState.ModelCombo.Items | Where-Object { [string]$_.Tag -like '__group_*' })
+Assert-Case ([string]$multiPlatState.ModelCombo.Items[0].Tag -eq '__group_chatgpt' -and [string]$multiPlatState.ModelCombo.Items[1].Tag -eq 'inherit' -and [string]$multiPlatState.ModelCombo.Items[1].ToolTip -eq 'chatgpt' -and [string]$multiPlatState.ModelCombo.Items[2].Tag -eq '__group_claude' -and [string]$multiPlatState.ModelCombo.Items[3].Tag -eq 'inherit' -and [string]$multiPlatState.ModelCombo.Items[3].ToolTip -eq 'claude') 'Multi-platform ModelCombo places each platform default item directly under its respective platform group header'
+Assert-Case ($groupItems.Count -eq 2 -and [string]$groupItems[0].Content -eq '▾ 🟢 ChatGPT · 主力隧道' -and [string]$groupItems[1].Content -eq '▾ ⚪ Claude · 默认') 'Multi-platform ModelCombo normalizes OpenAI -> ChatGPT and renders pure ▾ icon + breathing status headers (🟢/⚪)'
+$selectableItems = @($multiPlatState.ModelCombo.Items | Where-Object { [string]$_.Tag -notlike '__group_*' })
 Assert-Case ($selectableItems.Count -eq 2 -and (@($selectableItems | Where-Object { [string]$_.Content -ne '🤖 默认 (跟随网页)' -or [string]$_.Tag -ne 'inherit' }).Count -eq 0)) 'Cold start multi-platform ModelCombo contains only 🤖 默认 (跟随网页) (Tag=inherit) under each enabled platform without fake models'
+
+# Pure arrow (▾ / ▸) in-place group folding without (已折叠) text
+Toggle-ComposerModelGroupFold $multiPlatState 'chatgpt'
+Assert-Case ([string]$multiPlatState.ModelCombo.Items[0].Content -eq '▸ 🟢 ChatGPT · 主力隧道' -and [string]$multiPlatState.ModelCombo.Items[0].Content -notmatch '折叠' -and $multiPlatState.ModelCombo.Items[1].Visibility -eq [Windows.Visibility]::Collapsed -and $multiPlatState.ModelCombo.Items[3].Visibility -eq [Windows.Visibility]::Visible) 'Toggle-ComposerModelGroupFold collapses ChatGPT group items in-place with pure ▸ icon and zero (已折叠) text'
+Toggle-ComposerModelGroupFold $multiPlatState 'chatgpt'
+Assert-Case ([string]$multiPlatState.ModelCombo.Items[0].Content -eq '▾ 🟢 ChatGPT · 主力隧道' -and $multiPlatState.ModelCombo.Items[1].Visibility -eq [Windows.Visibility]::Visible) 'Toggle-ComposerModelGroupFold expands ChatGPT group items back to Visible with ▾ icon'
+
 $multiPlatState | Add-Member -NotePropertyName 'TunnelOnline' -NotePropertyValue $false -Force
 Sync-ComposerModelAndEffortCombos -StateInfo $multiPlatState -AvailModels @() -CurModel 'inherit' -WebModel '' -CurEffort 'inherit' -WebEffort '' -IsNarrow $false
 $offlineContents = @($multiPlatState.ModelCombo.Items | ForEach-Object { [string]$_.Content })
-Assert-Case (($offlineContents -join '|') -match '⚪ OpenAI · 主力隧道') 'Multi-platform ModelCombo dynamically updates OpenAI group dot to ⚪ when tunnel goes offline'
+Assert-Case (($offlineContents -join '|') -match '▾ ⚪ ChatGPT · 主力隧道') 'Multi-platform ModelCombo dynamically updates ChatGPT group dot to ⚪ when tunnel goes offline'
 $script:profilesState = $null
 
-Write-Output ('{"result":"PASS","assertions":' + $script:passed + ',"network":"OFFLINE_FAKE_ONLY","production_config_written":false}')
-
+# Option A for Gemini/Claude model lists: strictly expose only 🤖 默认 (跟随网页) under Gemini/Claude groups
 $multi = Make-State 'multi'
-$multi | Add-Member ProfilesState ([pscustomobject]@{EnabledPlatforms=@('openai','gemini','claude');Profiles=@()})
-$multi | Add-Member AvailableModelsByProvider ([pscustomobject]@{chatgpt=$catalog;gemini=@([pscustomobject]@{slug='gemini-pro';title='Gemini Pro';efforts=@()});claude=@()})
+$multi | Add-Member ProfilesState ([pscustomobject]@{
+    EnabledPlatforms = @('chatgpt', 'gemini', 'claude')
+    Profiles = @(
+        [pscustomobject]@{ Id = 'p_gpt'; Name = '主力隧道'; Platform = 'chatgpt'; Kind = 'tunnel'; TunnelId = 'ab12cd34'; HasKey = $true; Enabled = $true; IsActive = $true },
+        [pscustomobject]@{ Id = 'p_gem'; Name = '默认'; Platform = 'gemini'; Kind = 'public_tunnel'; Enabled = $true; IsActive = $true },
+        [pscustomobject]@{ Id = 'p_cld'; Name = '默认'; Platform = 'claude'; Kind = 'public_tunnel'; Enabled = $false; IsActive = $true }
+    )
+})
+$multi | Add-Member PublicTunnelOnline $true
+$multi | Add-Member AvailableModelsByProvider ([pscustomobject]@{
+    chatgpt = $catalog
+    gemini  = @([pscustomobject]@{ slug = 'gemini-pro'; title = 'Gemini Pro'; efforts = @() })
+    claude  = @([pscustomobject]@{ slug = 'claude-sonnet-4'; title = 'Claude Sonnet 4'; efforts = @() })
+})
 Sync-Test $multi $catalog 'inherit' 'inherit'
-Assert-Case (@(Get-Tags $multi.ModelCombo) -contains 'gemini-pro') 'Gemini group exposes its reported model'
-Assert-Case (@($multi.ModelCombo.Items | Where-Object {$_.ToolTip -eq 'claude' -and $_.Tag -eq 'inherit'}).Count -eq 1) 'Disconnected Claude has exactly one default'
+$multiHdrs = @($multi.ModelCombo.Items | Where-Object { [string]$_.Tag -like '__group_*' } | ForEach-Object { [string]$_.Content })
+Assert-Case (($multiHdrs -contains '▾ 🟢 Gemini · 默认') -and ($multiHdrs -contains '▾ ⚪ Claude · 默认')) 'Gemini and Claude group header dots reflect PublicTunnelOnline + profile Enabled state'
+$geminiItems = @($multi.ModelCombo.Items | Where-Object { [string]$_.ToolTip -eq 'gemini' })
+$claudeItems = @($multi.ModelCombo.Items | Where-Object { [string]$_.ToolTip -eq 'claude' })
+Assert-Case ($geminiItems.Count -eq 1 -and [string]$geminiItems[0].Tag -eq 'inherit' -and [string]$geminiItems[0].Content -eq '🤖 默认 (跟随网页)') 'Option A: Gemini group strictly exposes only 🤖 默认 (跟随网页) without fragile DOM-scraped models'
+Assert-Case ($claudeItems.Count -eq 1 -and [string]$claudeItems[0].Tag -eq 'inherit' -and [string]$claudeItems[0].Content -eq '🤖 默认 (跟随网页)') 'Option A: Claude group strictly exposes only 🤖 默认 (跟随网页) without fragile DOM-scraped models'
 
-$multi | Add-Member ConnectedProviders @('chatgpt')
+# 2nd Dropdown (EffortCombo) cross-platform linkage for Gemini & Claude
+$multi.Provider = 'gemini'
 Sync-Test $multi $catalog 'inherit' 'inherit'
-Assert-Case (@(Get-Tags $multi.ModelCombo) -notcontains 'gemini-pro') 'Disconnected Gemini does not expose historical cached model'
+Assert-Case ($multi.EffortCombo.IsEnabled -eq $false -and $multi.EffortCombo.Items.Count -eq 1 -and [string]$multi.EffortCombo.Items[0].Content -eq '🧠 跟随网页设置' -and [string]$multi.EffortCombo.SelectedItem.Tag -eq 'inherit' -and [string]$multi.ModelCombo.SelectedItem.ToolTip -eq 'gemini') 'Switching Provider to gemini locks EffortCombo to disabled 🧠 跟随网页设置 and selects Gemini default item'
+$multi.Provider = 'claude'
+Sync-Test $multi $catalog 'inherit' 'inherit'
+Assert-Case ($multi.EffortCombo.IsEnabled -eq $false -and $multi.EffortCombo.Items.Count -eq 1 -and [string]$multi.EffortCombo.Items[0].Content -eq '🧠 跟随网页设置' -and [string]$multi.ModelCombo.SelectedItem.ToolTip -eq 'claude') 'Switching Provider to claude locks EffortCombo to disabled 🧠 跟随网页设置 and selects Claude default item'
+$multi.Provider = 'chatgpt'
+Sync-Test $multi $catalog 'gpt-6-thinking' 'extended'
+Assert-Case ($multi.EffortCombo.IsEnabled -eq $true -and $multi.EffortCombo.Items.Count -eq 5 -and [string]$multi.EffortCombo.SelectedItem.Tag -eq 'extended') 'Switching Provider back to chatgpt re-enables EffortCombo and restores ChatGPT effort tiers'
+
+# 3rd Dropdown (ProfCombo / Target Carrier) filtering & carrier_by_provider memory
+$mockCarriers = @(
+    [pscustomobject]@{ Id = 'Desktop:ChatGPT'; Label = '💻 ChatGPT 桌面端'; IsDefault = $true },
+    [pscustomobject]@{ Id = 'Chrome:Default';  Label = '🌐 Chrome · 默认';   IsDefault = $false },
+    [pscustomobject]@{ Id = 'Edge:Profile 1';  Label = '🌐 Edge · 工作配置'; IsDefault = $false }
+)
+$multi.AvailableCarriers = $mockCarriers
+$multi.CarrierByProvider = @{
+    chatgpt = 'Desktop:ChatGPT'
+    gemini  = 'Edge:Profile 1'
+    claude  = 'Chrome:Default'
+}
+$multi.Provider = 'chatgpt'
+$resolvedC1 = Sync-ComposerCarrierCombo -StateInfo $multi -AvailCarriers $mockCarriers
+$carrierTagsChatGpt = Get-Tags $multi.ProfCombo
+Assert-Case ($resolvedC1 -eq 'Desktop:ChatGPT' -and ($carrierTagsChatGpt -contains 'Desktop:ChatGPT') -and [string]$multi.ProfCombo.SelectedItem.Tag -eq 'Desktop:ChatGPT') 'ChatGPT provider includes Desktop:ChatGPT carrier and selects remembered Desktop:ChatGPT'
+
+$multi.Provider = 'gemini'
+$resolvedC2 = Sync-ComposerCarrierCombo -StateInfo $multi -AvailCarriers $mockCarriers
+$carrierTagsGemini = Get-Tags $multi.ProfCombo
+Assert-Case ($resolvedC2 -eq 'Edge:Profile 1' -and ($carrierTagsGemini -notcontains 'Desktop:ChatGPT') -and [string]$multi.ProfCombo.SelectedItem.Tag -eq 'Edge:Profile 1') 'Gemini provider filters out Desktop:ChatGPT and restores remembered Edge:Profile 1 from carrier_by_provider'
+
+$multi.Provider = 'claude'
+$resolvedC3 = Sync-ComposerCarrierCombo -StateInfo $multi -AvailCarriers $mockCarriers
+$carrierTagsClaude = Get-Tags $multi.ProfCombo
+Assert-Case ($resolvedC3 -eq 'Chrome:Default' -and ($carrierTagsClaude -notcontains 'Desktop:ChatGPT') -and [string]$multi.ProfCombo.SelectedItem.Tag -eq 'Chrome:Default') 'Claude provider filters out Desktop:ChatGPT and restores remembered Chrome:Default from carrier_by_provider'
+
+# Optimistic 3s MutationEpoch lock verification
+Register-ComposerOptimisticMutation $multi
+Assert-Case ((Test-ComposerOptimisticLockActive $multi) -eq $true) 'Register-ComposerOptimisticMutation activates 3-second optimistic lock on composer state'
+$multi.MutationEpoch = [DateTime]::UtcNow.AddSeconds(-4)
+Assert-Case ((Test-ComposerOptimisticLockActive $multi) -eq $false) 'Test-ComposerOptimisticLockActive expires cleanly after 3 seconds'
 
 $multi.ConnectedProviders = @()
 Sync-Test $multi $catalog 'inherit' 'inherit'
-Assert-Case (@(Get-Tags $multi.ModelCombo) -notcontains 'gpt-6-thinking') 'All-disconnected platform set also hides cached OpenAI models'
+Assert-Case (@(Get-Tags $multi.ModelCombo) -notcontains 'gpt-6-thinking') 'All-disconnected platform set hides cached ChatGPT models'
 
 $helperStart = $source.IndexOf('function Resolve-ComposerCatalogState(')
 $helperEnd = $source.IndexOf('function Build-PlanBComposerPod(', $helperStart)
 . ([scriptblock]::Create($source.Substring($helperStart, $helperEnd - $helperStart)))
-function Get-WebRoomProvider($Record) { if ($Record.provider) { $Record.provider } else { 'chatgpt' } }
+function Get-WebRoomProvider($Record) { if ($Record.provider) { Resolve-UiPlatformCode ([string]$Record.provider) } else { 'chatgpt' } }
 $raw = [pscustomobject]@{available_models_by_provider=$multi.AvailableModelsByProvider;tabs=[pscustomobject]@{fresh=[pscustomobject]@{provider='gemini';last_seen_at=[DateTimeOffset]::UtcNow.ToString('o')};stale=[pscustomobject]@{provider='claude';last_seen_at=[DateTimeOffset]::UtcNow.AddSeconds(-30).ToString('o')}}}
 $resolved = Resolve-ComposerCatalogState $null $raw
 Assert-Case ($resolved.connected_providers -contains 'gemini' -and $resolved.connected_providers -notcontains 'claude') 'Launchpad production extraction derives fresh platform availability from raw tabs'
@@ -192,17 +282,16 @@ Assert-Case ($resolvedSession.connected_providers -contains 'claude' -and $resol
 $productionState = Make-State 'production-shaped'
 $productionState | Add-Member ProfilesState ([pscustomobject]@{EnabledPlatforms=@('openai','gemini','claude');Profiles=@()})
 $productionState | Add-Member AvailableModelsByProvider $resolved.available_models_by_provider
-$productionState | Add-Member ConnectedProviders @($resolved.connected_providers)
-Sync-Test $productionState $catalog 'inherit' 'inherit'
-Assert-Case (@(Get-Tags $productionState.ModelCombo) -contains 'gemini-pro') 'Production extracted and constructed connected Gemini keeps its model visible'
-
+$productionState.ConnectedProviders = @($resolved.connected_providers)
 $legacySession = [pscustomobject]@{AvailableModels=$catalog;AvailableModelsByProvider=$null}
 $legacyCatalog = Resolve-ComposerCatalogState $legacySession $null
 $productionState.AvailableModelsByProvider = $legacyCatalog.available_models_by_provider
 $productionState.ConnectedProviders = $legacyCatalog.connected_providers
 Sync-Test $productionState $catalog 'inherit' 'inherit'
-Assert-Case ($null -eq $legacyCatalog.connected_providers -and @(Get-Tags $productionState.ModelCombo) -contains 'gpt-6-thinking') 'Legacy snapshots without availability metadata retain OpenAI catalog compatibility'
+Assert-Case ($null -eq $legacyCatalog.connected_providers -and @(Get-Tags $productionState.ModelCombo) -contains 'gpt-6-thinking') 'Legacy snapshots without availability metadata retain ChatGPT catalog compatibility'
 
 $productionState.ConnectedProviders = @()
 Sync-Test $productionState $catalog 'inherit' 'inherit'
 Assert-Case (@(Get-Tags $productionState.ModelCombo) -notcontains 'gpt-6-thinking') 'Unknown to explicitly disconnected transition invalidates model display cache'
+
+Write-Output ('{"result":"PASS","assertions":' + $script:passed + ',"network":"OFFLINE_FAKE_ONLY","production_config_written":false}')

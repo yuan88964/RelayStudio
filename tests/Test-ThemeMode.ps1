@@ -152,6 +152,118 @@ try {
     $script:controls.ThemeDarkButton.RaiseEvent([Windows.RoutedEventArgs]::new([Windows.Controls.Button]::ClickEvent))
     Assert ($script:controls.QuickToastText.Text -eq '已切换为「深色模式」') 'Theme toggle QuickToast uses concise text without parenthetical hint'
 
+    # 14. Ticket 06: 10-second Get-SystemThemePreference TTL cache (450ms IPC timer reads registry at most once per 10s)
+    $script:regProbeCount = 0
+    $probeSb = { $script:regProbeCount++; return 0 }
+    $pref1 = Get-SystemThemePreference -RegistryProbe $probeSb -ResetCache
+    for ($ti = 0; $ti -lt 9; $ti++) {
+        $prefLoop = Get-SystemThemePreference -RegistryProbe $probeSb
+        if ($prefLoop -ne 'dark') { throw "Unexpected cached theme pref: $prefLoop" }
+    }
+    Assert ($pref1 -eq 'dark' -and $script:regProbeCount -eq 1) "Get-SystemThemePreference 10s TTL cache executes registry probe only once across 10 rapid 450ms ticks (actual probes=$($script:regProbeCount))"
+
+    # 15. Ticket 06: Platform naming unification (ChatGPT UI vs 4 official OpenAI contracts) & URL routing
+    $gptMeta = Get-CapsulePlatformMeta 'openai'
+    Assert ($gptMeta.Code -eq 'chatgpt' -and $gptMeta.Title -eq 'ChatGPT' -and $gptMeta.KeyLabel -eq 'OpenAI API Key (仅用于拉起本地 MCP 隧道)' -and $gptMeta.PlatText -eq '打开 OpenAI 隧道设置 ↗') 'Get-CapsulePlatformMeta normalizes openai->chatgpt with Title=ChatGPT while preserving official OpenAI API Key and OpenAI tunnel settings contracts'
+    Assert ((Format-RelayLandingUrl -Provider 'chatgpt') -eq 'https://chatgpt.com/' -and (Format-RelayLandingUrl -Provider 'gemini') -eq 'https://gemini.google.com/app' -and (Format-RelayLandingUrl -Provider 'claude') -eq 'https://claude.ai/new') 'Format-RelayLandingUrl resolves exact platform landing URLs without trailing slash on /app or /new'
+    $gemHoUrl = Format-RelayHandoverUrl -Provider 'gemini' -SessionKey 'tsk_t06'
+    $cldHoUrl = Format-RelayHandoverUrl -Provider 'claude' -SessionKey 'tsk_t06'
+    $gptHoUrl = Format-RelayHandoverUrl -Provider 'chatgpt' -SessionKey 'tsk_t06' -TargetModel 'gpt-6-thinking'
+    Assert ($gemHoUrl -eq 'https://gemini.google.com/app?relay_handover=1&session_key=tsk_t06' -and $cldHoUrl -eq 'https://claude.ai/new?relay_handover=1&session_key=tsk_t06' -and $gptHoUrl -match '^https://chatgpt\.com/\?model=gpt-6-thinking&relay_handover=1') 'Format-RelayHandoverUrl avoids /app/? and /new/? while keeping root slash on chatgpt.com/?'
+
+    # 16. Ticket 06: Retained-mode Render-PanesWorkspace & in-place Toggle-PaneSummary (zero PanesHostGrid.Children.Clear() on 2s polls)
+    Close-PaneById ([int]$script:layout.Panes[1].id)
+    $retainedSess = [pscustomobject]@{
+        SessionKey = 'tsk_retained_ui_06'
+        WfrId = 'tsk_retained_ui_06'
+        ShortId = 'tsk_retained'
+        Title = 'Retained UI 增量刷新验证'
+        ShortTitle = 'Retained UI 验证'
+        DotColor = '#16A34A'
+        StatusBadge = '● 执行中'
+        StatusFg = '#15803D'; StatusBg = '#F0FDF4'; StatusBorder = '#BBF7D0'
+        VitalState = 'LIVE'
+        VitalSubstate = 'THINKING'
+        StepCountText = '1 / 3 步已完成'
+        ProgressPercent = 33
+        CommandCount = 2
+        Steps = @(
+            [pscustomobject]@{ Id = '1'; Title = '第一步'; Status = 'completed' },
+            [pscustomobject]@{ Id = '2'; Title = '第二步'; Status = 'in_progress' },
+            [pscustomobject]@{ Id = '3'; Title = '第三步'; Status = 'pending' }
+        )
+        ReadableCheckpoints = @()
+        HumanDiagnosis = '正在执行第二步'
+        LatestSummary = '正在执行第二步'
+        IsStalled = $false
+        IsArchived = $false
+        AutoResendEnabled = $true
+        AutoWakeupEnabled = $true
+        StallMinutes = 3
+        StallSeconds = 180
+        MaxRetries = 1
+        PendingQueue = @()
+        PendingQueueCount = 0
+        SentWebMessages = @()
+    }
+    $script:display.Sessions = @($retainedSess)
+    $script:layout.Panes[0].session_key = 'tsk_retained_ui_06'
+    $script:layout.Panes[0].show_summary = $false
+    $script:lastCardsSig = ''
+    $script:lastWorkspaceTopologySig = ''
+    Update-SessionCards
+
+    $pane0Before = $script:controls.PanesHostGrid.Children[0]
+    $summaryCardRef = $pane0Before.Tag.SummaryCard
+    Assert ($null -ne $summaryCardRef -and $summaryCardRef.Visibility -eq [Windows.Visibility]::Collapsed) 'Session pane pre-mounts CodexSummaryCard in Collapsed state'
+
+    Toggle-PaneSummary ([int]$script:layout.Panes[0].id)
+    Assert ($script:layout.Panes[0].show_summary -eq $true -and $summaryCardRef.Visibility -eq [Windows.Visibility]::Visible -and [object]::ReferenceEquals($pane0Before, $script:controls.PanesHostGrid.Children[0])) 'Toggle-PaneSummary flips SummaryCard.Visibility to Visible in-place without rebuilding PanesHostGrid'
+
+    Toggle-PaneSummary ([int]$script:layout.Panes[0].id)
+    Assert ($script:layout.Panes[0].show_summary -eq $false -and $summaryCardRef.Visibility -eq [Windows.Visibility]::Collapsed -and [object]::ReferenceEquals($pane0Before, $script:controls.PanesHostGrid.Children[0])) 'Toggle-PaneSummary flips SummaryCard.Visibility back to Collapsed in-place'
+
+    # Mutate session fields and run Update-SessionCards (simulating 2s poll): PanesHostGrid.Children[0] must remain the exact same reference
+    $retainedSess.ProgressPercent = 67
+    $retainedSess.StepCountText = '2 / 3 步已完成'
+    $retainedSess.CommandCount = 5
+    $retainedSess.VitalSubstate = 'DUAL_STREAM'
+    $retainedSess.HumanDiagnosis = '进入双流并发验证'
+    Update-SessionCards
+    $pane0AfterPoll = $script:controls.PanesHostGrid.Children[0]
+    $streamRefsAfter = $pane0AfterPoll.Tag.StreamHost.Tag
+    Assert ([object]::ReferenceEquals($pane0Before, $pane0AfterPoll) -and $streamRefsAfter.StepPillText.Text -match '2 / 3 步' -and $streamRefsAfter.StatusLabel.Text -match '双流' -and $streamRefsAfter.DiagTextBlock.Text -eq '进入双流并发验证') '2s background poll updates pane step progress, status pill, and diagnosis text in-place without clearing PanesHostGrid.Children'
+
+    # 17. Ticket 06: Open Popover & Global Settings freeze during Refresh-FormState
+    Toggle-KeyPopover
+    Assert ($script:popoverOpen -eq $true) 'KeyPopover is open before background Refresh-FormState'
+    $profChild0Before = $script:controls.ProfilesListPanel.Children[0]
+    Refresh-FormState
+    Assert ([object]::ReferenceEquals($profChild0Before, $script:controls.ProfilesListPanel.Children[0])) 'Refresh-FormState skips Refresh-ProfilePopoverState when KeyPopover is open, preserving ProfilesListPanel child references'
+    Close-AllTopPopovers
+
+    Toggle-GlobalSettingsPopover
+    Assert ($script:globalSettingsOpen -eq $true) 'GlobalSettingsPopover is open before background Refresh-FormState'
+    $carrierItem0Before = $script:controls.DefaultCarrierCombo.Items[0]
+    Refresh-FormState
+    Assert ([object]::ReferenceEquals($carrierItem0Before, $script:controls.DefaultCarrierCombo.Items[0])) 'Refresh-FormState skips Refresh-ProfilePopoverState when GlobalSettingsPopover is open, preserving DefaultCarrierCombo item references'
+    Close-AllTopPopovers
+
+    # 18. Ticket 06: End-to-end 3-dropdown atomic linkage & carrier_by_provider persistence in Build-PlanBComposerPod
+    [void](Invoke-SelectOrAddCapsulePlatform 'gemini')
+    [void](Invoke-SelectOrAddCapsulePlatform 'claude')
+    Close-AllTopPopovers
+    $script:composerPodCache.Clear()
+    $retainedSess | Add-Member -NotePropertyName 'CarrierByProvider' -NotePropertyValue @{ chatgpt = 'Desktop:ChatGPT'; gemini = 'Edge:Default' } -Force
+    $podMulti = Build-PlanBComposerPod -SessionObj $retainedSess -IsNarrow $false -IsZeroTask $false -PaneId 101
+    $geminiDefaultItem = @($podMulti.Tag.ModelCombo.Items | Where-Object { [string]$_.ToolTip -eq 'gemini' -and [string]$_.Tag -eq 'inherit' }) | Select-Object -First 1
+    Assert ($null -ne $geminiDefaultItem) 'Multi-platform ComposerPod exposes Gemini default item under Gemini group header'
+    $podMulti.Tag.ModelCombo.SelectedItem = $geminiDefaultItem
+    $wbAfterGemSwitch = Get-WebBridgeState $script:context
+    $gemBind = $wbAfterGemSwitch.session_bindings.'tsk_retained_ui_06'
+    $profComboTagsAfterGem = @($podMulti.Tag.ProfCombo.Items | ForEach-Object { [string]$_.Tag })
+    Assert ($podMulti.Tag.Provider -eq 'gemini' -and $podMulti.Tag.EffortCombo.IsEnabled -eq $false -and [string]$podMulti.Tag.EffortCombo.Items[0].Content -eq '🧠 跟随网页设置' -and ($profComboTagsAfterGem -notcontains 'Desktop:ChatGPT') -and $gemBind.provider -eq 'gemini' -and $null -ne $gemBind.carrier_by_provider) 'Selecting Gemini model in ModelCombo atomically updates Provider, disables EffortCombo, excludes Desktop:ChatGPT from ProfCombo, and persists provider + carrier_by_provider'
+
     Write-Host (@{ result = 'PASS'; assertions = $script:assertions } | ConvertTo-Json -Compress)
 } finally {
     if (Test-Path -LiteralPath $testRoot) {

@@ -396,11 +396,11 @@ $script:PANE_SNAP_HIDE_PX = 140.0
      <Border x:Name="TunnelCapsuleBorder" Background="#FFFFFF" BorderBrush="#E4E4E7" BorderThickness="1" CornerRadius="8" Padding="0" Margin="0,0,6,0" VerticalAlignment="Center">
       <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
        <StackPanel x:Name="CapsuleSegmentsPanel" Orientation="Horizontal" VerticalAlignment="Center">
-        <Button x:Name="ConnIconBadgeButton" Padding="8,2" MinHeight="24" Background="Transparent" BorderBrush="Transparent" BorderThickness="0" ToolTip="点击打开「OpenAI 隧道配置」切换隧道或管理 API Key">
+        <Button x:Name="ConnIconBadgeButton" Padding="8,2" MinHeight="24" Background="Transparent" BorderBrush="Transparent" BorderThickness="0" ToolTip="点击打开「ChatGPT 隧道配置」切换隧道或管理 API Key">
          <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
           <Ellipse x:Name="TopStatusDot" Width="7" Height="7" Fill="#16A34A" VerticalAlignment="Center" Margin="0,0,6,0"/>
           <Border x:Name="ConnProfileMiniTagBorder" Background="Transparent" CornerRadius="4" Padding="0" VerticalAlignment="Center">
-           <TextBlock x:Name="ConnProfileMiniTagText" Text="OpenAI · 主工作台 ▾" FontSize="11.5" FontWeight="SemiBold" Foreground="#18181B" TextWrapping="NoWrap"/>
+           <TextBlock x:Name="ConnProfileMiniTagText" Text="ChatGPT · 主工作台 ▾" FontSize="11.5" FontWeight="SemiBold" Foreground="#18181B" TextWrapping="NoWrap"/>
           </Border>
          </StackPanel>
         </Button>
@@ -611,7 +611,7 @@ $script:PANE_SNAP_HIDE_PX = 140.0
    <StackPanel>
     <Grid Margin="0,0,0,8">
      <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-     <TextBlock x:Name="PopoverHeaderTitle" Text="OpenAI 隧道配置 (1)" FontSize="13.5" FontWeight="Bold" Foreground="#18181B" VerticalAlignment="Center"/>
+     <TextBlock x:Name="PopoverHeaderTitle" Text="ChatGPT 隧道配置 (1)" FontSize="13.5" FontWeight="Bold" Foreground="#18181B" VerticalAlignment="Center"/>
      <Button x:Name="RemoveCapsulePlatformButton" Grid.Column="1" Content="移除此栏" Style="{StaticResource LinkButton}" Foreground="#71717A" FontSize="11.5" Margin="0,0,8,0" Visibility="Collapsed"/>
      <Button x:Name="AddProfileButton" Grid.Column="2" Content="+ 新增配置" Padding="9,3" MinHeight="25" FontSize="11.5" FontWeight="SemiBold" Background="#FFFFFF" BorderBrush="#E4E4E7" Margin="0,0,6,0"/>
      <Button x:Name="TogglePopoverEditButton" Grid.Column="3" Content="✎ 编辑当前" Style="{StaticResource LinkButton}" FontSize="12" FontWeight="SemiBold" Visibility="Collapsed"/>
@@ -653,7 +653,7 @@ $script:PANE_SNAP_HIDE_PX = 140.0
        <TextBox x:Name="ProfileNameInput" AutomationProperties.Name="配置名称" FontSize="11.5" Padding="7,3" MinHeight="24" Margin="0,0,0,5"/>
        <TextBlock x:Name="TunnelInputLabel" Text="隧道编号或完整链接" FontSize="11" Foreground="#52525B" FontWeight="SemiBold" Margin="0,0,0,2"/>
        <TextBox x:Name="TunnelInput" AutomationProperties.Name="隧道编号或链接" FontFamily="Consolas, Cascadia Mono, Source Han Serif SC VF, Noto Serif SC" FontSize="11.5" Padding="7,3" MinHeight="24" Margin="0,0,0,5"/>
-       <TextBlock x:Name="KeyInputLabel" Text="OpenAI API Key" FontSize="11" Foreground="#52525B" FontWeight="SemiBold" Margin="0,0,0,2"/>
+       <TextBlock x:Name="KeyInputLabel" Text="OpenAI API Key (仅用于拉起本地 MCP 隧道)" FontSize="11" Foreground="#52525B" FontWeight="SemiBold" Margin="0,0,0,2"/>
        <TextBox x:Name="KeyInput" AutomationProperties.Name="OpenAI API Key" FontFamily="Consolas, Cascadia Mono, Source Han Serif SC VF, Noto Serif SC" FontSize="11.5" Padding="7,3" MinHeight="24" Margin="0,0,0,5"/>
        <TextBlock x:Name="KeyHint" Foreground="#71717A" FontSize="10.5" Visibility="Collapsed"/>
 
@@ -1590,7 +1590,7 @@ function Select-WindowTab([string]$TabName) {
         $script:controls.TabLiveButton.BorderBrush = ConvertTo-Brush 'Transparent'
         $script:controls.TabLiveButton.Foreground = ConvertTo-Brush '#71717A'
         Refresh-ProfilePopoverState
-        $trig = if ($script:activeCapsulePlatform -and $script:activeCapsulePlatform -ne 'openai' -and $script:capsuleSegmentButtons[$script:activeCapsulePlatform]) {
+        $trig = if ($script:activeCapsulePlatform -and $script:activeCapsulePlatform -notin @('openai', 'chatgpt') -and $script:capsuleSegmentButtons[$script:activeCapsulePlatform]) {
             $script:capsuleSegmentButtons[$script:activeCapsulePlatform]
         } else {
             $script:controls.ConnIconBadgeButton
@@ -1613,7 +1613,7 @@ function Toggle-KeyPopover {
         $script:controls.PopoverViewPanel.Visibility = 'Visible'
         $script:controls.KeyPopoverBorder.Visibility = 'Visible'
         Refresh-ProfilePopoverState
-        $trig = if ($script:activeCapsulePlatform -and $script:activeCapsulePlatform -ne 'openai' -and $script:capsuleSegmentButtons[$script:activeCapsulePlatform]) {
+        $trig = if ($script:activeCapsulePlatform -and $script:activeCapsulePlatform -notin @('openai', 'chatgpt') -and $script:capsuleSegmentButtons[$script:activeCapsulePlatform]) {
             $script:capsuleSegmentButtons[$script:activeCapsulePlatform]
         } else {
             $script:controls.ConnIconBadgeButton
@@ -1649,6 +1649,7 @@ function Select-DefaultCliAgent([string]$AgentId, [string]$DisplayName = '') {
     $cfg = Get-CoreEngineConfig $script:context
     $script:settings = (Set-CoreEngineConfig -Context $script:context -AcpDefaultProfile $AgentId -BrowserEnabled ([bool]$cfg.BrowserEnabled) -StartupMode ([string]$cfg.StartupMode) -ApplyStartup:(-not $script:context.Isolated)).Settings
     if (-not $script:context.Isolated) { [void](Restart-LocalCoreEngine $script:context $script:settings) }
+    Refresh-ProfilePopoverState
     Refresh-FormState
     $label = if ($DisplayName) { $DisplayName } else { $AgentId }
     Show-QuickToast "已将默认 CLI 智能体切换为 $label"
@@ -1686,8 +1687,9 @@ function Invoke-RescanCliAgents {
     Show-QuickToast "✓ 已重新检测本机 CLI 智能体（共发现 $($agents.Count) 个）"
 }
 
-function Get-CapsulePlatformMeta([string]$Platform = 'openai') {
-    $p = if ($Platform) { $Platform.Trim().ToLowerInvariant() } else { 'openai' }
+function Get-CapsulePlatformMeta([string]$Platform = 'chatgpt') {
+    $p = if ($Platform) { $Platform.Trim().ToLowerInvariant() } else { 'chatgpt' }
+    if ($p -eq 'openai') { $p = 'chatgpt' }
     switch ($p) {
         'claude' {
             return [pscustomobject]@{
@@ -1711,10 +1713,10 @@ function Get-CapsulePlatformMeta([string]$Platform = 'openai') {
         }
         default {
             return [pscustomobject]@{
-                Code = 'openai'; Title = 'OpenAI'; Kind = 'tunnel'
+                Code = 'chatgpt'; Title = 'ChatGPT'; Kind = 'tunnel'
                 DefaultUrl = 'https://api.openai.com'
                 PurposeDesc = 'MCP 反向隧道连接与 API Key · 供 ChatGPT 网页端操控本地电脑'
-                SecondLabel = '隧道编号或完整链接'; KeyLabel = 'OpenAI API Key'
+                SecondLabel = '隧道编号或完整链接'; KeyLabel = 'OpenAI API Key (仅用于拉起本地 MCP 隧道)'
                 ApiKeysUrl = 'https://platform.openai.com/settings/organization/api-keys'
                 PlatText = '打开 OpenAI 隧道设置 ↗'; PlatUrl = 'https://platform.openai.com/settings/organization/tunnels'
             }
@@ -1722,8 +1724,9 @@ function Get-CapsulePlatformMeta([string]$Platform = 'openai') {
     }
 }
 
-function Select-CapsulePlatform([string]$Platform = 'openai', [Windows.FrameworkElement]$TriggerButton = $null) {
-    $p = if ($Platform) { $Platform.Trim().ToLowerInvariant() } else { 'openai' }
+function Select-CapsulePlatform([string]$Platform = 'chatgpt', [Windows.FrameworkElement]$TriggerButton = $null) {
+    $p = if ($Platform) { $Platform.Trim().ToLowerInvariant() } else { 'chatgpt' }
+    if ($p -eq 'openai') { $p = 'chatgpt' }
     if ($script:popoverOpen -and (-not $script:addPlatformPickerOpen) -and $script:activeCapsulePlatform -eq $p) {
         Close-AllTopPopovers
         return
@@ -1743,7 +1746,8 @@ function Select-CapsulePlatform([string]$Platform = 'openai', [Windows.Framework
     if ($script:controls.FormScroll) { $script:controls.FormScroll.Visibility = 'Collapsed' }
     $script:profilesState = Get-ConnectionProfiles $script:context $script:settings
     $platProfs = @($script:profilesState.Profiles | Where-Object {
-        $pl = if ($_.PSObject.Properties['Platform'] -and $_.Platform) { ([string]$_.Platform).ToLowerInvariant() } else { 'openai' }
+        $pl = if ($_.PSObject.Properties['Platform'] -and $_.Platform) { ([string]$_.Platform).ToLowerInvariant() } else { 'chatgpt' }
+        if ($pl -eq 'openai') { $pl = 'chatgpt' }
         $pl -eq $p
     })
     $actProf = $platProfs | Where-Object { $_.IsActive } | Select-Object -First 1
@@ -1754,7 +1758,7 @@ function Select-CapsulePlatform([string]$Platform = 'openai', [Windows.Framework
         $script:controls.KeyPopoverBorder.Visibility = 'Visible'
     }
     Refresh-ProfilePopoverState
-    $resolvedTrigger = if ($p -eq 'openai') {
+    $resolvedTrigger = if ($p -in @('openai', 'chatgpt')) {
         $script:controls.ConnIconBadgeButton
     } elseif ($script:capsuleSegmentButtons -and $script:capsuleSegmentButtons[$p]) {
         $script:capsuleSegmentButtons[$p]
@@ -1789,17 +1793,18 @@ function Toggle-AddPlatformPopover {
 }
 
 function Invoke-SelectOrAddCapsulePlatform([string]$Platform) {
-    $p = if ($Platform) { $Platform.Trim().ToLowerInvariant() } else { 'openai' }
+    $p = if ($Platform) { $Platform.Trim().ToLowerInvariant() } else { 'chatgpt' }
+    if ($p -eq 'openai') { $p = 'chatgpt' }
     $script:profilesState = Add-CapsulePlatform -Context $script:context -Platform $p -Settings $script:settings
     Select-CapsulePlatform $p
     Update-SessionCards
 }
 
 function Invoke-RemoveCurrentCapsulePlatform {
-    $curPlat = if ($script:activeCapsulePlatform) { $script:activeCapsulePlatform.Trim().ToLowerInvariant() } else { 'openai' }
-    if ($curPlat -eq 'openai') { return }
+    $curPlat = if ($script:activeCapsulePlatform) { $script:activeCapsulePlatform.Trim().ToLowerInvariant() } else { 'chatgpt' }
+    if ($curPlat -in @('openai', 'chatgpt')) { return }
     $script:profilesState = Remove-CapsulePlatform -Context $script:context -Platform $curPlat -Settings $script:settings
-    $script:activeCapsulePlatform = 'openai'
+    $script:activeCapsulePlatform = 'chatgpt'
     $script:addPlatformPickerOpen = $false
     $script:viewingProfileId = $script:profilesState.ActiveProfileId
     Refresh-ProfilePopoverState
@@ -1813,21 +1818,26 @@ function Refresh-ProfilePopoverState {
     $script:profilesState = Get-ConnectionProfiles $script:context $script:settings
     $allProfs = @($script:profilesState.Profiles)
     $enabledPlats = @(if ($script:profilesState.PSObject.Properties['EnabledPlatforms'] -and $script:profilesState.EnabledPlatforms) {
-        $script:profilesState.EnabledPlatforms
-    } else { @('openai') })
+        $script:profilesState.EnabledPlatforms | ForEach-Object {
+            $epCode = ([string]$_).Trim().ToLowerInvariant()
+            if ($epCode -eq 'openai') { 'chatgpt' } else { $epCode }
+        }
+    } else { @('chatgpt') })
+    if ($script:activeCapsulePlatform -eq 'openai') { $script:activeCapsulePlatform = 'chatgpt' }
     if (-not $script:activeCapsulePlatform -or ($enabledPlats -notcontains $script:activeCapsulePlatform)) {
-        $script:activeCapsulePlatform = 'openai'
+        $script:activeCapsulePlatform = 'chatgpt'
     }
     $curPlat = $script:activeCapsulePlatform
     $publicTunnel = Get-PublicMcpTunnelState $script:context
     $platMeta = Get-CapsulePlatformMeta $curPlat
 
-    $openaiProfs = @($allProfs | Where-Object { (-not $_.PSObject.Properties['Platform']) -or (-not $_.Platform) -or ([string]$_.Platform).ToLowerInvariant() -eq 'openai' })
+    $openaiProfs = @($allProfs | Where-Object { (-not $_.PSObject.Properties['Platform']) -or (-not $_.Platform) -or ([string]$_.Platform).ToLowerInvariant() -in @('openai', 'chatgpt') })
     $openaiActiveProf = $openaiProfs | Where-Object { $_.IsActive } | Select-Object -First 1
     if (-not $openaiActiveProf -and $openaiProfs.Count -gt 0) { $openaiActiveProf = $openaiProfs[0] }
 
     $platProfs = @($allProfs | Where-Object {
-        $pl = if ($_.PSObject.Properties['Platform'] -and $_.Platform) { ([string]$_.Platform).ToLowerInvariant() } else { 'openai' }
+        $pl = if ($_.PSObject.Properties['Platform'] -and $_.Platform) { ([string]$_.Platform).ToLowerInvariant() } else { 'chatgpt' }
+        if ($pl -eq 'openai') { $pl = 'chatgpt' }
         $pl -eq $curPlat
     })
     $activeProf = $platProfs | Where-Object { $_.IsActive } | Select-Object -First 1
@@ -1846,12 +1856,12 @@ function Refresh-ProfilePopoverState {
     } else { '未配置' }
     if (-not $activeShortName) { $activeShortName = '主力隧道' }
     if ($activeShortName.Length -gt 12) { $activeShortName = $activeShortName.Substring(0, 12) }
-    $script:controls.ConnProfileMiniTagText.Text = $(if ($enabledPlats.Count -gt 1) { "OpenAI · $activeShortName ▾" } else { "$activeShortName ▾" })
+    $script:controls.ConnProfileMiniTagText.Text = $(if ($enabledPlats.Count -gt 1) { "ChatGPT · $activeShortName ▾" } else { "$activeShortName ▾" })
 
     if ($script:controls.CapsuleExtraSegmentsPanel) {
         $script:controls.CapsuleExtraSegmentsPanel.Children.Clear()
         $script:capsuleSegmentButtons = @{}
-        foreach ($ep in @($enabledPlats | Where-Object { $_ -ne 'openai' })) {
+        foreach ($ep in @($enabledPlats | Where-Object { $_ -notin @('openai', 'chatgpt') })) {
             $div = New-Object Windows.Controls.Border
             $div.Width = 1
             $div.Background = ConvertTo-Brush '#E4E4E7'
@@ -1901,7 +1911,7 @@ function Refresh-ProfilePopoverState {
     if ($script:controls.AddPlatformPanelBorder -and $script:controls.AddPlatformListPanel) {
         $script:controls.AddPlatformPanelBorder.Visibility = $(if ($script:addPlatformPickerOpen) { 'Visible' } else { 'Collapsed' })
         $script:controls.AddPlatformListPanel.Children.Clear()
-        foreach ($presetCode in @('openai', 'gemini', 'claude')) {
+        foreach ($presetCode in @('chatgpt', 'gemini', 'claude')) {
             $pm = Get-CapsulePlatformMeta $presetCode
             $isAdded = ($enabledPlats -contains $presetCode)
             $pBtn = New-Object Windows.Controls.Button
@@ -1960,14 +1970,14 @@ function Refresh-ProfilePopoverState {
         if ($script:controls.PopoverFooterBorder) { $script:controls.PopoverFooterBorder.Visibility = 'Collapsed' }
     } else {
         if ($script:controls.PopoverHeaderTitle) {
-            $script:controls.PopoverHeaderTitle.Text = if ($curPlat -eq 'openai') {
-                "OpenAI 隧道配置 ($($platProfs.Count))"
+            $script:controls.PopoverHeaderTitle.Text = if ($curPlat -in @('openai', 'chatgpt')) {
+                "ChatGPT 隧道配置 ($($platProfs.Count))"
             } else {
                 "$($platMeta.Title) 接入配置 ($($platProfs.Count))"
             }
         }
         if ($script:controls.RemoveCapsulePlatformButton) {
-            $script:controls.RemoveCapsulePlatformButton.Visibility = $(if ($curPlat -eq 'openai') { 'Collapsed' } else { 'Visible' })
+            $script:controls.RemoveCapsulePlatformButton.Visibility = $(if ($curPlat -in @('openai', 'chatgpt')) { 'Collapsed' } else { 'Visible' })
         }
         if ($script:controls.AddProfileButton) { $script:controls.AddProfileButton.Visibility = 'Visible' }
         if ($script:controls.ProfilesListScroll) {
@@ -1982,13 +1992,13 @@ function Refresh-ProfilePopoverState {
     if ($script:controls.KeyInputLabel) {
         $script:controls.KeyInputLabel.Text = $platMeta.KeyLabel
     }
-    $script:controls.ApiKeysButton.Content = $(if ($curPlat -eq 'openai') { '获取或管理 API Key ↗' } else { '公网隧道设置帮助 ↗' })
+    $script:controls.ApiKeysButton.Content = $(if ($curPlat -in @('openai', 'chatgpt')) { '获取或管理 API Key ↗' } else { '公网隧道设置帮助 ↗' })
     if ($script:controls.PlatformButton) {
         $script:controls.PlatformButton.Content = $platMeta.PlatText
     }
 
     foreach ($legacyControl in @('MaskedKeyText','ToggleKeyMaskButton','CopyApiKeyButton')) {
-        if ($script:controls[$legacyControl]) { $script:controls[$legacyControl].Visibility = $(if ($curPlat -eq 'openai') { 'Visible' } else { 'Collapsed' }) }
+        if ($script:controls[$legacyControl]) { $script:controls[$legacyControl].Visibility = $(if ($curPlat -in @('openai', 'chatgpt')) { 'Visible' } else { 'Collapsed' }) }
     }
     # Detach FormScroll before rebuilding ProfilesListPanel so it can be embedded inline inside the expanded strip
     if ($script:controls.FormScroll -and $script:controls.FormScroll.Parent) {
@@ -2041,10 +2051,11 @@ function Refresh-ProfilePopoverState {
             $nameRow = New-Object Windows.Controls.StackPanel
             $nameRow.Orientation = 'Horizontal'
             $nameRow.VerticalAlignment = 'Center'
-            $isApiKeyProfReady = ($curPlat -ne 'openai') -and [bool]$prof.Enabled -and [bool]$prof.HasKey
+            $isChatGptPlat = ($curPlat -in @('openai', 'chatgpt'))
+            $isApiKeyProfReady = (-not $isChatGptPlat) -and [bool]$prof.Enabled -and [bool]$prof.HasKey
             $dot = New-Object Windows.Shapes.Ellipse
             $dot.Width = 7; $dot.Height = 7
-            $dot.Fill = ConvertTo-Brush $(if ($curPlat -ne 'openai') {
+            $dot.Fill = ConvertTo-Brush $(if (-not $isChatGptPlat) {
                 if ($isApiKeyProfReady) { '#16A34A' } elseif ($isProfViewing) { '#2563EB' } else { '#A1A1AA' }
             } elseif ($isProfActive -and $tunRunning) { '#16A34A' } elseif ($isProfActive) { '#22C55E' } elseif ($isProfViewing) { '#2563EB' } else { '#A1A1AA' })
             $dot.VerticalAlignment = 'Center'
@@ -2055,7 +2066,7 @@ function Refresh-ProfilePopoverState {
             $nTxt.Text = $prof.Name
             $nTxt.FontSize = 12.5
             $nTxt.FontWeight = 'SemiBold'
-            $nTxt.Foreground = ConvertTo-Brush $(if (($curPlat -eq 'openai' -and $isProfActive) -or $isApiKeyProfReady) { '#14532D' } else { '#18181B' })
+            $nTxt.Foreground = ConvertTo-Brush $(if (($isChatGptPlat -and $isProfActive) -or $isApiKeyProfReady) { '#14532D' } else { '#18181B' })
             $nTxt.VerticalAlignment = 'Center'
             [void]$nameRow.Children.Add($nTxt)
             [Windows.Controls.Grid]::SetColumn($nameRow, 0)
@@ -2065,7 +2076,7 @@ function Refresh-ProfilePopoverState {
             $rightStack.Orientation = 'Horizontal'
             $rightStack.VerticalAlignment = 'Center'
 
-            if ($curPlat -ne 'openai') {
+            if (-not $isChatGptPlat) {
                 $actTag = New-Object Windows.Controls.Border
                 $actTag.Background = ConvertTo-Brush $(if ($isApiKeyProfReady) { '#DCFCE7' } else { '#F4F4F5' })
                 $actTag.CornerRadius = [Windows.CornerRadius]::new(4)
@@ -2129,12 +2140,12 @@ function Refresh-ProfilePopoverState {
             [void]$cardStack.Children.Add($rGrid)
 
             # Line 2: Small Font Masked Endpoint/Tunnel ID + API Key + Inline Copy Links
-            $rawEndpointOrTid = if ($curPlat -ne 'openai') {
+            $rawEndpointOrTid = if (-not $isChatGptPlat) {
                 [string]$publicTunnel.Url
             } else {
                 [string]$prof.TunnelId
             }
-            $shortEndpointOrTid = if ($curPlat -ne 'openai') {
+            $shortEndpointOrTid = if (-not $isChatGptPlat) {
                 if ($rawEndpointOrTid.Length -gt 28) { "$($rawEndpointOrTid.Substring(0, 25))..." } elseif ($rawEndpointOrTid) { $rawEndpointOrTid } else { '默认官方接口' }
             } else {
                 if ($rawEndpointOrTid.Length -gt 18) {
@@ -2158,7 +2169,7 @@ function Refresh-ProfilePopoverState {
             $subRow.Margin = [Windows.Thickness]::new(14, 3, 0, 0)
 
             $tunLbl = New-Object Windows.Controls.TextBlock
-            $tunLbl.Text = $(if ($curPlat -ne 'openai') { "公网 MCP ($($publicTunnel.Status)): $rawEndpointOrTid " } else { "隧道: $shortEndpointOrTid " })
+            $tunLbl.Text = $(if (-not $isChatGptPlat) { "公网 MCP ($($publicTunnel.Status)): $rawEndpointOrTid " } else { "隧道: $shortEndpointOrTid " })
             $tunLbl.FontSize = 10.5
             $tunLbl.Foreground = ConvertTo-Brush '#71717A'
             $tunLbl.FontFamily = New-Object Windows.Media.FontFamily('Consolas, Cascadia Mono, Microsoft YaHei UI')
@@ -2172,7 +2183,7 @@ function Refresh-ProfilePopoverState {
             $copyTunBtn.Padding = [Windows.Thickness]::new(2, 0, 2, 0)
             $copyTunBtn.MinHeight = 16
             $copyTunBtn.VerticalAlignment = 'Center'
-            $copyTunBtn.Tag = [pscustomobject]@{ Val = $rawEndpointOrTid; IsTunnel = ($curPlat -eq 'openai') }
+            $copyTunBtn.Tag = [pscustomobject]@{ Val = $rawEndpointOrTid; IsTunnel = $isChatGptPlat }
             $copyTunBtn.Add_Click({
                 param($s, $e)
                 $e.Handled = $true
@@ -2196,7 +2207,7 @@ function Refresh-ProfilePopoverState {
             $sepLbl.Foreground = ConvertTo-Brush '#71717A'
             $sepLbl.FontFamily = New-Object Windows.Media.FontFamily('Consolas, Cascadia Mono, Microsoft YaHei UI')
             $sepLbl.VerticalAlignment = 'Center'
-            if ($curPlat -eq 'openai') { [void]$subRow.Children.Add($sepLbl) }
+            if ($isChatGptPlat) { [void]$subRow.Children.Add($sepLbl) }
 
             $copyKeyBtn = New-Object Windows.Controls.Button
             $copyKeyBtn.Style = $script:window.Resources['LinkButton']
@@ -2219,7 +2230,7 @@ function Refresh-ProfilePopoverState {
                     Show-QuickToast '当前配置尚未保存 API Key'
                 }
             })
-            if ($curPlat -eq 'openai') { [void]$subRow.Children.Add($copyKeyBtn) }
+            if ($isChatGptPlat) { [void]$subRow.Children.Add($copyKeyBtn) }
             [void]$cardStack.Children.Add($subRow)
 
             # Inline Accordion Edit Box directly below this strip when expanded
@@ -2246,8 +2257,9 @@ function Refresh-ProfilePopoverState {
     }
 
     # Bottom Start / Reconnect / Test / Disable Button State
+    $isCurChatGpt = ($curPlat -in @('openai', 'chatgpt'))
     if ($script:controls.QuickConnectButton) {
-        if ($curPlat -ne 'openai') {
+        if (-not $isCurChatGpt) {
             $script:controls.QuickConnectButton.Content = $(if ($publicTunnel.Running) { '复制 MCP 网址' } elseif ($publicTunnel.ProcessId) { '↻ 查看连接状态' } else { '▶ 启动 HTTPS 隧道' })
         } elseif ($viewProf -and $activeProf -and $viewProf.Id -ne $activeProf.Id) {
             $script:controls.QuickConnectButton.Content = "▶ 启动此隧道"
@@ -2267,7 +2279,7 @@ function Refresh-ProfilePopoverState {
         }
     }
     if ($script:controls.DisconnectButton) {
-        if ($curPlat -ne 'openai') {
+        if (-not $isCurChatGpt) {
             $script:controls.DisconnectButton.Visibility = 'Visible'
             $script:controls.DisconnectButton.Content = '断开共享隧道'
             $script:controls.DisconnectButton.IsEnabled = [bool]$publicTunnel.ProcessId
@@ -2280,13 +2292,13 @@ function Refresh-ProfilePopoverState {
         }
     }
 
-    $isPrimaryViewing = ($curPlat -eq 'openai') -and ((-not $viewProf) -or ($viewProf.Id -eq 'prof_primary'))
+    $isPrimaryViewing = $isCurChatGpt -and ((-not $viewProf) -or ($viewProf.Id -eq 'prof_primary'))
     $plainKey = if ($viewProf -and $viewProf.PlainKey) { $viewProf.PlainKey } elseif ($isPrimaryViewing) { Get-SavedOpenAIKeyPlaintext $script:context } else { '' }
     $maskedKey = Format-MaskedApiKey $plainKey
     $script:controls.MaskedKeyText.Text = if ($script:keyMasked) { $maskedKey } elseif ($plainKey) { $plainKey } else { '尚未保存密钥（请点击编辑粘贴）' }
     $script:controls.ToggleKeyMaskButton.Content = if ($script:keyMasked) { '显示完整' } else { '隐藏明文' }
     # Note: CurrentTunnelIdText / TunnelInput retain their XAML contract names for test compatibility; local variable uses neutral endpointOrTunnelText
-    $endpointOrTunnelText = if ($curPlat -ne 'openai') {
+    $endpointOrTunnelText = if (-not $isCurChatGpt) {
         $(if ($viewProf -and $viewProf.BaseUrl) { [string]$viewProf.BaseUrl } else { $platMeta.DefaultUrl })
     } elseif ($viewProf -and $viewProf.TunnelId) {
         $viewProf.TunnelId
@@ -2302,7 +2314,7 @@ function Refresh-ProfilePopoverState {
         $script:initializing = $true
         try {
             $script:controls.ProfileNameInput.Text = [string]$viewProf.Name
-            $script:controls.TunnelInput.Text = $(if ($curPlat -eq 'openai') { [string]$viewProf.TunnelId } else { [string]$viewProf.BaseUrl })
+            $script:controls.TunnelInput.Text = $(if ($isCurChatGpt) { [string]$viewProf.TunnelId } else { [string]$viewProf.BaseUrl })
             $script:controls.KeyInput.Text = [string]$plainKey
         } finally {
             $script:initializing = $prevInit
@@ -2446,11 +2458,12 @@ function Enter-ProfileEditMode([string]$ProfileId = '') {
     $script:profilesState = Get-ConnectionProfiles $script:context $script:settings
     $viewProf = $script:profilesState.Profiles | Where-Object { $_.Id -eq $script:viewingProfileId } | Select-Object -First 1
     if ($viewProf) {
-        $pPlat = if ($viewProf.PSObject.Properties['Platform'] -and $viewProf.Platform) { ([string]$viewProf.Platform).ToLowerInvariant() } else { 'openai' }
+        $pPlat = if ($viewProf.PSObject.Properties['Platform'] -and $viewProf.Platform) { ([string]$viewProf.Platform).ToLowerInvariant() } else { 'chatgpt' }
+        if ($pPlat -eq 'openai') { $pPlat = 'chatgpt' }
         $script:initializing = $true
         try {
             if ($script:controls.ProfileNameInput) { $script:controls.ProfileNameInput.Text = [string]$viewProf.Name }
-            $script:controls.TunnelInput.Text = $(if ($pPlat -eq 'openai') { [string]$viewProf.TunnelId } else { [string]$viewProf.BaseUrl })
+            $script:controls.TunnelInput.Text = $(if ($pPlat -eq 'chatgpt') { [string]$viewProf.TunnelId } else { [string]$viewProf.BaseUrl })
             $script:controls.KeyInput.Text = [string]$viewProf.PlainKey
         } finally {
             $script:initializing = $false
@@ -2481,11 +2494,12 @@ function Select-ProfileCard([string]$ProfileId) {
     $script:profilesState = Get-ConnectionProfiles $script:context $script:settings
     $viewProf = $script:profilesState.Profiles | Where-Object { $_.Id -eq $ProfileId } | Select-Object -First 1
     if ($viewProf -and -not $script:popoverEditMode) {
-        $pPlat = if ($viewProf.PSObject.Properties['Platform'] -and $viewProf.Platform) { ([string]$viewProf.Platform).ToLowerInvariant() } else { 'openai' }
+        $pPlat = if ($viewProf.PSObject.Properties['Platform'] -and $viewProf.Platform) { ([string]$viewProf.Platform).ToLowerInvariant() } else { 'chatgpt' }
+        if ($pPlat -eq 'openai') { $pPlat = 'chatgpt' }
         $script:initializing = $true
         try {
             if ($script:controls.ProfileNameInput) { $script:controls.ProfileNameInput.Text = [string]$viewProf.Name }
-            $script:controls.TunnelInput.Text = $(if ($pPlat -eq 'openai') { [string]$viewProf.TunnelId } else { [string]$viewProf.BaseUrl })
+            $script:controls.TunnelInput.Text = $(if ($pPlat -eq 'chatgpt') { [string]$viewProf.TunnelId } else { [string]$viewProf.BaseUrl })
             $script:controls.KeyInput.Text = [string]$viewProf.PlainKey
         } finally {
             $script:initializing = $false
@@ -2496,13 +2510,15 @@ function Select-ProfileCard([string]$ProfileId) {
 
 function Start-NewProfileForm {
     $script:profilesState = Get-ConnectionProfiles $script:context $script:settings
-    $curPlat = if ($script:activeCapsulePlatform) { $script:activeCapsulePlatform.Trim().ToLowerInvariant() } else { 'openai' }
+    $curPlat = if ($script:activeCapsulePlatform) { $script:activeCapsulePlatform.Trim().ToLowerInvariant() } else { 'chatgpt' }
+    if ($curPlat -eq 'openai') { $curPlat = 'chatgpt' }
     $platProfs = @($script:profilesState.Profiles | Where-Object {
-        $pl = if ($_.PSObject.Properties['Platform'] -and $_.Platform) { ([string]$_.Platform).ToLowerInvariant() } else { 'openai' }
+        $pl = if ($_.PSObject.Properties['Platform'] -and $_.Platform) { ([string]$_.Platform).ToLowerInvariant() } else { 'chatgpt' }
+        if ($pl -eq 'openai') { $pl = 'chatgpt' }
         $pl -eq $curPlat
     })
     $countNext = $platProfs.Count + 1
-    $defName = if ($curPlat -eq 'openai') { "新隧道配置 #$countNext" } else { "新配置 #$countNext" }
+    $defName = if ($curPlat -eq 'chatgpt') { "新隧道配置 #$countNext" } else { "新配置 #$countNext" }
     $savedState = Save-ConnectionProfile -Context $script:context -Settings $script:settings -ProfileId 'new' -Name $defName -TunnelId '' -ApiKey '' -Platform $curPlat -SetActive:$false
     $newId = if ($savedState -and $savedState.PSObject.Properties['LastSavedProfileId'] -and $savedState.LastSavedProfileId) {
         [string]$savedState.LastSavedProfileId
@@ -2535,16 +2551,17 @@ function Invoke-DeleteCurrentProfile {
 
 function Invoke-PopoverQuickConnect {
     try {
-        $curPlat = if ($script:activeCapsulePlatform) { $script:activeCapsulePlatform.Trim().ToLowerInvariant() } else { 'openai' }
+        $curPlat = if ($script:activeCapsulePlatform) { $script:activeCapsulePlatform.Trim().ToLowerInvariant() } else { 'chatgpt' }
+        if ($curPlat -eq 'openai') { $curPlat = 'chatgpt' }
         if (-not $script:viewingProfileId) {
-            $script:viewingProfileId = $(if ($curPlat -eq 'openai') { 'prof_primary' } else { "prof_${curPlat}_default" })
+            $script:viewingProfileId = $(if ($curPlat -eq 'chatgpt') { 'prof_primary' } else { "prof_${curPlat}_default" })
         }
         if ($script:controls.FormScroll.Visibility -eq 'Visible') {
             Save-Form
         }
         $script:popoverExpandedProfileId = ''
         $script:popoverEditMode = $false
-        if ($curPlat -ne 'openai') {
+        if ($curPlat -ne 'chatgpt') {
             $prof = $script:profilesState.Profiles | Where-Object Id -eq $script:viewingProfileId | Select-Object -First 1
             $current = Get-PublicMcpTunnelState $script:context
             if ($current.Running) {
@@ -2776,14 +2793,46 @@ function Restore-HiddenRightPane {
 }
 
 function Toggle-PaneSummary([int]$PaneId) {
+    $newVisible = $false
     foreach ($p in @($script:layout.Panes)) {
         if ([int]$p.id -eq $PaneId) {
             $p.show_summary = -not [bool]$p.show_summary
+            $newVisible = [bool]$p.show_summary
             break
         }
     }
     Sync-LayoutMemory
-    Render-PanesWorkspace
+    $updatedInPlace = $false
+    if ($script:controls -and $script:controls.PanesHostGrid) {
+        foreach ($ch in $script:controls.PanesHostGrid.Children) {
+            if ($ch -is [Windows.Controls.Border] -and $ch.Tag -and $ch.Tag.PSObject.Properties['PaneId'] -and [int]$ch.Tag.PaneId -eq $PaneId) {
+                $t = $ch.Tag
+                if ($t.PSObject.Properties['SummaryCard'] -and $t.SummaryCard) {
+                    $t.SummaryCard.Visibility = $(if ($newVisible) { 'Visible' } else { 'Collapsed' })
+                    if ($newVisible -and -not $NoShow) {
+                        Start-SmoothEnterAnimation $t.SummaryCard -FromY -6 -DurationMs 160
+                    }
+                    $updatedInPlace = $true
+                }
+                if ($t.PSObject.Properties['SummaryButton'] -and $t.SummaryButton) {
+                    $isDark = ($script:effectiveTheme -eq 'dark')
+                    if ($isDark) {
+                        $t.SummaryButton.Background = ConvertTo-Brush $(if ($newVisible) { '#1E293B' } else { '#18181B' })
+                        $t.SummaryButton.BorderBrush = ConvertTo-Brush $(if ($newVisible) { '#1D4ED8' } else { '#27272A' })
+                        $t.SummaryButton.Foreground = ConvertTo-Brush $(if ($newVisible) { '#60A5FA' } else { '#D4D4D8' })
+                    } else {
+                        $t.SummaryButton.Background = ConvertTo-Brush $(if ($newVisible) { '#EFF6FF' } else { '#FFFFFF' })
+                        $t.SummaryButton.BorderBrush = ConvertTo-Brush $(if ($newVisible) { '#BFDBFE' } else { '#E4E4E7' })
+                        $t.SummaryButton.Foreground = ConvertTo-Brush $(if ($newVisible) { '#2563EB' } else { '#3F3F46' })
+                    }
+                }
+                break
+            }
+        }
+    }
+    if (-not $updatedInPlace) {
+        Render-PanesWorkspace
+    }
 }
 
 function Switch-PaneToPicker([int]$PaneId) {
@@ -2810,7 +2859,7 @@ function Assign-TaskToPane([int]$PaneId, [string]$SessionKey) {
         }
     }
     Sync-LayoutMemory
-    Render-PanesWorkspace
+    $script:lastCardsSig = ''
     Update-SessionCards
 }
 
@@ -2827,7 +2876,7 @@ function Enter-NewTaskLaunchpad([int]$PaneId = 0) {
     $script:pickerPaneIds.Remove([int]$target.id)
     $script:launchpadPaneIds[[int]$target.id] = $true
     Sync-LayoutMemory
-    Render-PanesWorkspace
+    $script:lastCardsSig = ''
     Update-SessionCards
 }
 
@@ -2841,20 +2890,26 @@ function Open-TaskFromRail([string]$SessionKey) {
     $script:launchpadPaneIds.Remove([int]$assigned.id)
     $script:pickerPaneIds.Remove([int]$assigned.id)
     Sync-LayoutMemory
-    Render-PanesWorkspace
+    $script:lastCardsSig = ''
     Update-SessionCards
 }
 
 function Resolve-LaunchpadSelectedBrowserProfile([int]$PaneId = 0) {
     $chosenId = ''
+    $chosenProvider = 'chatgpt'
     if ($script:composerPodCache -and $script:composerPodCache.Count -gt 0) {
         if ($PaneId -gt 0) {
             foreach ($k in @($script:composerPodCache.Keys)) {
                 if ([string]$k -like "$PaneId|__new_task__|*") {
                     $pod = $script:composerPodCache[$k]
-                    if ($pod -and $pod.Tag -and $pod.Tag.ProfCombo -and $pod.Tag.ProfCombo.SelectedItem -and $pod.Tag.ProfCombo.SelectedItem.Tag) {
-                        $chosenId = [string]$pod.Tag.ProfCombo.SelectedItem.Tag
-                        break
+                    if ($pod -and $pod.Tag) {
+                        if ($pod.Tag.PSObject.Properties['Provider'] -and $pod.Tag.Provider) {
+                            $chosenProvider = ([string]$pod.Tag.Provider).ToLowerInvariant()
+                        }
+                        if ($pod.Tag.ProfCombo -and $pod.Tag.ProfCombo.SelectedItem -and $pod.Tag.ProfCombo.SelectedItem.Tag) {
+                            $chosenId = [string]$pod.Tag.ProfCombo.SelectedItem.Tag
+                            break
+                        }
                     }
                 }
             }
@@ -2863,9 +2918,14 @@ function Resolve-LaunchpadSelectedBrowserProfile([int]$PaneId = 0) {
             foreach ($k in @($script:composerPodCache.Keys)) {
                 if ([string]$k -like "*|__new_task__|*") {
                     $pod = $script:composerPodCache[$k]
-                    if ($pod -and $pod.Tag -and $pod.Tag.ProfCombo -and $pod.Tag.ProfCombo.SelectedItem -and $pod.Tag.ProfCombo.SelectedItem.Tag) {
-                        $chosenId = [string]$pod.Tag.ProfCombo.SelectedItem.Tag
-                        break
+                    if ($pod -and $pod.Tag) {
+                        if ($pod.Tag.PSObject.Properties['Provider'] -and $pod.Tag.Provider) {
+                            $chosenProvider = ([string]$pod.Tag.Provider).ToLowerInvariant()
+                        }
+                        if ($pod.Tag.ProfCombo -and $pod.Tag.ProfCombo.SelectedItem -and $pod.Tag.ProfCombo.SelectedItem.Tag) {
+                            $chosenId = [string]$pod.Tag.ProfCombo.SelectedItem.Tag
+                            break
+                        }
                     }
                 }
             }
@@ -2875,33 +2935,58 @@ function Resolve-LaunchpadSelectedBrowserProfile([int]$PaneId = 0) {
         $wb = Get-WebBridgeState $script:context
         if ($wb -and $wb.session_bindings -and $wb.session_bindings.PSObject.Properties['__new_task__']) {
             $nt = $wb.session_bindings.__new_task__
-            if ($nt -and $nt.PSObject.Properties['user_locked_browser'] -and $nt.user_locked_browser -and $nt.PSObject.Properties['browser_profile'] -and $nt.browser_profile) {
-                $chosenId = [string]$nt.browser_profile
+            if ($nt) {
+                $chosenProvider = Get-WebRoomProvider $nt
+                if ($nt.PSObject.Properties['carrier_by_provider'] -and $nt.carrier_by_provider -and $nt.carrier_by_provider.PSObject.Properties[$chosenProvider] -and $nt.carrier_by_provider.$chosenProvider) {
+                    $chosenId = [string]$nt.carrier_by_provider.$chosenProvider
+                } elseif ($nt.PSObject.Properties['user_locked_browser'] -and $nt.user_locked_browser -and $nt.PSObject.Properties['browser_profile'] -and $nt.browser_profile) {
+                    $chosenId = [string]$nt.browser_profile
+                }
             }
         }
     }
+    if ($chosenProvider -eq 'openai') { $chosenProvider = 'chatgpt' }
     $profs = @(Get-AvailableBrowserProfiles -Context $script:context)
-    if (-not $chosenId) {
+    if ($chosenProvider -in @('gemini', 'claude')) {
+        $profs = @($profs | Where-Object { ([string]$_.Id -notlike 'Desktop:*') -and ([string]$_.Label -notmatch 'ChatGPT 桌面端') })
+    }
+    if (-not $chosenId -or ($chosenProvider -in @('gemini', 'claude') -and $chosenId -like 'Desktop:*')) {
         $def = $profs | Where-Object { $_.IsDefault } | Select-Object -First 1
-        $chosenId = if ($def -and $def.Id) { [string]$def.Id } else { 'Desktop:ChatGPT' }
+        if (-not $def -and $profs.Count -gt 0) { $def = $profs[0] }
+        $chosenId = if ($def -and $def.Id) { [string]$def.Id } elseif ($chosenProvider -in @('gemini', 'claude')) { 'Edge:Default' } else { 'Desktop:ChatGPT' }
     }
     $chosenId = Resolve-RelayBrowserProfile $chosenId $script:context
+    if ($chosenProvider -in @('gemini', 'claude') -and $chosenId -like 'Desktop:*') {
+        $chosenId = if ($profs.Count -gt 0) { [string]$profs[0].Id } else { 'Edge:Default' }
+    }
     $matchedProf = $profs | Where-Object { $_.Id -eq $chosenId } | Select-Object -First 1
     $cleanLabel = if ($matchedProf -and $matchedProf.Label) { ([string]$matchedProf.Label -replace '^(💻|🌐)\s*', '').Trim() } else { $chosenId }
     return [pscustomobject]@{
         Id = $chosenId
         Label = $cleanLabel
+        Provider = $chosenProvider
     }
 }
 
 function Invoke-OpenChatGptHome([int]$PaneId = 0) {
-    # User-initiated "open page": strictly honors the browser/desktop selected in the Launchpad dropdown.
+    # User-initiated "open page": strictly honors the platform + browser/desktop selected in the Launchpad dropdown.
     try {
         $sel = Resolve-LaunchpadSelectedBrowserProfile -PaneId $PaneId
         $profId = [string]$sel.Id
         $profLabel = [string]$sel.Label
-        if (-not $script:context.Isolated) { [void](Open-BridgeHandoverWindow -Url 'https://chatgpt.com/' -BrowserProfile $profId -Context $script:context) }
-        Show-QuickToast "↗ 已打开 ChatGPT（$profLabel）"
+        $prov = if ($sel.PSObject.Properties['Provider'] -and $sel.Provider) { ([string]$sel.Provider).ToLowerInvariant() } else { 'chatgpt' }
+        $homeUrl = switch ($prov) {
+            'gemini' { 'https://gemini.google.com/app' }
+            'claude' { 'https://claude.ai/new' }
+            default  { 'https://chatgpt.com/' }
+        }
+        $platTitle = switch ($prov) {
+            'gemini' { 'Gemini' }
+            'claude' { 'Claude' }
+            default  { 'ChatGPT' }
+        }
+        if (-not $script:context.Isolated) { [void](Open-BridgeHandoverWindow -Url $homeUrl -BrowserProfile $profId -Context $script:context) }
+        Show-QuickToast "↗ 已打开 $platTitle（$profLabel）"
     } catch {
         Show-QuickToast $_.Exception.Message
     }
@@ -2962,9 +3047,16 @@ function Invoke-RestoreSession([string]$SessionKey, [int]$TargetPaneId = 0) {
             if ([int]$p.id -eq $TargetPaneId) { $p.session_key = $SessionKey; $script:launchpadPaneIds.Remove([int]$p.id); $script:pickerPaneIds.Remove([int]$p.id); break }
         }
     } else {
-        Open-TaskFromRail $SessionKey
+        $panes = @($script:layout.Panes)
+        if ($panes.Count -eq 0) { Normalize-PaneWeights; $panes = @($script:layout.Panes) }
+        $emptyPane = $panes | Where-Object { -not $_.session_key } | Select-Object -First 1
+        $assigned = if ($emptyPane) { $emptyPane } else { $panes[0] }
+        $assigned.session_key = $SessionKey
+        $script:launchpadPaneIds.Remove([int]$assigned.id)
+        $script:pickerPaneIds.Remove([int]$assigned.id)
     }
     Sync-LayoutMemory
+    $script:lastCardsSig = ''
     Refresh-FormState
     if ($script:controls.ArchiveDrawerOverlay -and $script:controls.ArchiveDrawerOverlay.Visibility -eq 'Visible') {
         Update-ArchiveDrawerModal
@@ -3053,7 +3145,16 @@ function Invoke-OpenSessionWebPage($SessionObj) {
         if (-not $SessionObj) { return }
     }
     try {
-        $res = Open-SessionWebPage -Context $script:context -Session $SessionObj -RequireBoundConversation
+        $sessProv = Get-WebRoomProvider $SessionObj
+        if ($script:composerPodCache) {
+            foreach ($podEntry in $script:composerPodCache.Values) {
+                if ($podEntry -and $podEntry.Tag -and $podEntry.Tag.TaskKey -eq [string]$SessionObj.SessionKey -and $podEntry.Tag.PSObject.Properties['Provider'] -and $podEntry.Tag.Provider) {
+                    $sessProv = ([string]$podEntry.Tag.Provider).ToLowerInvariant()
+                    break
+                }
+            }
+        }
+        $res = Open-SessionWebPage -Context $script:context -Session $SessionObj -Provider $sessProv -RequireBoundConversation
         # Success copy only when the window was verified visible on screen; otherwise an honest warning.
         Show-QuickToast (Get-OpenWebPageToastText -Result $res)
     } catch {
@@ -3878,7 +3979,7 @@ function Confirm-LiveNewWindowHandover($SessionObj) {
     return $script:liveHandoverChoice
 }
 
-function Invoke-SendWebBridgeMessage($SessionObj, [string]$Mode = 'follow_window', [string]$CustomText = '', [int]$PaneId = 0, [string]$BrowserProfile = '', [string]$TargetModel = '', [string]$ReasoningEffort = '') {
+function Invoke-SendWebBridgeMessage($SessionObj, [string]$Mode = 'follow_window', [string]$CustomText = '', [int]$PaneId = 0, [string]$BrowserProfile = '', [string]$TargetModel = '', [string]$ReasoningEffort = '', [string]$Provider = '') {
     try {
         $effectiveMode = if (-not $SessionObj) { 'new_window_handover' } else { $Mode }
         $hasPendingHandoverPioneer = $false
@@ -3907,10 +4008,11 @@ function Invoke-SendWebBridgeMessage($SessionObj, [string]$Mode = 'follow_window
         $effProf = if ($BrowserProfile) { $BrowserProfile } elseif ($SessionObj -and $SessionObj.PSObject.Properties['BrowserProfile'] -and $SessionObj.BrowserProfile) { [string]$SessionObj.BrowserProfile } else { '' }
         $effMod  = if ($TargetModel) { $TargetModel } elseif ($SessionObj -and $SessionObj.PSObject.Properties['TargetModel'] -and $SessionObj.TargetModel) { [string]$SessionObj.TargetModel } else { '' }
         $effEff  = if ($ReasoningEffort) { $ReasoningEffort } elseif ($SessionObj -and $SessionObj.PSObject.Properties['ReasoningEffort'] -and $SessionObj.ReasoningEffort) { [string]$SessionObj.ReasoningEffort } else { '' }
+        $effProv = if ($Provider) { $Provider } elseif ($SessionObj) { Get-WebRoomProvider $SessionObj } else { '' }
 
         # Q4: a send from a single pane replaces the old task; with several panes the old tasks stay side by side.
         $isSinglePane = (@($script:layout.Panes).Count -le 1)
-        $res = Send-WebBridgeMessage -Context $script:context -Session $SessionObj -Mode $effectiveMode -CustomUserText $CustomText -BrowserProfile $effProf -TargetModel $effMod -ReasoningEffort $effEff -DeferUntilStopped:$deferUntilStopped -StopAndRetire:$stopAndRetire -OpenBrowserOnHandover:($effectiveMode -eq 'new_window_handover' -and (-not $deferUntilStopped)) -IsSinglePaneReplace $isSinglePane
+        $res = Send-WebBridgeMessage -Context $script:context -Session $SessionObj -Mode $effectiveMode -CustomUserText $CustomText -BrowserProfile $effProf -TargetModel $effMod -ReasoningEffort $effEff -Provider $effProv -DeferUntilStopped:$deferUntilStopped -StopAndRetire:$stopAndRetire -OpenBrowserOnHandover:($effectiveMode -eq 'new_window_handover' -and (-not $deferUntilStopped)) -IsSinglePaneReplace $isSinglePane
         if ($res -and $res.Prompt) {
             try { [Windows.Clipboard]::SetText($res.Prompt) } catch { }
         }
@@ -3962,21 +4064,13 @@ function Invoke-ToggleAutoWakeup([string]$SessionKey, [bool]$Enabled) {
     Show-QuickToast $(if ($Enabled) { '✓ 已开启「停顿超 3 分钟自动发继续唤醒与新窗口交接」' } else { '已关闭自动续跑唤醒' })
 }
 
-function Build-CodexSummaryCard($PaneObj, $SessionObj) {
-    $card = New-Object Windows.Controls.Border
-    $card.Width = 286
-    $card.HorizontalAlignment = 'Right'
-    $card.VerticalAlignment = 'Top'
-    $card.Margin = [Windows.Thickness]::new(0, 52, 16, 0)
-    $card.Background = ConvertTo-Brush '#FFFFFF'
-    $card.BorderBrush = ConvertTo-Brush '#E4E4E7'
-    $card.BorderThickness = [Windows.Thickness]::new(1)
-    $card.CornerRadius = [Windows.CornerRadius]::new(12)
-    $card.Padding = [Windows.Thickness]::new(15, 13, 15, 13)
-    $shadow = New-Object Windows.Media.Effects.DropShadowEffect
-    $shadow.BlurRadius = 24; $shadow.ShadowDepth = 4; $shadow.Opacity = 0.08; $shadow.Color = [Windows.Media.Color]::FromRgb(24, 24, 27)
-    $card.Effect = $shadow
-    [Windows.Controls.Panel]::SetZIndex($card, 80)
+function Update-CodexSummaryCardContent($Card, $PaneObj, $SessionObj) {
+    if (-not $Card -or -not $SessionObj) { return }
+    $steps = @(if ($SessionObj.PSObject.Properties.Name -contains 'Steps' -and $SessionObj.Steps) { $SessionObj.Steps })
+    $stepSummaryTxt = if ($SessionObj.PSObject.Properties.Name -contains 'StepCountText' -and $SessionObj.StepCountText) { $SessionObj.StepCountText } else { $SessionObj.ProgressText }
+    $stepsSig = (@($steps | Select-Object -Last 8 | ForEach-Object { "$($_.Id):$($_.Title):$($_.Status):$($_.UpdatedText)" }) -join '|') + "||$stepSummaryTxt||$($SessionObj.IsStalled)"
+    if ($Card.Tag -and [string]$Card.Tag -eq $stepsSig -and $Card.Child) { return }
+    $Card.Tag = $stepsSig
 
     $stack = New-Object Windows.Controls.StackPanel
     $headGrid = New-Object Windows.Controls.Grid
@@ -3994,7 +4088,6 @@ function Build-CodexSummaryCard($PaneObj, $SessionObj) {
     [void]$hLeft.Children.Add($hTitle)
 
     $hSub = New-Object Windows.Controls.TextBlock
-    $stepSummaryTxt = if ($SessionObj.PSObject.Properties.Name -contains 'StepCountText' -and $SessionObj.StepCountText) { $SessionObj.StepCountText } else { $SessionObj.ProgressText }
     $hSub.Text = "$stepSummaryTxt"
     $hSub.FontSize = 11.5
     $hSub.Foreground = ConvertTo-Brush '#71717A'
@@ -4018,7 +4111,6 @@ function Build-CodexSummaryCard($PaneObj, $SessionObj) {
     $sep.Margin = [Windows.Thickness]::new(0, 0, 0, 8)
     [void]$stack.Children.Add($sep)
 
-    $steps = @(if ($SessionObj.PSObject.Properties.Name -contains 'Steps' -and $SessionObj.Steps) { $SessionObj.Steps })
     if ($steps.Count -eq 0) {
         $emptyTxt = New-Object Windows.Controls.TextBlock
         $emptyTxt.Text = '当前对话直接通过 MCP 转发工具指令（未创建分步契约）。'
@@ -4073,8 +4165,28 @@ function Build-CodexSummaryCard($PaneObj, $SessionObj) {
             [void]$stack.Children.Add($rowG)
         }
     }
-    $card.Child = $stack
-    Start-SmoothEnterAnimation $card -FromY -6 -DurationMs 160
+    $Card.Child = $stack
+}
+
+function Build-CodexSummaryCard($PaneObj, $SessionObj) {
+    $card = New-Object Windows.Controls.Border
+    $card.Width = 286
+    $card.HorizontalAlignment = 'Right'
+    $card.VerticalAlignment = 'Top'
+    $card.Margin = [Windows.Thickness]::new(0, 52, 16, 0)
+    $card.Background = ConvertTo-Brush '#FFFFFF'
+    $card.BorderBrush = ConvertTo-Brush '#E4E4E7'
+    $card.BorderThickness = [Windows.Thickness]::new(1)
+    $card.CornerRadius = [Windows.CornerRadius]::new(12)
+    $card.Padding = [Windows.Thickness]::new(15, 13, 15, 13)
+    $shadow = New-Object Windows.Media.Effects.DropShadowEffect
+    $shadow.BlurRadius = 24; $shadow.ShadowDepth = 4; $shadow.Opacity = 0.08; $shadow.Color = [Windows.Media.Color]::FromRgb(24, 24, 27)
+    $card.Effect = $shadow
+    [Windows.Controls.Panel]::SetZIndex($card, 80)
+    Update-CodexSummaryCardContent -Card $card -PaneObj $PaneObj -SessionObj $SessionObj
+    if ($PaneObj -and $PaneObj.PSObject.Properties['show_summary'] -and [bool]$PaneObj.show_summary) {
+        Start-SmoothEnterAnimation $card -FromY -6 -DurationMs 160
+    }
     return $card
 }
 function Build-PaneTaskPicker($PaneObj) {
@@ -4789,6 +4901,7 @@ function Build-PaneStreamContent($PaneObj, $SessionObj, [bool]$IsNarrow = $false
     [void]$stack.Children.Add($headDivider)
 
     # Readable Milestones (Chronological stream: show latest 3 by default, with optional expander for older ones)
+    $diagTxt = $null
     $rCkpts = @(if ($SessionObj.PSObject.Properties.Name -contains 'ReadableCheckpoints' -and $SessionObj.ReadableCheckpoints) { $SessionObj.ReadableCheckpoints })
     if ($rCkpts.Count -eq 0) {
         $diagBlock = New-Object Windows.Controls.Border
@@ -4930,7 +5043,89 @@ function Build-PaneStreamContent($PaneObj, $SessionObj, [bool]$IsNarrow = $false
     [Windows.Controls.Grid]::SetRow($composeBorder, 1)
     [void]$hostContainer.Children.Add($composeBorder)
 
+    $hostContainer.Tag = [pscustomobject]@{
+        TitleBlock = $h1
+        OpenWebButton = $openWebBtn
+        StepFillBar = $miniFill
+        StepPillText = $stepPillTxt
+        StatusPill = $statusPill
+        StatusDot = $sDot
+        StatusLabel = $sLabel
+        DiagTextBlock = $diagTxt
+        QueueBanner = $msgBubble
+        StreamStack = $stack
+        IsNarrow = $IsNarrow
+    }
+
     return $hostContainer
+}
+
+function Update-PaneStatusPillVisual($StatusPill, $SDot, $SLabel, $SessionObj) {
+    if (-not $StatusPill -or -not $SDot -or -not $SLabel -or -not $SessionObj) { return }
+    $effAutoWakeup = if ($SessionObj.PSObject.Properties['AutoResendEnabled'] -and $null -ne $SessionObj.AutoResendEnabled) { [bool]$SessionObj.AutoResendEnabled }
+                     elseif ($SessionObj.PSObject.Properties['AutoWakeupEnabled'] -and $null -ne $SessionObj.AutoWakeupEnabled) { [bool]$SessionObj.AutoWakeupEnabled }
+                     else { $false }
+    $taskStallMins = if ($SessionObj.PSObject.Properties['StallMinutes'] -and [double]$SessionObj.StallMinutes -gt 0) { [double]$SessionObj.StallMinutes } else { 3 }
+    $taskStallSecs = if ($SessionObj.PSObject.Properties['StallSeconds'] -and [int]$SessionObj.StallSeconds -gt 0 -and [int]$SessionObj.StallSeconds -lt 60) {
+        [int]$SessionObj.StallSeconds
+    } elseif ($SessionObj.PSObject.Properties['StallMinutes'] -and [double]$SessionObj.StallMinutes -gt 0) {
+        [int][Math]::Round([double]$SessionObj.StallMinutes * 60)
+    } elseif ($SessionObj.PSObject.Properties['StallSeconds'] -and [int]$SessionObj.StallSeconds -gt 0) {
+        [int]$SessionObj.StallSeconds
+    } else {
+        [int][Math]::Round($taskStallMins * 60)
+    }
+    $stallDisplayUnit = if ($taskStallSecs -lt 60) { "$taskStallSecs 秒" } else { "$([int][Math]::Max(1, [Math]::Round($taskStallSecs / 60.0))) 分钟" }
+    $stallTriggerUnit = if ($taskStallSecs -lt 60) { ">${taskStallSecs}秒静默触发" } else { ">$([int][Math]::Max(1, [Math]::Round($taskStallSecs / 60.0)))分钟静默触发" }
+    $taskMaxRetries = if ($SessionObj.PSObject.Properties['MaxRetries'] -and [int]$SessionObj.MaxRetries -gt 0) { [int]$SessionObj.MaxRetries } else { 1 }
+
+    $paneVital = if (-not $SessionObj.IsArchived) { Get-VitalSubstateVisual $SessionObj } else { $null }
+    if ($paneVital) {
+        $StatusPill.Background = ConvertTo-Brush $paneVital.Bg
+        $StatusPill.BorderBrush = ConvertTo-Brush $paneVital.Border
+        $SDot.Fill = ConvertTo-Brush $paneVital.Dot
+        $SLabel.Foreground = ConvertTo-Brush $paneVital.Fg
+        $guardPart = if ($effAutoWakeup) { "自动重发守护已就绪 ($stallTriggerUnit)" } else { '自动重发已关闭' }
+        $SLabel.Text = "$($paneVital.PillText) · $guardPart"
+    } elseif ($SessionObj.IsStalled) {
+        $StatusPill.Background = ConvertTo-Brush '#FFFBEB'
+        $StatusPill.BorderBrush = ConvertTo-Brush '#FDE68A'
+        $SDot.Fill = ConvertTo-Brush '#D97706'
+        $SLabel.Foreground = ConvertTo-Brush '#B45309'
+        if (-not $effAutoWakeup) {
+            $SLabel.Text = "网页已停顿 $stallDisplayUnit · 自动重发已关闭"
+        } else {
+            $rawBm = if ($SessionObj.PSObject.Properties['BreakerMessage'] -and $SessionObj.BreakerMessage) { [string]$SessionObj.BreakerMessage } else { '' }
+            $retryPart = if ($rawBm -and $rawBm -notmatch '闭环守护待命中|自动重发已关闭') {
+                $rawBm
+            } else {
+                "已自动重发 $($SessionObj.RetryCount)/$taskMaxRetries 次"
+            }
+            $SLabel.Text = "网页已停顿 $stallDisplayUnit · $retryPart"
+        }
+    } elseif ($SessionObj.IsArchived) {
+        $StatusPill.Background = ConvertTo-Brush '#F4F4F5'
+        $StatusPill.BorderBrush = ConvertTo-Brush '#E4E4E7'
+        $SDot.Fill = ConvertTo-Brush '#A1A1AA'
+        $SLabel.Foreground = ConvertTo-Brush '#52525B'
+        $SLabel.Text = "已归档会话 · $($SessionObj.ArchiveReason)"
+    } elseif ($SessionObj.PSObject.Properties['VitalState'] -and [string]$SessionObj.VitalState -eq 'UNKNOWN') {
+        $StatusPill.Background = ConvertTo-Brush '#EFF6FF'
+        $StatusPill.BorderBrush = ConvertTo-Brush '#BFDBFE'
+        $SDot.Fill = ConvertTo-Brush '#2563EB'
+        $SLabel.Foreground = ConvertTo-Brush '#1D4ED8'
+        $guardPart = if ($effAutoWakeup) { "自动重发守护已就绪 ($stallTriggerUnit)" } else { '自动重发已关闭' }
+        $vHint = if ($SessionObj.PSObject.Properties['VitalHintText'] -and $SessionObj.VitalHintText) { [string]$SessionObj.VitalHintText } else { '正在核实网页运行状态' }
+        $SLabel.Text = "$vHint · $guardPart"
+    } else {
+        $StatusPill.Background = ConvertTo-Brush '#F0FDF4'
+        $StatusPill.BorderBrush = ConvertTo-Brush '#BBF7D0'
+        $SDot.Fill = ConvertTo-Brush '#16A34A'
+        $SLabel.Foreground = ConvertTo-Brush '#15803D'
+        $guardPart = if ($effAutoWakeup) { "自动重发守护已就绪 ($stallTriggerUnit)" } else { '自动重发已关闭' }
+        $vPrefix = if ($SessionObj.PSObject.Properties['VitalHintText'] -and $SessionObj.VitalHintText) { [string]$SessionObj.VitalHintText } else { '本机执行中' }
+        $SLabel.Text = "$vPrefix · $guardPart"
+    }
 }
 
 function Update-ComposerPodState($StateInfo) {
@@ -4993,12 +5188,184 @@ function Set-SessionPropSafe($SessionObj, [string]$PropName, $Value) {
     } catch { }
 }
 
-function Sync-ComposerModelAndEffortCombos($StateInfo, $AvailModels, [string]$CurModel, [string]$WebModel, [string]$CurEffort, [string]$WebEffort, [bool]$IsNarrow) {
+function Resolve-UiPlatformCode([string]$Platform = 'chatgpt') {
+    $p = if ($Platform) { $Platform.Trim().ToLowerInvariant() } else { 'chatgpt' }
+    if ($p -in @('', 'openai', 'chatgpt')) { return 'chatgpt' }
+    return $p
+}
+
+function Register-ComposerOptimisticMutation($StateInfo) {
+    if (-not $StateInfo) { return }
+    $nowUtc = [DateTime]::UtcNow
+    Set-SessionPropSafe $StateInfo 'MutationEpoch' $nowUtc
+    $script:lastComposerMutationEpoch = $nowUtc
+}
+
+function Test-ComposerOptimisticLockActive($StateInfo, [double]$LockSeconds = 3.0) {
+    if (-not $StateInfo) { return $false }
+    if ($StateInfo.PSObject.Properties['MutationEpoch'] -and $StateInfo.MutationEpoch -is [DateTime]) {
+        $elapsed = ([DateTime]::UtcNow - [DateTime]$StateInfo.MutationEpoch).TotalSeconds
+        if ($elapsed -ge 0 -and $elapsed -lt $LockSeconds) { return $true }
+    }
+    return $false
+}
+
+function Invoke-TaskComposerConfigAsync {
+    param(
+        $Context = $null,
+        [hashtable]$Params = @{}
+    )
+    if (-not $Params -or $Params.Count -eq 0) { return $null }
+    $effCtx = if ($Context) { $Context } else { $script:context }
+    $noShowVar = Get-Variable -Name 'NoShow' -ErrorAction SilentlyContinue
+    $isNoShow = ($noShowVar -and [bool]$noShowVar.Value)
+    $isIso = ($effCtx -and $effCtx.PSObject.Properties['Isolated'] -and [bool]$effCtx.Isolated)
+    $modPath = if ($PSScriptRoot) { Join-Path $PSScriptRoot 'ConnectionManager.psm1' } else { '' }
+    if ($isNoShow -or $isIso -or (-not $modPath) -or (-not (Test-Path -LiteralPath $modPath))) {
+        return (Set-TaskComposerConfig @Params)
+    }
+    try {
+        $psBg = [powershell]::Create()
+        [void]$psBg.AddScript({
+            param($ModulePath, $CallParams)
+            try {
+                Import-Module $ModulePath -Force
+                [void](Set-TaskComposerConfig @CallParams)
+            } catch { }
+        }).AddArgument($modPath).AddArgument($Params)
+        $handle = $psBg.BeginInvoke()
+        return [pscustomobject]@{ DispatchedAsync = $true; Handle = $handle; PowerShell = $psBg }
+    } catch {
+        return (Set-TaskComposerConfig @Params)
+    }
+}
+
+function Invoke-ComposerPersistence($StateInfo, [hashtable]$Params) {
+    if (-not $Params -or $Params.Count -eq 0) { return $null }
+    Register-ComposerOptimisticMutation $StateInfo
+    if ($StateInfo -and $StateInfo.PSObject.Properties['UseAsyncPersistence'] -and [bool]$StateInfo.UseAsyncPersistence) {
+        return (Invoke-TaskComposerConfigAsync -Context $Params['Context'] -Params $Params)
+    }
+    $noShowVar = Get-Variable -Name 'NoShow' -ErrorAction SilentlyContinue
+    $isNoShow = ($noShowVar -and [bool]$noShowVar.Value)
+    $effCtx = $Params['Context']
+    $isIso = ($effCtx -and $effCtx.PSObject.Properties['Isolated'] -and [bool]$effCtx.Isolated)
+    if ($isNoShow -or (-not $effCtx) -or $isIso) {
+        return (Set-TaskComposerConfig @Params)
+    }
+    return (Invoke-TaskComposerConfigAsync -Context $effCtx -Params $Params)
+}
+
+function Toggle-ComposerModelGroupFold($StateInfo, [string]$Provider) {
+    if (-not $StateInfo -or -not $StateInfo.ModelCombo) { return }
+    $normProv = Resolve-UiPlatformCode $Provider
+    if (-not ($StateInfo.PSObject.Properties['CollapsedProviders'] -and $StateInfo.CollapsedProviders -is [hashtable])) {
+        Set-SessionPropSafe $StateInfo 'CollapsedProviders' @{}
+    }
+    $newCollapsed = -not [bool]$StateInfo.CollapsedProviders[$normProv]
+    $StateInfo.CollapsedProviders[$normProv] = $newCollapsed
+    $arrow = if ($newCollapsed) { '▸' } else { '▾' }
+    $childVis = if ($newCollapsed) { 'Collapsed' } else { 'Visible' }
+    foreach ($it in @($StateInfo.ModelCombo.Items)) {
+        if (-not $it) { continue }
+        $itTag = [string]$it.Tag
+        if ($itTag -eq "__group_$normProv" -or ($normProv -eq 'chatgpt' -and $itTag -eq '__group_openai')) {
+            $rawContent = [string]$it.Content
+            $stripped = ($rawContent -replace '^[▾▸]\s*', '').Trim()
+            $it.Content = "$arrow $stripped"
+        } elseif ((Resolve-UiPlatformCode ([string]$it.ToolTip)) -eq $normProv) {
+            $it.Visibility = $childVis
+        }
+    }
+}
+
+function Sync-ComposerCarrierCombo($StateInfo, $AvailCarriers = $null, [string]$PreferredCarrier = '') {
+    if (-not $StateInfo -or -not $StateInfo.PSObject.Properties['ProfCombo'] -or -not $StateInfo.ProfCombo) { return '' }
+    $profCombo = $StateInfo.ProfCombo
+    $previousSuppress = [bool]$script:suppressComposerEvents
+    $script:suppressComposerEvents = $true
+    try {
+        $activeProv = Resolve-UiPlatformCode $(if ($StateInfo.PSObject.Properties['Provider'] -and $StateInfo.Provider) { [string]$StateInfo.Provider } else { 'chatgpt' })
+        Set-SessionPropSafe $StateInfo 'Provider' $activeProv
+        if (-not ($StateInfo.PSObject.Properties['CarrierByProvider'] -and $StateInfo.CarrierByProvider -is [hashtable])) {
+            $seededMap = @{}
+            if ($StateInfo.PSObject.Properties['CarrierByProvider'] -and $StateInfo.CarrierByProvider) {
+                foreach ($kp in $StateInfo.CarrierByProvider.PSObject.Properties) {
+                    if ($kp.Name -and $kp.Value) { $seededMap[(Resolve-UiPlatformCode $kp.Name)] = [string]$kp.Value }
+                }
+            }
+            Set-SessionPropSafe $StateInfo 'CarrierByProvider' $seededMap
+        }
+        $carriersRaw = @(if ($null -ne $AvailCarriers) {
+            $AvailCarriers
+        } elseif ($StateInfo.PSObject.Properties['AvailableCarriers'] -and $StateInfo.AvailableCarriers) {
+            $StateInfo.AvailableCarriers
+        } elseif (Get-Command Get-AvailableBrowserProfiles -ErrorAction SilentlyContinue) {
+            Get-AvailableBrowserProfiles -Context $script:context
+        })
+        $filteredCarriers = @(foreach ($c in $carriersRaw) {
+            if (-not $c) { continue }
+            $cId = [string]$c.Id
+            $cLbl = [string]$c.Label
+            if ($activeProv -in @('gemini', 'claude') -and ($cId -like 'Desktop:*' -or $cLbl -match 'ChatGPT 桌面端')) {
+                continue
+            }
+            $c
+        })
+        $remembered = if ($StateInfo.CarrierByProvider.ContainsKey($activeProv) -and $StateInfo.CarrierByProvider[$activeProv]) {
+            [string]$StateInfo.CarrierByProvider[$activeProv]
+        } else { '' }
+        $candidateIds = @($filteredCarriers | ForEach-Object { [string]$_.Id })
+        $resolvedCarrier = if ($remembered -and ($candidateIds -contains $remembered)) {
+            $remembered
+        } elseif ($PreferredCarrier -and ($candidateIds -contains $PreferredCarrier)) {
+            $PreferredCarrier
+        } elseif ($StateInfo.PSObject.Properties['BrowserProfile'] -and $StateInfo.BrowserProfile -and ($candidateIds -contains [string]$StateInfo.BrowserProfile)) {
+            [string]$StateInfo.BrowserProfile
+        } else {
+            $defC = $filteredCarriers | Where-Object { $_.PSObject.Properties['IsDefault'] -and [bool]$_.IsDefault } | Select-Object -First 1
+            if ($defC -and $defC.Id) { [string]$defC.Id }
+            elseif ($candidateIds.Count -gt 0) { [string]$candidateIds[0] }
+            else { '' }
+        }
+        if ($resolvedCarrier) {
+            $StateInfo.CarrierByProvider[$activeProv] = $resolvedCarrier
+            Set-SessionPropSafe $StateInfo 'BrowserProfile' $resolvedCarrier
+        }
+        if (-not $profCombo.IsDropDownOpen) {
+            $profCombo.Items.Clear()
+            $selIdx = 0
+            for ($ci = 0; $ci -lt $filteredCarriers.Count; $ci++) {
+                $cp = $filteredCarriers[$ci]
+                $pItem = New-Object Windows.Controls.ComboBoxItem
+                $rawProfLbl = ([string]$cp.Label -replace '\s*\(Web[^)]*\)', '').Trim()
+                $pItem.Content = if ($rawProfLbl -match '^(💻|🌐)') { $rawProfLbl } else { "🌐 $rawProfLbl" }
+                $pItem.Tag = [string]$cp.Id
+                [void]$profCombo.Items.Add($pItem)
+                if ([string]$cp.Id -eq $resolvedCarrier) { $selIdx = $ci }
+            }
+            if ($profCombo.Items.Count -gt 0) {
+                $profCombo.SelectedIndex = $selIdx
+            }
+        }
+        return $resolvedCarrier
+    } finally {
+        $script:suppressComposerEvents = $previousSuppress
+    }
+}
+
+function Sync-ComposerModelAndEffortCombos($StateInfo, $AvailModels, [string]$CurModel, [string]$WebModel, [string]$CurEffort, [string]$WebEffort, [bool]$IsNarrow, [switch]$FromBackgroundPoll) {
     if (-not $StateInfo -or -not $StateInfo.ModelCombo -or -not $StateInfo.EffortCombo) { return }
     # Programmatic repopulation/selection must not invoke the user's SelectionChanged handlers.
     $previousSuppress = [bool]$script:suppressComposerEvents
     $script:suppressComposerEvents = $true
     try {
+    if (-not ($StateInfo.PSObject.Properties['CollapsedProviders'] -and $StateInfo.CollapsedProviders -is [hashtable])) {
+        Set-SessionPropSafe $StateInfo 'CollapsedProviders' @{}
+    }
+    $activeProvider = Resolve-UiPlatformCode $(if ($StateInfo.PSObject.Properties['Provider'] -and $StateInfo.Provider) { [string]$StateInfo.Provider } else { 'chatgpt' })
+    Set-SessionPropSafe $StateInfo 'Provider' $activeProvider
+
     $modelsArr = @(if ($AvailModels) { $AvailModels })
     $providerCatalogs = if ($StateInfo.PSObject.Properties['AvailableModelsByProvider']) { $StateInfo.AvailableModelsByProvider } else { $null }
     $connectedProviders = $null
@@ -5023,9 +5390,9 @@ function Sync-ComposerModelAndEffortCombos($StateInfo, $AvailModels, [string]$Cu
         $script:profilesState
     } else { $null }
     $enabledPlats = @(if ($profStateRef -and $profStateRef.PSObject.Properties['EnabledPlatforms'] -and $profStateRef.EnabledPlatforms) {
-        $profStateRef.EnabledPlatforms | Where-Object { $_ } | ForEach-Object { ([string]$_).Trim().ToLowerInvariant() }
-    } else { @('openai') })
-    if ($enabledPlats.Count -eq 0) { $enabledPlats = @('openai') }
+        $profStateRef.EnabledPlatforms | Where-Object { $_ } | ForEach-Object { Resolve-UiPlatformCode ([string]$_) }
+    } else { @('chatgpt') })
+    if ($enabledPlats.Count -eq 0) { $enabledPlats = @('chatgpt') }
     $hasLiveDisplay = ($null -ne $script:display -and $script:display.PSObject.Properties['Running'])
     $tunOnlineNow = if ($StateInfo.PSObject.Properties['TunnelOnline'] -and $null -ne $StateInfo.TunnelOnline) {
         [bool]$StateInfo.TunnelOnline
@@ -5034,59 +5401,84 @@ function Sync-ComposerModelAndEffortCombos($StateInfo, $AvailModels, [string]$Cu
     } else {
         $true
     }
+    $pubTunOnlineNow = if ($StateInfo.PSObject.Properties['PublicTunnelOnline'] -and $null -ne $StateInfo.PublicTunnelOnline) {
+        [bool]$StateInfo.PublicTunnelOnline
+    } elseif ($script:context -and (Get-Command Get-PublicMcpTunnelState -ErrorAction SilentlyContinue)) {
+        [bool](Get-PublicMcpTunnelState $script:context).Running
+    } else {
+        $null
+    }
     $resolvePlatGroupSummary = {
         param([string]$PlatCode)
-        $pTitle = switch ($PlatCode) {
-            'openai'   { 'OpenAI' }
+        $normCode = Resolve-UiPlatformCode $PlatCode
+        $pTitle = switch ($normCode) {
+            'chatgpt'  { 'ChatGPT' }
             'claude'   { 'Claude' }
             'gemini'   { 'Gemini' }
             'deepseek' { 'DeepSeek' }
             'opencode' { 'OpenCode' }
-            default    { $PlatCode }
+            default    { $normCode }
         }
         $actP = $null
         if ($profStateRef -and $profStateRef.PSObject.Properties['Profiles'] -and $profStateRef.Profiles) {
             $actP = $profStateRef.Profiles | Where-Object {
-                $pl = if ($_.PSObject.Properties['Platform'] -and $_.Platform) { ([string]$_.Platform).ToLowerInvariant() } else { 'openai' }
-                $pl -eq $PlatCode -and ($_.PSObject.Properties['IsActive'] -and [bool]$_.IsActive)
+                $pl = if ($_.PSObject.Properties['Platform'] -and $_.Platform) { Resolve-UiPlatformCode ([string]$_.Platform) } else { 'chatgpt' }
+                $pl -eq $normCode -and ($_.PSObject.Properties['IsActive'] -and [bool]$_.IsActive)
             } | Select-Object -First 1
             if (-not $actP) {
                 $actP = $profStateRef.Profiles | Where-Object {
-                    $pl = if ($_.PSObject.Properties['Platform'] -and $_.Platform) { ([string]$_.Platform).ToLowerInvariant() } else { 'openai' }
-                    $pl -eq $PlatCode
+                    $pl = if ($_.PSObject.Properties['Platform'] -and $_.Platform) { Resolve-UiPlatformCode ([string]$_.Platform) } else { 'chatgpt' }
+                    $pl -eq $normCode
                 } | Select-Object -First 1
             }
         }
         $pName = if ($actP -and $actP.PSObject.Properties['Name'] -and $actP.Name) { [string]$actP.Name } else { '默认' }
         $pEn = if ($actP -and $actP.PSObject.Properties['Enabled']) { [bool]$actP.Enabled } else { $true }
         $pHk = if ($actP -and $actP.PSObject.Properties['HasKey']) { [bool]$actP.HasKey } else { $false }
-        $pKind = if ($actP -and $actP.PSObject.Properties['Kind'] -and $actP.Kind) { [string]$actP.Kind } elseif ($PlatCode -eq 'openai') { 'tunnel' } else { 'apikey' }
+        $pKind = if ($actP -and $actP.PSObject.Properties['Kind'] -and $actP.Kind) { [string]$actP.Kind } elseif ($normCode -eq 'chatgpt') { 'tunnel' } else { 'public_tunnel' }
         $pTid = if ($actP -and $actP.PSObject.Properties['TunnelId']) { [string]$actP.TunnelId } else { '' }
-        $isReady = if ($pKind -eq 'tunnel') { $pEn -and $pHk -and [bool]$pTid -and $tunOnlineNow } else { $pEn -and $pHk }
+        $isReady = if ($normCode -eq 'chatgpt' -or $pKind -eq 'tunnel') {
+            $pEn -and $pHk -and [bool]$pTid -and $tunOnlineNow
+        } elseif ($null -ne $pubTunOnlineNow) {
+            $pEn -and [bool]$pubTunOnlineNow
+        } else {
+            $pEn -and ($pHk -or $pKind -eq 'public_tunnel')
+        }
         $dotIcon = if ($isReady) { '🟢' } else { '⚪' }
         return [pscustomobject]@{
-            Code = $PlatCode
+            Code = $normCode
             Title = $pTitle
             Name = $pName
             Ready = $isReady
             Dot = $dotIcon
-            Sig = "${PlatCode}:${pName}:${isReady}"
+            Sig = "${normCode}:${pName}:${isReady}"
         }
     }
     $platsSig = (@($enabledPlats | ForEach-Object { (& $resolvePlatGroupSummary $_).Sig }) -join '|')
+    $collapsedSig = (@($enabledPlats | ForEach-Object { "${_}:$([bool]$StateInfo.CollapsedProviders[$_])" }) -join ',')
     $isColdStartNoWebModel = ($modelsArr.Count -eq 0) -and [string]::IsNullOrWhiteSpace($WebModel) -and ([string]::IsNullOrWhiteSpace($CurModel) -or $CurModel -eq 'inherit') -and [string]::IsNullOrWhiteSpace($WebEffort)
-    $catalogSig = "$connectedSig||$catalogsSig||$modelSlugsSig||webM=$WebModel||webE=$WebEffort||curM=$CurModel||plats=$platsSig||cold=$isColdStartNoWebModel"
+    $catalogSig = "$connectedSig||$catalogsSig||$modelSlugsSig||webM=$WebModel||webE=$WebEffort||curM=$CurModel||prov=$activeProvider||plats=$platsSig||fold=$collapsedSig||cold=$isColdStartNoWebModel"
 
     $modelCombo = $StateInfo.ModelCombo
     $effortCombo = $StateInfo.EffortCombo
     $webModelDisplay = if ($WebModel) { $WebModel } else { '跟随网页' }
     if ($StateInfo.LastCatalogSig -eq $catalogSig -and $modelCombo.Items.Count -gt 0 -and $effortCombo.Items.Count -gt 0 -and -not $modelCombo.IsDropDownOpen -and -not $effortCombo.IsDropDownOpen) {
-        $modelCombo.Items[0].Content = $(if ($IsNarrow) { '🤖 默认' } else { "🤖 默认 ($webModelDisplay)" })
-        $curEffItem0 = [string]$effortCombo.Items[0].Content
-        if ($curEffItem0 -match '固定') {
-            $effortCombo.Items[0].Content = $(if ($IsNarrow) { '🧠 固定' } else { '🧠 默认 (当前模型固定)' })
-        } elseif ($StateInfo.PSObject.Properties['LastWebEffortDisplay'] -and $StateInfo.LastWebEffortDisplay) {
-            $effortCombo.Items[0].Content = $(if ($IsNarrow) { '🧠 默认' } else { "🧠 默认 ($($StateInfo.LastWebEffortDisplay))" })
+        if ([string]$modelCombo.Items[0].Tag -eq 'inherit') {
+            $modelCombo.Items[0].Content = $(if ($IsNarrow) { '🤖 默认' } else { "🤖 默认 ($webModelDisplay)" })
+        } elseif ($modelCombo.Items.Count -gt 1 -and [string]$modelCombo.Items[1].Tag -eq 'inherit' -and [string]$modelCombo.Items[1].ToolTip -eq 'chatgpt') {
+            $modelCombo.Items[1].Content = $(if ($IsNarrow) { '🤖 默认' } else { "🤖 默认 ($webModelDisplay)" })
+        }
+        if ($activeProvider -in @('gemini', 'claude')) {
+            $effortCombo.IsEnabled = $false
+            $effortCombo.Items[0].Content = '🧠 跟随网页设置'
+        } else {
+            $effortCombo.IsEnabled = $true
+            $curEffItem0 = [string]$effortCombo.Items[0].Content
+            if ($curEffItem0 -match '固定') {
+                $effortCombo.Items[0].Content = $(if ($IsNarrow) { '🧠 固定' } else { '🧠 默认 (当前模型固定)' })
+            } elseif ($StateInfo.PSObject.Properties['LastWebEffortDisplay'] -and $StateInfo.LastWebEffortDisplay) {
+                $effortCombo.Items[0].Content = $(if ($IsNarrow) { '🧠 默认' } else { "🧠 默认 ($($StateInfo.LastWebEffortDisplay))" })
+            }
         }
     } else {
 
@@ -5213,124 +5605,202 @@ function Sync-ComposerModelAndEffortCombos($StateInfo, $AvailModels, [string]$Cu
 
         $buildPlatGroupHeader = {
             param([string]$PlatCode)
-            $summary = & $resolvePlatGroupSummary $PlatCode
+            $normCode = Resolve-UiPlatformCode $PlatCode
+            $summary = & $resolvePlatGroupSummary $normCode
+            $isCollapsed = [bool]$StateInfo.CollapsedProviders[$normCode]
+            $arrowIcon = if ($isCollapsed) { '▸' } else { '▾' }
             $hdrItem = New-Object Windows.Controls.ComboBoxItem
-            $hdrItem.Content = "$($summary.Dot) $($summary.Title) · $($summary.Name)"
-            $hdrItem.Tag = "__group_$PlatCode"
-            $hdrItem.IsEnabled = $false
+            $hdrItem.Content = "$arrowIcon $($summary.Dot) $($summary.Title) · $($summary.Name)"
+            $hdrItem.Tag = "__group_$normCode"
+            $hdrItem.FontWeight = 'SemiBold'
+            $hdrItem.IsEnabled = $true
+            $hdrItem.Focusable = $false
+            $hdrItem.Add_PreviewMouseLeftButtonDown({
+                param($s, $e)
+                $e.Handled = $true
+                $pCode = ([string]$s.Tag) -replace '^__group_', ''
+                Toggle-ComposerModelGroupFold $StateInfo $pCode
+            })
             return $hdrItem
         }
 
-        $modelCombo.ToolTip = "选择本任务使用的 ChatGPT 模型（默认继承原网页当前模型：$webModelDisplay）"
+        $modelCombo.ToolTip = "选择本任务使用的平台与模型（默认继承原网页当前模型：$webModelDisplay）"
         $modelCombo.Items.Clear()
-        $defaultModelItem = New-Object Windows.Controls.ComboBoxItem
-        $defaultModelItem.Content = $(if ($IsNarrow) { '🤖 默认' } else { "🤖 默认 ($webModelDisplay)" })
-        $defaultModelItem.Tag = 'inherit'
-        [void]$modelCombo.Items.Add($defaultModelItem)
+        $allowWebDomModels = ($StateInfo.PSObject.Properties['AllowWebDomModelList'] -and [bool]$StateInfo.AllowWebDomModelList)
 
-        $seenModelTags = @{ 'inherit' = $true }
-        for ($pi = 0; $pi -lt $enabledPlats.Count; $pi++) {
-            $pCode = $enabledPlats[$pi]
-            $provider = if ($pCode -eq 'openai') { 'chatgpt' } else { $pCode }
-            $pModels = @(if ($null -ne $connectedProviders -and $connectedProviders -notcontains $provider) { } elseif ($providerCatalogs -and $providerCatalogs.PSObject.Properties[$provider]) { $providerCatalogs.$provider } elseif ($provider -eq 'chatgpt') { $modelsArr })
-            if ($enabledPlats.Count -gt 1) { [void]$modelCombo.Items.Add((& $buildPlatGroupHeader $pCode)) }
-            if ($pi -gt 0) {
-                $pDefItem = New-Object Windows.Controls.ComboBoxItem
-                $pDefItem.Content = '🤖 默认 (跟随网页)'
-                $pDefItem.Tag = 'inherit'
-                $pDefItem.ToolTip = $provider
-                [void]$modelCombo.Items.Add($pDefItem)
-            } else { $defaultModelItem.ToolTip = $provider }
+        if ($enabledPlats.Count -le 1) {
+            $singleProv = Resolve-UiPlatformCode $enabledPlats[0]
+            $defaultModelItem = New-Object Windows.Controls.ComboBoxItem
+            $defaultModelItem.Content = $(if ($IsNarrow) { '🤖 默认' } else { "🤖 默认 ($webModelDisplay)" })
+            $defaultModelItem.Tag = 'inherit'
+            $defaultModelItem.ToolTip = $singleProv
+            [void]$modelCombo.Items.Add($defaultModelItem)
+            $pModels = @(if ($singleProv -in @('gemini', 'claude') -and -not $allowWebDomModels) {
+            } elseif ($null -ne $connectedProviders -and $connectedProviders -notcontains $singleProv) {
+            } elseif ($providerCatalogs -and $providerCatalogs.PSObject.Properties[$singleProv]) {
+                $providerCatalogs.$singleProv
+            } elseif ($singleProv -eq 'chatgpt') {
+                $modelsArr
+            })
             foreach ($m in $pModels) {
                 $slug = [string]$m.slug
                 if (-not $slug) { continue }
                 $item = New-Object Windows.Controls.ComboBoxItem
                 $item.Content = "🤖 $($m.title) ($slug)"
                 $item.Tag = $slug
-                $item.ToolTip = $provider
+                $item.ToolTip = $singleProv
                 [void]$modelCombo.Items.Add($item)
-                $seenModelTags[$slug] = $true
+            }
+        } else {
+            for ($pi = 0; $pi -lt $enabledPlats.Count; $pi++) {
+                $provider = Resolve-UiPlatformCode $enabledPlats[$pi]
+                $isGroupCollapsed = [bool]$StateInfo.CollapsedProviders[$provider]
+                $childVis = if ($isGroupCollapsed) { 'Collapsed' } else { 'Visible' }
+                [void]$modelCombo.Items.Add((& $buildPlatGroupHeader $provider))
+
+                $pDefItem = New-Object Windows.Controls.ComboBoxItem
+                $pDefItem.Content = if ($provider -eq 'chatgpt') {
+                    if ($IsNarrow) { '🤖 默认' } else { "🤖 默认 ($webModelDisplay)" }
+                } else {
+                    if ($IsNarrow) { '🤖 默认' } else { '🤖 默认 (跟随网页)' }
+                }
+                $pDefItem.Tag = 'inherit'
+                $pDefItem.ToolTip = $provider
+                $pDefItem.Visibility = $childVis
+                [void]$modelCombo.Items.Add($pDefItem)
+
+                $pModels = @(if ($provider -in @('gemini', 'claude') -and -not $allowWebDomModels) {
+                    # Option A: Gemini & Claude strictly expose only '🤖 默认 (跟随网页)' without fragile DOM-simulated model lists
+                } elseif ($null -ne $connectedProviders -and $connectedProviders -notcontains $provider) {
+                } elseif ($providerCatalogs -and $providerCatalogs.PSObject.Properties[$provider]) {
+                    $providerCatalogs.$provider
+                } elseif ($provider -eq 'chatgpt') {
+                    $modelsArr
+                })
+                foreach ($m in $pModels) {
+                    $slug = [string]$m.slug
+                    if (-not $slug) { continue }
+                    $item = New-Object Windows.Controls.ComboBoxItem
+                    $item.Content = "🤖 $($m.title) ($slug)"
+                    $item.Tag = $slug
+                    $item.ToolTip = $provider
+                    $item.Visibility = $childVis
+                    [void]$modelCombo.Items.Add($item)
+                }
             }
         }
 
-        $effortLabels = New-Object 'System.Collections.Generic.List[string]'
-        foreach ($ri in $effortItemsResolved) {
-            if ($ri.Id -and -not $effortLabels.Contains([string]$ri.Id)) {
-                [void]$effortLabels.Add([string]$ri.Id)
+        if ($activeProvider -in @('gemini', 'claude')) {
+            $effortCombo.IsEnabled = $false
+            $effortCombo.ToolTip = '当前平台推理与思考强度直接在网页端控制（跟随网页设置）'
+            $effortCombo.Items.Clear()
+            $webSettingItem = New-Object Windows.Controls.ComboBoxItem
+            $webSettingItem.Content = '🧠 跟随网页设置'
+            $webSettingItem.Tag = 'inherit'
+            [void]$effortCombo.Items.Add($webSettingItem)
+            $CurEffort = 'inherit'
+        } else {
+            $effortCombo.IsEnabled = $true
+            $effortLabels = New-Object 'System.Collections.Generic.List[string]'
+            foreach ($ri in $effortItemsResolved) {
+                if ($ri.Id -and -not $effortLabels.Contains([string]$ri.Id)) {
+                    [void]$effortLabels.Add([string]$ri.Id)
+                }
             }
-        }
-        $hasExplicitNonConfig = ($null -ne $matchedModelEntry -and $matchedModelEntry.PSObject.Properties['configurable_effort'] -and (-not [bool]$matchedModelEntry.configurable_effort))
-        $hasThinkingSiblingSupport = ($null -ne $siblingThinkingEntry) -and (
-            $siblingHasEfforts -or (-not ($siblingThinkingEntry.PSObject.Properties['configurable_effort'] -and (-not [bool]$siblingThinkingEntry.configurable_effort)))
-        )
-        $isExplicitFastOrFixed = ($activeSlug -match '(-fast$|^research$|4o-mini|gpt-4-5)') -or
-                                 ($null -ne $matchedModelEntry -and $matchedModelEntry.PSObject.Properties['fixed_effort'] -and [bool]$matchedModelEntry.fixed_effort) -or
-                                 ($hasExplicitNonConfig -and -not $hasThinkingSiblingSupport)
-        $isFixedEffortModel = ($effortLabels.Count -eq 0 -and $isExplicitFastOrFixed)
-        if ($effortLabels.Count -eq 0 -and -not $isFixedEffortModel -and -not $isColdStartNoWebModel) {
-            if ($activeSlug -match '-pro$') {
-                foreach ($stdId in @('standard', 'max')) { [void]$effortLabels.Add($stdId) }
-            } elseif ($activeSlug -match '-instant$') {
-                foreach ($stdId in @('none', 'min', 'standard', 'extended', 'max')) { [void]$effortLabels.Add($stdId) }
+            $hasExplicitNonConfig = ($null -ne $matchedModelEntry -and $matchedModelEntry.PSObject.Properties['configurable_effort'] -and (-not [bool]$matchedModelEntry.configurable_effort))
+            $hasThinkingSiblingSupport = ($null -ne $siblingThinkingEntry) -and (
+                $siblingHasEfforts -or (-not ($siblingThinkingEntry.PSObject.Properties['configurable_effort'] -and (-not [bool]$siblingThinkingEntry.configurable_effort)))
+            )
+            $isExplicitFastOrFixed = ($activeSlug -match '(-fast$|^research$|4o-mini|gpt-4-5)') -or
+                                     ($null -ne $matchedModelEntry -and $matchedModelEntry.PSObject.Properties['fixed_effort'] -and [bool]$matchedModelEntry.fixed_effort) -or
+                                     ($hasExplicitNonConfig -and -not $hasThinkingSiblingSupport)
+            $isFixedEffortModel = ($effortLabels.Count -eq 0 -and $isExplicitFastOrFixed)
+            if ($effortLabels.Count -eq 0 -and -not $isFixedEffortModel -and -not $isColdStartNoWebModel) {
+                if ($activeSlug -match '-pro$') {
+                    foreach ($stdId in @('standard', 'max')) { [void]$effortLabels.Add($stdId) }
+                } elseif ($activeSlug -match '-instant$') {
+                    foreach ($stdId in @('none', 'min', 'standard', 'extended', 'max')) { [void]$effortLabels.Add($stdId) }
+                } else {
+                    foreach ($stdId in @('min', 'standard', 'extended', 'max')) { [void]$effortLabels.Add($stdId) }
+                }
+            } elseif (-not $isFixedEffortModel -and $activeSlug -match '-instant$' -and -not $effortLabels.Contains('none')) {
+                $effortLabels.Insert(0, 'none')
+            }
+
+            $effortCombo.ToolTip = if ($isFixedEffortModel) {
+                '当前所选模型使用固定思考强度，无需额外切换档位'
             } else {
-                foreach ($stdId in @('min', 'standard', 'extended', 'max')) { [void]$effortLabels.Add($stdId) }
+                "选择本任务的推理思考强度（默认继承原网页当前强度：$webEffortDisplay）"
             }
-        } elseif (-not $isFixedEffortModel -and $activeSlug -match '-instant$' -and -not $effortLabels.Contains('none')) {
-            $effortLabels.Insert(0, 'none')
-        }
-
-        $effortCombo.ToolTip = if ($isFixedEffortModel) {
-            '当前所选模型使用固定思考强度，无需额外切换档位'
-        } else {
-            "选择本任务的推理思考强度（默认继承原网页当前强度：$webEffortDisplay）"
-        }
-        $effortCombo.Items.Clear()
-        $defaultEffortItem = New-Object Windows.Controls.ComboBoxItem
-        $defaultEffortItem.Content = if ($isFixedEffortModel) {
-            if ($IsNarrow) { '🧠 固定' } else { '🧠 默认 (当前模型固定)' }
-        } else {
-            if ($IsNarrow) { '🧠 默认' } else { "🧠 默认 ($webEffortDisplay)" }
-        }
-        $defaultEffortItem.Tag = 'inherit'
-        [void]$effortCombo.Items.Add($defaultEffortItem)
-
-        if (-not $isFixedEffortModel) {
-            foreach ($el in $effortLabels) {
-                $ebItem = New-Object Windows.Controls.ComboBoxItem
-                $ebItem.Content = "🧠 $el"
-                $ebItem.Tag = $el
-                [void]$effortCombo.Items.Add($ebItem)
+            $effortCombo.Items.Clear()
+            $defaultEffortItem = New-Object Windows.Controls.ComboBoxItem
+            $defaultEffortItem.Content = if ($isFixedEffortModel) {
+                if ($IsNarrow) { '🧠 固定' } else { '🧠 默认 (当前模型固定)' }
+            } else {
+                if ($IsNarrow) { '🧠 默认' } else { "🧠 默认 ($webEffortDisplay)" }
             }
-        }
+            $defaultEffortItem.Tag = 'inherit'
+            [void]$effortCombo.Items.Add($defaultEffortItem)
 
-        # Never carry an unsupported effort across model switches; migrate any legacy Chinese effort into its raw official English ID.
-        $curEffTrim = ([string]$CurEffort).Trim()
-        $normalizedEffort = if ($curEffTrim) {
-            & $resolveRawEffortId $curEffTrim @($effortLabels)
-        } else { '' }
-        $effectiveEffort = if ($normalizedEffort -and $normalizedEffort -ne 'inherit' -and -not $isFixedEffortModel -and $effortLabels.Contains($normalizedEffort)) {
-            $normalizedEffort
-        } else { 'inherit' }
-        if ($effectiveEffort -ne $CurEffort) {
-            $CurEffort = $effectiveEffort
-            if ($StateInfo.PSObject.Properties['TaskKey'] -and $StateInfo.TaskKey -and $script:context) {
-                [void](Set-TaskComposerConfig -Context $script:context -SessionKey $StateInfo.TaskKey -ReasoningEffort $effectiveEffort)
-                if ($StateInfo.Session) { Set-SessionPropSafe $StateInfo.Session 'ReasoningEffort' $effectiveEffort }
+            if (-not $isFixedEffortModel) {
+                foreach ($el in $effortLabels) {
+                    $ebItem = New-Object Windows.Controls.ComboBoxItem
+                    $ebItem.Content = "🧠 $el"
+                    $ebItem.Tag = $el
+                    [void]$effortCombo.Items.Add($ebItem)
+                }
+            }
+
+            # Never carry an unsupported effort across model switches; migrate any legacy Chinese effort into its raw official English ID.
+            $curEffTrim = ([string]$CurEffort).Trim()
+            $normalizedEffort = if ($curEffTrim) {
+                & $resolveRawEffortId $curEffTrim @($effortLabels)
+            } else { '' }
+            $effectiveEffort = if ($normalizedEffort -and $normalizedEffort -ne 'inherit' -and -not $isFixedEffortModel -and $effortLabels.Contains($normalizedEffort)) {
+                $normalizedEffort
+            } else { 'inherit' }
+            if ($effectiveEffort -ne $CurEffort) {
+                $CurEffort = $effectiveEffort
+                if ((-not $FromBackgroundPoll) -and $StateInfo.PSObject.Properties['TaskKey'] -and $StateInfo.TaskKey -and $script:context) {
+                    [void](Set-TaskComposerConfig -Context $script:context -SessionKey $StateInfo.TaskKey -ReasoningEffort $effectiveEffort)
+                    if ($StateInfo.Session) { Set-SessionPropSafe $StateInfo.Session 'ReasoningEffort' $effectiveEffort }
+                }
             }
         }
     }
     }
 
     if (-not $modelCombo.IsDropDownOpen) {
-        $targetMIdx = 0
+        $targetMIdx = -1
         for ($i = 0; $i -lt $modelCombo.Items.Count; $i++) {
             $it = $modelCombo.Items[$i]
-            if ($it -and (-not $StateInfo.PSObject.Properties['Provider'] -or -not $StateInfo.Provider -or [string]$it.ToolTip -eq [string]$StateInfo.Provider) -and ([string]$it.Tag -eq $CurModel -or [string]$it.Content -eq "🤖 $CurModel")) {
+            if (-not $it -or [string]$it.Tag -like '__group_*') { continue }
+            $itProv = Resolve-UiPlatformCode ([string]$it.ToolTip)
+            if ($itProv -eq $activeProvider -and ([string]$it.Tag -eq $CurModel -or [string]$it.Content -eq "🤖 $CurModel")) {
                 $targetMIdx = $i
                 break
             }
         }
-        if ($modelCombo.SelectedIndex -ne $targetMIdx) {
+        if ($targetMIdx -lt 0) {
+            for ($i = 0; $i -lt $modelCombo.Items.Count; $i++) {
+                $it = $modelCombo.Items[$i]
+                if (-not $it -or [string]$it.Tag -like '__group_*') { continue }
+                if ((Resolve-UiPlatformCode ([string]$it.ToolTip)) -eq $activeProvider -and [string]$it.Tag -eq 'inherit') {
+                    $targetMIdx = $i
+                    break
+                }
+            }
+        }
+        if ($targetMIdx -lt 0) {
+            for ($i = 0; $i -lt $modelCombo.Items.Count; $i++) {
+                $it = $modelCombo.Items[$i]
+                if ($it -and [string]$it.Tag -notlike '__group_*') {
+                    $targetMIdx = $i
+                    break
+                }
+            }
+        }
+        if ($targetMIdx -ge 0 -and $modelCombo.SelectedIndex -ne $targetMIdx) {
             $modelCombo.SelectedIndex = $targetMIdx
         }
     }
@@ -5374,7 +5844,7 @@ function Resolve-ComposerCatalogState($SessionObj, $RawState) {
     return [pscustomobject]@{ available_models_by_provider = $(if ($RawState -and $RawState.PSObject.Properties['available_models_by_provider']) { $RawState.available_models_by_provider } else { $null }); connected_providers = @($connected) }
 }
 
-function Build-PlanBComposerPod($SessionObj = $null, [bool]$IsNarrow = $false, [bool]$IsZeroTask = $false, [int]$PaneId = 0) {
+function Build-PlanBComposerPod($SessionObj = $null, [bool]$IsNarrow = $false, [bool]$IsZeroTask = $false, [int]$PaneId = 0, [switch]$InPlaceUpdate) {
     $taskKey = if ($IsZeroTask -or -not $SessionObj) { '__new_task__' } else { [string]$SessionObj.SessionKey }
     $draftObj = Get-TaskDraftState $taskKey
 
@@ -5460,22 +5930,45 @@ function Build-PlanBComposerPod($SessionObj = $null, [bool]$IsNarrow = $false, [
     $curStallKey = if ($curStallSecs -le 45) { '30s' } elseif ($curStallSecs -ge 240) { '5' } else { '3' }
     $curRetryKey = if ($curMaxRetries -ge 3) { '3' } elseif ($curMaxRetries -eq 2) { '2' } else { '1' }
 
+    $seededCarrierByProv = @{}
+    foreach ($carrierMapSrc in @(
+        $(if ($SessionObj -and $SessionObj.PSObject.Properties['CarrierByProvider']) { $SessionObj.CarrierByProvider }),
+        $(if ($SessionObj -and $SessionObj.PSObject.Properties['carrier_by_provider']) { $SessionObj.carrier_by_provider }),
+        $(if ($curBinding -and $curBinding.PSObject.Properties['carrier_by_provider']) { $curBinding.carrier_by_provider })
+    )) {
+        if (-not $carrierMapSrc) { continue }
+        if ($carrierMapSrc -is [System.Collections.IDictionary]) {
+            foreach ($ck in $carrierMapSrc.Keys) {
+                if ($ck -and $carrierMapSrc[$ck]) { $seededCarrierByProv[(Resolve-UiPlatformCode ([string]$ck))] = [string]$carrierMapSrc[$ck] }
+            }
+        } else {
+            foreach ($cp in $carrierMapSrc.PSObject.Properties) {
+                if ($cp.Name -and $cp.Value) { $seededCarrierByProv[(Resolve-UiPlatformCode ([string]$cp.Name))] = [string]$cp.Value }
+            }
+        }
+    }
+    $resolvedInitialProv = Resolve-UiPlatformCode $(if ($SessionObj -and $SessionObj.PSObject.Properties['Provider'] -and $SessionObj.Provider) { [string]$SessionObj.Provider } elseif ($curBinding) { Get-WebRoomProvider $curBinding } else { 'chatgpt' })
+    if ($curBrowserProf -and -not $seededCarrierByProv.ContainsKey($resolvedInitialProv)) {
+        if (-not ($resolvedInitialProv -in @('gemini', 'claude') -and $curBrowserProf -like 'Desktop:*')) {
+            $seededCarrierByProv[$resolvedInitialProv] = $curBrowserProf
+        }
+    }
+
     $podCacheKey = "$PaneId|$taskKey|$IsZeroTask"
     if ($script:composerPodCache -and $script:composerPodCache.ContainsKey($podCacheKey)) {
         $cachedBorder = $script:composerPodCache[$podCacheKey]
         if ($cachedBorder) {
-            if ($cachedBorder.Parent -is [Windows.Controls.Panel]) {
+            if ((-not $InPlaceUpdate) -and $cachedBorder.Parent -is [Windows.Controls.Panel]) {
                 [void]$cachedBorder.Parent.Children.Remove($cachedBorder)
             }
             $script:suppressComposerEvents = $true
             try {
                 if ($cachedBorder.Tag) {
                     $st = $cachedBorder.Tag
+                    $lockActive = Test-ComposerOptimisticLockActive $st
                     $st.Session = $SessionObj
                     $st.DraftObj = $draftObj
-                    $st.TargetMode = $curTargetMode
                     $st.ConnectedProviders = $catalogState.connected_providers
-                    $st.Provider = $(if ($SessionObj -and $SessionObj.PSObject.Properties['Provider'] -and $SessionObj.Provider) { ([string]$SessionObj.Provider).ToLowerInvariant() } elseif ($curBinding) { Get-WebRoomProvider $curBinding } else { 'chatgpt' })
                     $st.AvailableModelsByProvider = $catalogState.available_models_by_provider
                     $st.WebModel = $webModel
                     $st.WebEffort = $webEffort
@@ -5507,26 +6000,38 @@ function Build-PlanBComposerPod($SessionObj = $null, [bool]$IsNarrow = $false, [
                     if ($st.InputBox -and -not $st.InputBox.IsKeyboardFocused -and $st.InputBox.Text -ne [string]$draftObj.DraftText) {
                         $st.InputBox.Text = [string]$draftObj.DraftText
                     }
-                    Sync-ComposerModelAndEffortCombos -StateInfo $st -AvailModels $availModels -CurModel $curModel -WebModel $webModel -CurEffort $curEffort -WebEffort $webEffort -IsNarrow $IsNarrow
-                    if ($st.ProfCombo -and -not $st.ProfCombo.IsDropDownOpen) {
-                        for ($i = 0; $i -lt $st.ProfCombo.Items.Count; $i++) {
-                            if ($st.ProfCombo.Items[$i].Tag -eq $curBrowserProf) { $st.ProfCombo.SelectedIndex = $i; break }
+                    if (-not $lockActive) {
+                        $st.TargetMode = $curTargetMode
+                        $st.Provider = $resolvedInitialProv
+                        if ($seededCarrierByProv.Count -gt 0) {
+                            if (-not ($st.PSObject.Properties['CarrierByProvider'] -and $st.CarrierByProvider -is [hashtable])) {
+                                Set-SessionPropSafe $st 'CarrierByProvider' @{}
+                            }
+                            foreach ($sk in $seededCarrierByProv.Keys) {
+                                $st.CarrierByProvider[$sk] = $seededCarrierByProv[$sk]
+                            }
                         }
-                    }
-                    if ($st.AutoResendChk) {
-                        $st.AutoResendChk.IsChecked = $effAutoResend
-                    }
-                    if ($st.RuleCombo -and -not $st.RuleCombo.IsDropDownOpen) {
-                        $sk = $curStallKey
-                        for ($i = 0; $i -lt $st.RuleCombo.Items.Count; $i++) {
-                            if ($st.RuleCombo.Items[$i].Tag -eq $sk) { $st.RuleCombo.SelectedIndex = $i; break }
+                        Sync-ComposerModelAndEffortCombos -StateInfo $st -AvailModels $availModels -CurModel $curModel -WebModel $webModel -CurEffort $curEffort -WebEffort $webEffort -IsNarrow $IsNarrow -FromBackgroundPoll
+                        [void](Sync-ComposerCarrierCombo -StateInfo $st -AvailCarriers $availProfsForDefault -PreferredCarrier $curBrowserProf)
+                        if ($st.AutoResendChk) {
+                            $st.AutoResendChk.IsChecked = $effAutoResend
                         }
-                    }
-                    if ($st.RetryCombo -and -not $st.RetryCombo.IsDropDownOpen) {
-                        $rk = $curRetryKey
-                        for ($i = 0; $i -lt $st.RetryCombo.Items.Count; $i++) {
-                            if ($st.RetryCombo.Items[$i].Tag -eq $rk) { $st.RetryCombo.SelectedIndex = $i; break }
+                        if ($st.RuleCombo -and -not $st.RuleCombo.IsDropDownOpen) {
+                            $sk = $curStallKey
+                            for ($i = 0; $i -lt $st.RuleCombo.Items.Count; $i++) {
+                                if ($st.RuleCombo.Items[$i].Tag -eq $sk) { $st.RuleCombo.SelectedIndex = $i; break }
+                            }
                         }
+                        if ($st.RetryCombo -and -not $st.RetryCombo.IsDropDownOpen) {
+                            $rk = $curRetryKey
+                            for ($i = 0; $i -lt $st.RetryCombo.Items.Count; $i++) {
+                                if ($st.RetryCombo.Items[$i].Tag -eq $rk) { $st.RetryCombo.SelectedIndex = $i; break }
+                            }
+                        }
+                    } else {
+                        $lockedM = if ($st.ModelCombo -and $st.ModelCombo.SelectedItem -and $st.ModelCombo.SelectedItem.Tag) { [string]$st.ModelCombo.SelectedItem.Tag } else { $curModel }
+                        $lockedE = if ($st.EffortCombo -and $st.EffortCombo.SelectedItem -and $st.EffortCombo.SelectedItem.Tag) { [string]$st.EffortCombo.SelectedItem.Tag } else { $curEffort }
+                        Sync-ComposerModelAndEffortCombos -StateInfo $st -AvailModels $availModels -CurModel $lockedM -WebModel $webModel -CurEffort $lockedE -WebEffort $webEffort -IsNarrow $IsNarrow -FromBackgroundPoll
                     }
                     Update-ComposerPodState $st
                 }
@@ -5652,18 +6157,7 @@ function Build-PlanBComposerPod($SessionObj = $null, [bool]$IsNarrow = $false, [
     $profCombo.Margin = [Windows.Thickness]::new(0, 2, 6, 2)
     $profCombo.MaxWidth = if ($IsNarrow) { 142 } else { 165 }
     $profCombo.ToolTip = '按任务独立绑定目标浏览器（切换浏览器后，下次发送将自动携带进度账本在新浏览器中交接续跑）'
-    $availProfs = @(Get-AvailableBrowserProfiles -Context $script:context)
-    $profSelIdx = 0
-    for ($pi = 0; $pi -lt $availProfs.Count; $pi++) {
-        $bp = $availProfs[$pi]
-        $pItem = New-Object Windows.Controls.ComboBoxItem
-        $rawProfLbl = ([string]$bp.Label -replace '\s*\(Web[^)]*\)', '').Trim()
-        $pItem.Content = if ($rawProfLbl -match '^(💻|🌐)') { $rawProfLbl } else { "🌐 $rawProfLbl" }
-        $pItem.Tag = $bp.Id
-        [void]$profCombo.Items.Add($pItem)
-        if ($bp.Id -eq $curBrowserProf) { $profSelIdx = $pi }
-    }
-    $profCombo.SelectedIndex = $profSelIdx
+    $availProfs = $availProfsForDefault
     [void]$pillsRow.Children.Add($profCombo)
 
     # Pill 5: Auto-Resend CheckBox + Decoupled [停顿时间 ⌄] + [重试次数 ⌄] Capsules
@@ -5765,16 +6259,22 @@ function Build-PlanBComposerPod($SessionObj = $null, [bool]$IsNarrow = $false, [
         IsNarrow = $IsNarrow
         PodBorder = $composerPod
         LastCatalogSig = ''
-        Provider = $(if ($SessionObj -and $SessionObj.PSObject.Properties['Provider'] -and $SessionObj.Provider) { ([string]$SessionObj.Provider).ToLowerInvariant() } elseif ($curBinding) { Get-WebRoomProvider $curBinding } else { 'chatgpt' })
+        Provider = $resolvedInitialProv
         ConnectedProviders = $catalogState.connected_providers
         AvailableModelsByProvider = $catalogState.available_models_by_provider
         AvailableModels = $availModels
+        AvailableCarriers = $availProfs
+        CarrierByProvider = $seededCarrierByProv
+        BrowserProfile = $curBrowserProf
+        CollapsedProviders = @{}
+        MutationEpoch = [DateTime]::MinValue
         WebModel = $webModel
         WebEffort = $webEffort
         PaneId = $PaneId
     }
 
     Sync-ComposerModelAndEffortCombos -StateInfo $composerStateInfo -AvailModels $availModels -CurModel $curModel -WebModel $webModel -CurEffort $curEffort -WebEffort $webEffort -IsNarrow $IsNarrow
+    [void](Sync-ComposerCarrierCombo -StateInfo $composerStateInfo -AvailCarriers $availProfs -PreferredCarrier $curBrowserProf)
 
     $modelCombo.Tag = $composerStateInfo
     $modelCombo.Add_SelectionChanged({
@@ -5782,27 +6282,51 @@ function Build-PlanBComposerPod($SessionObj = $null, [bool]$IsNarrow = $false, [
         if ($script:initializing -or $script:suppressComposerEvents) { return }
         $info = $sender.Tag
         $sel = $sender.SelectedItem
-        if ($info -and $info.TaskKey -and $sel -and $sel.Tag) {
-            $newModelVal = [string]$sel.Tag
-            $selectedProvider = [string]$sel.ToolTip
-            $info.Provider = $selectedProvider
-            if ($info.AvailableModelsByProvider -and $info.AvailableModelsByProvider.PSObject.Properties[$selectedProvider]) { $info.AvailableModels = @($info.AvailableModelsByProvider.$selectedProvider) }
-            [void](Set-TaskComposerConfig -Context $script:context -SessionKey $info.TaskKey -TargetModel $newModelVal -Provider ([string]$sel.ToolTip))
-            if ($info.Session) { Set-SessionPropSafe $info.Session 'TargetModel' $newModelVal }
-            $curEffVal = if ($newModelVal -match '-instant$') {
-                'none'
-            } elseif ($info.EffortCombo -and $info.EffortCombo.SelectedItem -and $info.EffortCombo.SelectedItem.Tag) {
-                [string]$info.EffortCombo.SelectedItem.Tag
-            } else { 'inherit' }
-            if ($newModelVal -match '-instant$' -and $info.Session) { Set-SessionPropSafe $info.Session 'ReasoningEffort' 'none' }
-            $script:suppressComposerEvents = $true
-            try {
-                Sync-ComposerModelAndEffortCombos -StateInfo $info -AvailModels $info.AvailableModels -CurModel $newModelVal -WebModel $info.WebModel -CurEffort $curEffVal -WebEffort $info.WebEffort -IsNarrow $info.IsNarrow
-            } finally {
-                $script:suppressComposerEvents = $false
-            }
-            Show-QuickToast "✓ 本任务模型已设为：$($sel.Content)"
+        if (-not $info -or -not $info.TaskKey -or -not $sel -or -not $sel.Tag) { return }
+        $newModelVal = [string]$sel.Tag
+        if ($newModelVal -like '__group_*') { return }
+        $selectedProvider = Resolve-UiPlatformCode ([string]$sel.ToolTip)
+        $info.Provider = $selectedProvider
+        if ($info.AvailableModelsByProvider -and $info.AvailableModelsByProvider.PSObject.Properties[$selectedProvider]) {
+            $info.AvailableModels = @($info.AvailableModelsByProvider.$selectedProvider)
         }
+        $curEffVal = if ($selectedProvider -in @('gemini', 'claude')) {
+            'inherit'
+        } elseif ($newModelVal -match '-instant$') {
+            'none'
+        } elseif ($info.EffortCombo -and $info.EffortCombo.SelectedItem -and $info.EffortCombo.SelectedItem.Tag) {
+            [string]$info.EffortCombo.SelectedItem.Tag
+        } else { 'inherit' }
+        $resolvedCarrier = ''
+        $script:suppressComposerEvents = $true
+        try {
+            Sync-ComposerModelAndEffortCombos -StateInfo $info -AvailModels $info.AvailableModels -CurModel $newModelVal -WebModel $info.WebModel -CurEffort $curEffVal -WebEffort $info.WebEffort -IsNarrow $info.IsNarrow
+            $resolvedCarrier = Sync-ComposerCarrierCombo -StateInfo $info -AvailCarriers $info.AvailableCarriers -PreferredCarrier ([string]$info.BrowserProfile)
+        } finally {
+            $script:suppressComposerEvents = $false
+        }
+        $effEffortAfterSync = if ($info.EffortCombo -and $info.EffortCombo.SelectedItem -and $info.EffortCombo.SelectedItem.Tag) {
+            [string]$info.EffortCombo.SelectedItem.Tag
+        } else { $curEffVal }
+        $persistParams = @{
+            Context = $script:context
+            SessionKey = $info.TaskKey
+            TargetModel = $newModelVal
+            Provider = $selectedProvider
+            ReasoningEffort = $effEffortAfterSync
+        }
+        if ($resolvedCarrier) { $persistParams['BrowserProfile'] = $resolvedCarrier }
+        if ($info.CarrierByProvider -is [hashtable] -and $info.CarrierByProvider.Count -gt 0) {
+            $persistParams['CarrierByProvider'] = $info.CarrierByProvider
+        }
+        [void](Invoke-ComposerPersistence -StateInfo $info -Params $persistParams)
+        if ($info.Session) {
+            Set-SessionPropSafe $info.Session 'Provider' $selectedProvider
+            Set-SessionPropSafe $info.Session 'TargetModel' $newModelVal
+            Set-SessionPropSafe $info.Session 'ReasoningEffort' $effEffortAfterSync
+            if ($resolvedCarrier) { Set-SessionPropSafe $info.Session 'BrowserProfile' $resolvedCarrier }
+        }
+        Show-QuickToast "✓ 本任务模型已设为：$($sel.Content)"
     })
 
     $effortCombo.Tag = $composerStateInfo
@@ -5828,7 +6352,12 @@ function Build-PlanBComposerPod($SessionObj = $null, [bool]$IsNarrow = $false, [
                 $linkedModelVal = 'gpt-5-6-instant'
             }
             if ($linkedModelVal) {
-                [void](Set-TaskComposerConfig -Context $script:context -SessionKey $info.TaskKey -TargetModel $linkedModelVal -ReasoningEffort $newEffortVal)
+                [void](Invoke-ComposerPersistence -StateInfo $info -Params @{
+                    Context = $script:context
+                    SessionKey = $info.TaskKey
+                    TargetModel = $linkedModelVal
+                    ReasoningEffort = $newEffortVal
+                })
                 if ($info.Session) {
                     Set-SessionPropSafe $info.Session 'TargetModel' $linkedModelVal
                     Set-SessionPropSafe $info.Session 'ReasoningEffort' $newEffortVal
@@ -5840,7 +6369,11 @@ function Build-PlanBComposerPod($SessionObj = $null, [bool]$IsNarrow = $false, [
                     $script:suppressComposerEvents = $false
                 }
             } else {
-                [void](Set-TaskComposerConfig -Context $script:context -SessionKey $info.TaskKey -ReasoningEffort $newEffortVal)
+                [void](Invoke-ComposerPersistence -StateInfo $info -Params @{
+                    Context = $script:context
+                    SessionKey = $info.TaskKey
+                    ReasoningEffort = $newEffortVal
+                })
                 if ($info.Session) { Set-SessionPropSafe $info.Session 'ReasoningEffort' $newEffortVal }
             }
             Show-QuickToast "✓ 本任务推理强度已设为：$($sel.Content)"
@@ -5855,7 +6388,19 @@ function Build-PlanBComposerPod($SessionObj = $null, [bool]$IsNarrow = $false, [
         $selItem = $sender.SelectedItem
         if ($info -and $info.TaskKey -and $selItem -and $selItem.Tag) {
             $newProfVal = [string]$selItem.Tag
-            [void](Set-TaskComposerConfig -Context $script:context -SessionKey $info.TaskKey -BrowserProfile $newProfVal)
+            $curProv = Resolve-UiPlatformCode $(if ($info.PSObject.Properties['Provider'] -and $info.Provider) { [string]$info.Provider } else { 'chatgpt' })
+            if (-not ($info.PSObject.Properties['CarrierByProvider'] -and $info.CarrierByProvider -is [hashtable])) {
+                Set-SessionPropSafe $info 'CarrierByProvider' @{}
+            }
+            $info.CarrierByProvider[$curProv] = $newProfVal
+            $info.BrowserProfile = $newProfVal
+            [void](Invoke-ComposerPersistence -StateInfo $info -Params @{
+                Context = $script:context
+                SessionKey = $info.TaskKey
+                Provider = $curProv
+                BrowserProfile = $newProfVal
+                CarrierByProvider = $info.CarrierByProvider
+            })
             if ($info.Session) { Set-SessionPropSafe $info.Session 'BrowserProfile' $newProfVal }
             Show-QuickToast "✓ 本任务浏览器已独立锁定为：$($selItem.Content)（下次发送自动无缝交接）"
         }
@@ -5873,12 +6418,25 @@ function Build-PlanBComposerPod($SessionObj = $null, [bool]$IsNarrow = $false, [
         if ($stallTag -match '^(\d+)s$') {
             $sVal = [int]$Matches[1]
             $mVal = [Math]::Round($sVal / 60.0, 2)
-            [void](Set-TaskComposerConfig -Context $script:context -SessionKey $info.TaskKey -AutoResendEnabled $en -StallSeconds $sVal -MaxRetries $rVal)
+            [void](Invoke-ComposerPersistence -StateInfo $info -Params @{
+                Context = $script:context
+                SessionKey = $info.TaskKey
+                AutoResendEnabled = $en
+                StallSeconds = $sVal
+                MaxRetries = $rVal
+            })
             $stallToastLabel = "$sVal 秒 (测试)"
         } else {
             $mVal = [int]$stallTag
             $sVal = $mVal * 60
-            [void](Set-TaskComposerConfig -Context $script:context -SessionKey $info.TaskKey -AutoResendEnabled $en -StallSeconds $sVal -StallMinutes $mVal -MaxRetries $rVal)
+            [void](Invoke-ComposerPersistence -StateInfo $info -Params @{
+                Context = $script:context
+                SessionKey = $info.TaskKey
+                AutoResendEnabled = $en
+                StallSeconds = $sVal
+                StallMinutes = $mVal
+                MaxRetries = $rVal
+            })
             $stallToastLabel = "$mVal 分钟"
         }
         if ($info.Session) {
@@ -5890,7 +6448,14 @@ function Build-PlanBComposerPod($SessionObj = $null, [bool]$IsNarrow = $false, [
         }
         try {
             if ($script:controls -and $script:controls.PanesHostGrid -and $script:controls.PanesHostGrid.Children.Count -gt 0) {
-                Render-PanesWorkspace
+                foreach ($child in @($script:controls.PanesHostGrid.Children)) {
+                    if ($child -and $child.Tag -and $child.Tag.PSObject.Properties['StreamHost'] -and $child.Tag.StreamHost -and $child.Tag.StreamHost.Tag) {
+                        $sr = $child.Tag.StreamHost.Tag
+                        if ($info.Session -and ($child.Tag.PaneId -eq $info.PaneId -or $child.Tag.MatchedSessionKey -eq $info.TaskKey)) {
+                            Update-PaneStatusPillVisual -StatusPill $sr.StatusPill -SDot $sr.StatusDot -SLabel $sr.StatusLabel -SessionObj $info.Session
+                        }
+                    }
+                }
             }
         } catch { }
         Show-QuickToast $(if ($en) { "✓ 本任务自动重发已设为：停顿 $stallToastLabel · 重试 $rVal 次" } else { '✓ 已关闭本任务自动重发守护' })
@@ -5910,7 +6475,11 @@ function Build-PlanBComposerPod($SessionObj = $null, [bool]$IsNarrow = $false, [
         $info = $sender.Tag
         if (-not $info) { return }
         $info.TargetMode = 'follow_window'
-        [void](Set-TaskComposerConfig -Context $script:context -SessionKey $info.TaskKey -TargetMode 'follow_window')
+        [void](Invoke-ComposerPersistence -StateInfo $info -Params @{
+            Context = $script:context
+            SessionKey = $info.TaskKey
+            TargetMode = 'follow_window'
+        })
         if ($info.Session) { Set-SessionPropSafe $info.Session 'TargetMode' 'follow_window' }
         Update-ComposerPodState $info
         Show-QuickToast '✓ 本任务已设为「跟随原窗口」'
@@ -5923,7 +6492,11 @@ function Build-PlanBComposerPod($SessionObj = $null, [bool]$IsNarrow = $false, [
         $info = $sender.Tag
         if (-not $info) { return }
         $info.TargetMode = 'new_window'
-        [void](Set-TaskComposerConfig -Context $script:context -SessionKey $info.TaskKey -TargetMode 'new_window')
+        [void](Invoke-ComposerPersistence -StateInfo $info -Params @{
+            Context = $script:context
+            SessionKey = $info.TaskKey
+            TargetMode = 'new_window'
+        })
         if ($info.Session) { Set-SessionPropSafe $info.Session 'TargetMode' 'new_window' }
         Update-ComposerPodState $info
         Show-QuickToast '✓ 本任务已设为「新建网页交接」（自动携带进度账本）'
@@ -5970,8 +6543,9 @@ function Build-PlanBComposerPod($SessionObj = $null, [bool]$IsNarrow = $false, [
                 $selProf   = if ($info.ProfCombo -and $info.ProfCombo.SelectedItem -and $info.ProfCombo.SelectedItem.Tag) { [string]$info.ProfCombo.SelectedItem.Tag } else { '' }
                 $selModel  = if ($info.ModelCombo -and $info.ModelCombo.SelectedItem -and $info.ModelCombo.SelectedItem.Tag) { [string]$info.ModelCombo.SelectedItem.Tag } else { '' }
                 $selEffort = if ($info.EffortCombo -and $info.EffortCombo.SelectedItem -and $info.EffortCombo.SelectedItem.Tag) { [string]$info.EffortCombo.SelectedItem.Tag } else { '' }
+                $selProv   = Resolve-UiPlatformCode $(if ($info.PSObject.Properties['Provider'] -and $info.Provider) { [string]$info.Provider } else { 'chatgpt' })
                 $dispatchMode = if ($info.TargetMode -eq 'new_window' -or $info.IsZeroTask) { 'new_window_handover' } else { 'follow_window' }
-                $sentOk = Invoke-SendWebBridgeMessage $info.Session $dispatchMode $txt ([int]$info.PaneId) $selProf $selModel $selEffort
+                $sentOk = Invoke-SendWebBridgeMessage $info.Session $dispatchMode $txt ([int]$info.PaneId) $selProf $selModel $selEffort $selProv
                 if ($sentOk -ne $false) {
                     $sender.Text = ''
                     if ($info.DraftObj) { $info.DraftObj.DraftText = '' }
@@ -5989,8 +6563,9 @@ function Build-PlanBComposerPod($SessionObj = $null, [bool]$IsNarrow = $false, [
             $selProf   = if ($info.ProfCombo -and $info.ProfCombo.SelectedItem -and $info.ProfCombo.SelectedItem.Tag) { [string]$info.ProfCombo.SelectedItem.Tag } else { '' }
             $selModel  = if ($info.ModelCombo -and $info.ModelCombo.SelectedItem -and $info.ModelCombo.SelectedItem.Tag) { [string]$info.ModelCombo.SelectedItem.Tag } else { '' }
             $selEffort = if ($info.EffortCombo -and $info.EffortCombo.SelectedItem -and $info.EffortCombo.SelectedItem.Tag) { [string]$info.EffortCombo.SelectedItem.Tag } else { '' }
+            $selProv   = Resolve-UiPlatformCode $(if ($info.PSObject.Properties['Provider'] -and $info.Provider) { [string]$info.Provider } else { 'chatgpt' })
             $dispatchMode = if ($info.TargetMode -eq 'new_window' -or $info.IsZeroTask) { 'new_window_handover' } else { 'follow_window' }
-            $sentOk = Invoke-SendWebBridgeMessage $info.Session $dispatchMode $txt ([int]$info.PaneId) $selProf $selModel $selEffort
+            $sentOk = Invoke-SendWebBridgeMessage $info.Session $dispatchMode $txt ([int]$info.PaneId) $selProf $selModel $selEffort $selProv
             if ($sentOk -ne $false) {
                 if ($info.InputBox) { $info.InputBox.Text = '' }
                 if ($info.DraftObj) { $info.DraftObj.DraftText = '' }
@@ -6026,11 +6601,8 @@ function Build-PlanBComposerPod($SessionObj = $null, [bool]$IsNarrow = $false, [
     return $composeBorder
 }
 function Render-PanesWorkspace {
-    $script:sessionQueueBannerBorders = @{}
     $script:deferredPaneRebuildWhileTyping = $false
     $hostGrid = $script:controls.PanesHostGrid
-    $hostGrid.Children.Clear()
-    $hostGrid.ColumnDefinitions.Clear()
 
     Normalize-PaneWeights
     $panes = @($script:layout.Panes)
@@ -6043,12 +6615,123 @@ function Render-PanesWorkspace {
         $panes[0].session_key = $activeSessions[0].SessionKey
     }
 
-    $activeProf = $script:profilesState.Profiles | Where-Object { $_.IsActive } | Select-Object -First 1
-    $shortTag = if ($activeProf -and $activeProf.Name) {
-        (($activeProf.Name -replace '\s*(主力隧道|主力号|隧道|配置).*$', '').Trim() + ' ▾')
-    } else { '主工作台 ▾' }
-
     $availWorkspaceW = [Math]::Max(480.0, [double]$script:window.Width - $(if ($script:layout.RailCollapsed) { 16.0 } else { [double]$script:layout.RailWidth + 16.0 }))
+
+    $resolvedPanes = New-Object 'System.Collections.Generic.List[object]'
+    $allSessionMode = ($panes.Count -gt 0)
+    foreach ($pItem in $panes) {
+        $estW = $availWorkspaceW * ([Math]::Max(15.0, [double]$pItem.width_weight) / 100.0)
+        $isNar = ($estW -lt 680.0) -or ($panes.Count -ge 2)
+        $mSess = if ($pItem.session_key) {
+            $allSessions | Where-Object { $_.SessionKey -eq $pItem.session_key -or $_.WfrId -eq $pItem.session_key } | Select-Object -First 1
+        } else { $null }
+        $pMode = if ($mSess) {
+            'session'
+        } elseif ($script:launchpadPaneIds.ContainsKey([int]$pItem.id) -or ($activeSessions.Count -eq 0 -and (-not $script:pickerPaneIds.ContainsKey([int]$pItem.id)))) {
+            'launchpad'
+        } else {
+            'picker'
+        }
+        if ($pMode -ne 'session') { $allSessionMode = $false }
+        $mKey = if ($mSess) { [string]$mSess.SessionKey } else { '' }
+        $rCkptsArr = @(if ($mSess -and $mSess.PSObject.Properties['ReadableCheckpoints'] -and $mSess.ReadableCheckpoints) { $mSess.ReadableCheckpoints })
+        $ckptTopSig = if ($rCkptsArr.Count -gt 0) { "$($rCkptsArr.Count):$($rCkptsArr[0].TimeText):$($rCkptsArr[0].Summary)" } else { '0' }
+        [void]$resolvedPanes.Add([pscustomobject]@{
+            Pane = $pItem
+            MatchedSession = $mSess
+            MatchedKey = $mKey
+            Mode = $pMode
+            IsNarrow = $isNar
+            TopoSig = "$($pItem.id):${pMode}:${mKey}:${isNar}:$($panes.Count):${ckptTopSig}"
+        })
+    }
+    $workspaceTopologySig = (@($resolvedPanes | ForEach-Object { $_.TopoSig }) -join '||')
+    $expectedChildCount = if ($panes.Count -gt 0) { ($panes.Count * 2) - 1 } else { 0 }
+
+    if ($allSessionMode -and $script:lastWorkspaceTopologySig -eq $workspaceTopologySig -and $hostGrid.Children.Count -eq $expectedChildCount -and $hostGrid.ColumnDefinitions.Count -eq $expectedChildCount) {
+        $script:sessionQueueBannerBorders = @{}
+        for ($idx = 0; $idx -lt $resolvedPanes.Count; $idx++) {
+            $rp = $resolvedPanes[$idx]
+            $pane = $rp.Pane
+            $matchedSession = $rp.MatchedSession
+            $isNarrowPane = $rp.IsNarrow
+            $paneColIdx = $idx * 2
+            $hostGrid.ColumnDefinitions[$paneColIdx].Width = [Windows.GridLength]::new([Math]::Max(15.0, [double]$pane.width_weight), [Windows.GridUnitType]::Star)
+            $paneBorder = $hostGrid.Children[$paneColIdx]
+            if (-not $paneBorder -or -not $paneBorder.Tag) { continue }
+            $pTag = $paneBorder.Tag
+            if ($pTag.PSObject.Properties['HeaderDot'] -and $pTag.HeaderDot) {
+                $pTag.HeaderDot.Fill = ConvertTo-Brush $matchedSession.DotColor
+            }
+            if ($pTag.PSObject.Properties['HeaderTitle'] -and $pTag.HeaderTitle) {
+                $pTag.HeaderTitle.Text = $(if ($matchedSession.ShortTitle) { $matchedSession.ShortTitle } else { $matchedSession.Title })
+            }
+            if ($pTag.PSObject.Properties['HeaderSubText'] -and $pTag.HeaderSubText) {
+                $topCommits = @(if ($matchedSession.PSObject.Properties['RecentCommits'] -and $matchedSession.RecentCommits) { $matchedSession.RecentCommits })
+                $pTag.HeaderSubText.Text = if ($topCommits.Count -gt 0) {
+                    if ($isNarrowPane) { "· Git $($topCommits[0].Sha)" } else { "· 最近 Git 提交 $($topCommits[0].Sha)" }
+                } elseif ($matchedSession.ShortId) {
+                    "· $($matchedSession.ShortId)"
+                } else { '' }
+            }
+            if ($pTag.PSObject.Properties['SummaryButton'] -and $pTag.SummaryButton) {
+                $stepsArr = @(if ($matchedSession.PSObject.Properties['Steps'] -and $matchedSession.Steps) { $matchedSession.Steps })
+                $doneCnt = @($stepsArr | Where-Object { $_.Status -in @('completed', 'quarantined') }).Count
+                $pTag.SummaryButton.Content = if ($stepsArr.Count -gt 0) { "步骤 $doneCnt/$($stepsArr.Count) ▾" } else { '步骤摘要 ▾' }
+                $showSum = [bool]$pane.show_summary
+                $pTag.SummaryButton.Background = ConvertTo-Brush $(if ($showSum) { '#EFF6FF' } else { '#FFFFFF' })
+                $pTag.SummaryButton.BorderBrush = ConvertTo-Brush $(if ($showSum) { '#BFDBFE' } else { '#E4E4E7' })
+                $pTag.SummaryButton.Foreground = ConvertTo-Brush $(if ($showSum) { '#2563EB' } else { '#3F3F46' })
+            }
+            if ($pTag.PSObject.Properties['SummaryCard'] -and $pTag.SummaryCard) {
+                Update-CodexSummaryCardContent $pTag.SummaryCard $pane $matchedSession
+                $pTag.SummaryCard.Visibility = if ($pane.show_summary) { 'Visible' } else { 'Collapsed' }
+            }
+            if ($pTag.PSObject.Properties['StreamHost'] -and $pTag.StreamHost -and $pTag.StreamHost.Tag) {
+                $sr = $pTag.StreamHost.Tag
+                if ($sr.TitleBlock) { $sr.TitleBlock.Text = $matchedSession.Title }
+                if ($sr.OpenWebButton) { $sr.OpenWebButton.Tag = $matchedSession }
+                if ($sr.StepFillBar -and $sr.StepPillText) {
+                    $progPctVal = if ($null -ne $matchedSession.ProgressPercent) { [Math]::Max(0, [Math]::Min(100, [int]$matchedSession.ProgressPercent)) } else { 100 }
+                    $sr.StepFillBar.Width = [Math]::Max(4.0, [Math]::Round(($progPctVal / 100.0) * 44.0, 1))
+                    $stepsCount = @(if ($matchedSession.PSObject.Properties['Steps'] -and $matchedSession.Steps) { $matchedSession.Steps }).Count
+                    $sr.StepPillText.Text = if ($stepsCount -gt 0) {
+                        "已完成 $($matchedSession.StepCountText -replace '\s*步已完成',' 步') ($progPctVal%)"
+                    } else {
+                        "$($matchedSession.StepCountText)"
+                    }
+                }
+                Update-PaneStatusPillVisual -StatusPill $sr.StatusPill -SDot $sr.StatusDot -SLabel $sr.StatusLabel -SessionObj $matchedSession
+                if ($sr.DiagTextBlock) {
+                    $sr.DiagTextBlock.Text = $(if ($matchedSession.HumanDiagnosis) { $matchedSession.HumanDiagnosis } else { $matchedSession.LatestSummary })
+                }
+                if ($sr.QueueBanner) {
+                    Update-QueueBannerBorder -BannerBorder $sr.QueueBanner -SessionObj $matchedSession
+                    $sessKeyForBanner = if ($matchedSession.PSObject.Properties['SessionKey'] -and $matchedSession.SessionKey) { [string]$matchedSession.SessionKey } else { '' }
+                    if ($sessKeyForBanner) {
+                        if ($script:sessionQueueBannerBorders.ContainsKey($sessKeyForBanner) -and $script:sessionQueueBannerBorders[$sessKeyForBanner]) {
+                            $prevArr = [object[]]$script:sessionQueueBannerBorders[$sessKeyForBanner]
+                            $nextArr = New-Object 'object[]' ($prevArr.Length + 1)
+                            [Array]::Copy($prevArr, $nextArr, $prevArr.Length)
+                            $nextArr[$prevArr.Length] = $sr.QueueBanner
+                            $script:sessionQueueBannerBorders[$sessKeyForBanner] = $nextArr
+                        } else {
+                            $singleArr = New-Object 'object[]' 1
+                            $singleArr[0] = $sr.QueueBanner
+                            $script:sessionQueueBannerBorders[$sessKeyForBanner] = $singleArr
+                        }
+                    }
+                }
+            }
+            [void](Build-PlanBComposerPod -SessionObj $matchedSession -IsNarrow $isNarrowPane -IsZeroTask $false -PaneId ([int]$pane.id) -InPlaceUpdate)
+        }
+        return
+    }
+
+    $script:lastWorkspaceTopologySig = $workspaceTopologySig
+    $script:sessionQueueBannerBorders = @{}
+    $hostGrid.Children.Clear()
+    $hostGrid.ColumnDefinitions.Clear()
 
     for ($idx = 0; $idx -lt $panes.Count; $idx++) {
         $pane = $panes[$idx]
@@ -6093,6 +6776,11 @@ function Render-PanesWorkspace {
         $leftBar.VerticalAlignment = 'Center'
         $leftBar.Margin = [Windows.Thickness]::new(0, 0, 8, 0)
 
+        $sDot = $null
+        $sTxt = $null
+        $topSubTxt = $null
+        $sumBtn = $null
+        $codexCard = $null
         if ($matchedSession) {
             $selBtn = New-Object Windows.Controls.Button
             $selBtn.Background = ConvertTo-Brush 'Transparent'
@@ -6277,9 +6965,10 @@ function Render-PanesWorkspace {
         [Windows.Controls.Grid]::SetRow($bodyElem, 1)
         [void]$paneGrid.Children.Add($bodyElem)
 
-        # Codex Floating Step Summary Card (Overlay in RowSpan 2)
-        if ($matchedSession -and $pane.show_summary) {
+        # Codex Floating Step Summary Card (Overlay in RowSpan 2, pre-mounted for in-place Visibility toggle)
+        if ($matchedSession) {
             $codexCard = Build-CodexSummaryCard $pane $matchedSession
+            $codexCard.Visibility = if ($pane.show_summary) { 'Visible' } else { 'Collapsed' }
             [Windows.Controls.Grid]::SetRow($codexCard, 0)
             [Windows.Controls.Grid]::SetRowSpan($codexCard, 2)
             [void]$paneGrid.Children.Add($codexCard)
@@ -6289,6 +6978,13 @@ function Render-PanesWorkspace {
             PaneIndex = $idx
             PaneId = [int]$pane.id
             ColumnIndex = $paneColIdx
+            MatchedSessionKey = $(if ($matchedSession) { [string]$matchedSession.SessionKey } else { '' })
+            HeaderDot = $sDot
+            HeaderTitle = $sTxt
+            HeaderSubText = $topSubTxt
+            SummaryButton = $sumBtn
+            SummaryCard = $codexCard
+            StreamHost = $bodyElem
         }
         $paneBorder.Child = $paneGrid
         [Windows.Controls.Grid]::SetColumn($paneBorder, $paneColIdx)
@@ -6867,12 +7563,13 @@ function Refresh-SecretHints {
 }
 
 function Save-Form {
-    $curPlat = if ($script:activeCapsulePlatform) { $script:activeCapsulePlatform.Trim().ToLowerInvariant() } else { 'openai' }
+    $curPlat = if ($script:activeCapsulePlatform) { $script:activeCapsulePlatform.Trim().ToLowerInvariant() } else { 'chatgpt' }
+    if ($curPlat -eq 'openai') { $curPlat = 'chatgpt' }
     $enteredKey = $script:controls.KeyInput.Text
     $enteredName = if ($script:controls.ProfileNameInput -and $script:controls.ProfileNameInput.Text.Trim()) {
         $script:controls.ProfileNameInput.Text.Trim()
     } else { '' }
-    if ($curPlat -ne 'openai') {
+    if ($curPlat -ne 'chatgpt') {
         $script:lastTestedApiKeyProfileId = ''
         $script:lastTestedApiKeyProfileSig = ''
         $platProfs = @(if ($script:profilesState -and $script:profilesState.Profiles) {
@@ -6902,19 +7599,19 @@ function Save-Form {
             startup_mode = $coreCfg.StartupMode
         }
         $activeProf = if ($script:profilesState -and $script:profilesState.Profiles) {
-            $script:profilesState.Profiles | Where-Object { (-not $_.Platform -or $_.Platform -eq 'openai') -and $_.IsActive } | Select-Object -First 1
+            $script:profilesState.Profiles | Where-Object { (-not $_.Platform -or $_.Platform -in @('chatgpt', 'openai')) -and $_.IsActive } | Select-Object -First 1
         } else { $null }
         $targetProfId = if ($script:viewingProfileId) { $script:viewingProfileId } else {
             if ($activeProf) { $activeProf.Id } else { 'prof_primary' }
         }
-        $isEditingActive = (-not $activeProf) -or ($targetProfId -eq $activeProf.Id) -or (@($script:profilesState.Profiles | Where-Object { -not $_.Platform -or $_.Platform -eq 'openai' }).Count -le 1 -and $targetProfId -ne 'new')
+        $isEditingActive = (-not $activeProf) -or ($targetProfId -eq $activeProf.Id) -or (@($script:profilesState.Profiles | Where-Object { -not $_.Platform -or $_.Platform -in @('chatgpt', 'openai') }).Count -le 1 -and $targetProfId -ne 'new')
         if ($isEditingActive -and $script:controls.TunnelInput.Text.Trim()) {
             Save-ConnectionSettings -Context $script:context -Settings $candidate -ApiKey $enteredKey
             $script:settings = Read-ConnectionSettings $script:context
         } elseif ($script:controls.TunnelInput.Text.Trim()) {
             [void](ConvertTo-TunnelId $script:controls.TunnelInput.Text)
         }
-        $savedState = Save-ConnectionProfile -Context $script:context -Settings $script:settings -ProfileId $targetProfId -Name $enteredName -TunnelId $script:controls.TunnelInput.Text -ApiKey $enteredKey -Platform 'openai' -Kind 'tunnel' -SetActive:$isEditingActive
+        $savedState = Save-ConnectionProfile -Context $script:context -Settings $script:settings -ProfileId $targetProfId -Name $enteredName -TunnelId $script:controls.TunnelInput.Text -ApiKey $enteredKey -Platform 'chatgpt' -Kind 'tunnel' -SetActive:$isEditingActive
         if ($savedState -and $savedState.PSObject.Properties['LastSavedProfileId'] -and $savedState.LastSavedProfileId) {
             $script:viewingProfileId = $savedState.LastSavedProfileId
         } elseif ($savedState -and $savedState.ActiveProfileId) {
@@ -7020,7 +7717,14 @@ function Refresh-FormState {
     $script:controls.OfficialButton.Visibility = 'Collapsed'
     $script:controls.DisconnectButton.Visibility = if ($coreReady -and $legacy) { 'Collapsed' } else { 'Visible' }
     if ($coreReady -and $legacy) { $script:controls.DetailText.Text = '旧连接通向 8787。准备切换时，点击右上角“断开旧隧道”，再按新配置连接。' }
-    Refresh-ProfilePopoverState
+    if ($script:popoverOpen -or $script:globalSettingsOpen) {
+        if ($script:controls.ConnIconStatusDot -and $script:display) {
+            $capDotColor = if ($script:display.IsFault) { '#EF4444' } elseif ($script:display.Running) { '#16A34A' } elseif ($script:display.Core -eq '已准备好') { '#F59E0B' } else { '#A1A1AA' }
+            $script:controls.ConnIconStatusDot.Fill = ConvertTo-Brush $capDotColor
+        }
+    } else {
+        Refresh-ProfilePopoverState
+    }
     Update-SessionCards
     Sync-QueueFastPollingState
 }
@@ -7196,7 +7900,7 @@ if ($script:controls.ProfileNameInput) {
     $script:controls.ProfileNameInput.Add_TextChanged({ if (-not $script:initializing) { $script:dirty = $true } })
 }
 $script:controls.ConnIconBadgeButton.Add_Click({
-    Select-CapsulePlatform 'openai' $script:controls.ConnIconBadgeButton
+    Select-CapsulePlatform 'chatgpt' $script:controls.ConnIconBadgeButton
 })
 if ($script:controls.AddPlatformCellButton) {
     $script:controls.AddPlatformCellButton.Add_Click({ Toggle-AddPlatformPopover })
@@ -7341,6 +8045,7 @@ if ($script:controls.RestartCoreButton) {
     $script:controls.RestartCoreButton.Add_Click({
         $ok = Restart-LocalCoreEngine $script:context $script:settings
         Refresh-FormState
+        Refresh-ProfilePopoverState
         if ($ok -and $ok.Restarted) {
             Show-QuickToast '✓ 本地 RelayStudio 内核已重启并就绪'
         } else {
@@ -7375,6 +8080,7 @@ if ($script:controls.BrowserCdpToggleButton) {
         $script:settings = (Set-CoreEngineConfig -Context $script:context -AcpDefaultProfile ([string]$cfg.AcpDefaultProfile) -BrowserEnabled $nextBrowser -StartupMode ([string]$cfg.StartupMode) -ApplyStartup:(-not $script:context.Isolated)).Settings
         if (-not $script:context.Isolated) { [void](Restart-LocalCoreEngine $script:context $script:settings) }
         Refresh-FormState
+        Refresh-ProfilePopoverState
         Show-QuickToast ($(if ($nextBrowser) { '已开启浏览器自动化 (CDP)' } else { '已关闭浏览器自动化 (CDP)' }))
     })
 }
@@ -7464,15 +8170,17 @@ $script:controls.ResetRenameButton.Add_Click({
 $script:controls.CancelRenameButton.Add_Click({ Close-SessionRename })
 $script:controls.SaveButton.Add_Click({ Invoke-FormAction { Save-Form; Show-Feedback '配置已保存，密钥已加密。保存配置不会建立连接。' } })
 $script:controls.ConnectButton.Add_Click({ Invoke-FormAction {
-    if ($script:display.Tunnel -eq '旧脚本连接仍在运行') { Show-Feedback (Stop-ConnectionTunnel $script:context $script:settings); Refresh-FormState; return }
+    if ($script:display.Tunnel -eq '旧脚本连接仍在运行') { Show-Feedback (Stop-ConnectionTunnel $script:context $script:settings); Refresh-FormState; Refresh-ProfilePopoverState; return }
     Save-Form
     Show-Feedback (Start-ConnectionTunnel $script:context $script:settings)
     Refresh-FormState
+    Refresh-ProfilePopoverState
 } })
 $script:controls.DisconnectButton.Add_Click({
     Invoke-FormAction {
-        $curPlat = if ($script:activeCapsulePlatform) { $script:activeCapsulePlatform.Trim().ToLowerInvariant() } else { 'openai' }
-        if ($curPlat -ne 'openai') {
+        $curPlat = if ($script:activeCapsulePlatform) { $script:activeCapsulePlatform.Trim().ToLowerInvariant() } else { 'chatgpt' }
+        if ($curPlat -eq 'openai') { $curPlat = 'chatgpt' }
+        if ($curPlat -ne 'chatgpt') {
             Stop-PublicMcpTunnel $script:context
             Refresh-ProfilePopoverState
             Show-QuickToast '已断开 Gemini 与 Claude 共享的公网隧道'
@@ -7480,6 +8188,7 @@ $script:controls.DisconnectButton.Add_Click({
         }
         Show-Feedback (Stop-ConnectionTunnel $script:context $script:settings)
         Refresh-FormState
+        Refresh-ProfilePopoverState
     }
 })
 $script:controls.OfficialButton.Add_Click({ Invoke-FormAction { Open-OfficialPanel } })
