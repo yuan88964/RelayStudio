@@ -81,6 +81,12 @@ const cachedModelsByProvider = {chatgpt: [], gemini: [], claude: []};
 let shuttleBusy = false;
 
 const PLATFORM_URLS = ['https://chatgpt.com/*', 'https://chat.openai.com/*', 'https://gemini.google.com/*', 'https://claude.ai/*'];
+function normalizeProvider(raw) {
+  const val = String(raw || '').trim().toLowerCase();
+  if (val === 'openai' || val === 'chatgpt') return 'chatgpt';
+  if (val === 'gemini' || val === 'claude') return val;
+  return '';
+}
 function providerFromUrl(url) {
   try {
     const host = new URL(String(url || '')).hostname;
@@ -112,7 +118,7 @@ function upsertTabStateCache(tabIdStr, state, tabMeta) {
   const s = state || {};
   const meta = tabMeta || {};
   const tabModels = Array.isArray(s.available_models) ? s.available_models : [];
-  const provider = providerFromUrl(meta.url || s.url) || s.provider || "chatgpt";
+  const provider = providerFromUrl(meta.url || s.url) || normalizeProvider(s.provider) || "chatgpt";
   if (tabModels.length > 0 && Object.hasOwn(cachedModelsByProvider, provider)) {
     cachedModelsByProvider[provider] = tabModels;
   }
@@ -121,7 +127,7 @@ function upsertTabStateCache(tabIdStr, state, tabMeta) {
   const turnSeqNum = Number(s.turn_seq || 0);
   const entry = {
     tab_id: tabIdStr,
-    provider: providerFromUrl(meta.url || s.url) || s.provider || "chatgpt",
+    provider,
     conv_uuid: s.conv_uuid || extractConvUuidFromUrl(meta.url),
     project_prefix: s.project_prefix || extractProjectPrefixFromUrl(meta.url),
     url: s.url || meta.url || "",

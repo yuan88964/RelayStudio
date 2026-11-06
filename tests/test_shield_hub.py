@@ -233,7 +233,8 @@ class ShieldHubSeamTests(unittest.TestCase):
         self._post_json("/studio/action", {"action": "set_task_composer_config", "session_key": "__new_task__", "provider": "gemini", "target_model": "gemini-observed"})
         queued = self._post_json("/studio/action", {"action": "enqueue_message", "session_key": "__new_task__", "user_text": "hello"})
         self.assertEqual(queued["message"]["provider"], "gemini")
-        self.assertTrue(queued["handover_url"].startswith("https://gemini.google.com/app/"))
+        self.assertTrue(queued["handover_url"].startswith("https://gemini.google.com/app?relay_handover=1"), queued["handover_url"])
+        self.assertNotIn("/app/?", queued["handover_url"])
         task_id = queued["message"]["session_key"]
         self._post_json("/studio/action", {"action": "bind_session", "session_key": task_id, "provider": "gemini", "conv_uuid": "abcd1234", "tab_id": "gemini"})
         switched = self._post_json("/studio/action", {"action": "set_task_composer_config", "session_key": task_id, "provider": "claude"})
@@ -1876,6 +1877,163 @@ eval(hookCode);
         with urllib.request.urlopen(mcp_post, timeout=3) as mp_resp:
             self.assertEqual(mp_resp.status, 200)
         self.assertIn("text/event-stream", self.upstream.calls[-1]["accept"])
+
+    def test_ticket_05_provider_unification_handover_url_carrier_memory_and_slates(self):
+        # 1. Platform ID unification ('chatgpt') with legacy 'openai' normalization
+        self.assertEqual(shield._normalize_studio_provider("openai"), "chatgpt")
+        self.assertEqual(shield._normalize_studio_provider("OpenAI"), "chatgpt")
+        self.assertEqual(shield._normalize_studio_provider("ChatGPT"), "chatgpt")
+        self.assertEqual(shield._normalize_studio_provider("gemini"), "gemini")
+        self.assertEqual(shield._normalize_studio_provider("claude"), "claude")
+
+        bind_legacy = self._post_json("/studio/action", {
+            "action": "set_task_composer_config",
+            "session_key": "tsk_legacy_openai",
+            "provider": "OpenAI",
+            "browser_profile": "Desktop:ChatGPT",
+        })
+        self.assertTrue(bind_legacy["ok"])
+        self.assertEqual(bind_legacy["binding"]["provider"], "chatgpt")
+        self.assertEqual(bind_legacy["binding"]["carrier_by_provider"]["chatgpt"], "Desktop:ChatGPT")
+
+        # Legacy 'openai' key in available_models_by_provider normalizes into 'chatgpt'
+        self._post_json("/web-bridge/poll", {
+            "browser": "Chrome",
+            "browser_profile": "Chrome:Default",
+            "available_models_by_provider": {
+                "openai": [{"slug": "gpt-legacy-norm", "title": "GPT Legacy Norm", "efforts": []}],
+            },
+            "tabs": [{
+                "tab_id": "t_openai_alias",
+                "provider": "openai",
+                "url": "https://chatgpt.com/c/12345678-1234-4234-8234-1234567890ab",
+                "conv_uuid": "12345678-1234-4234-8234-1234567890ab",
+                "is_generating": False,
+            }],
+        })
+        wb_st = self._get_json("/web-bridge/state")
+        self.assertEqual(
+            [m["slug"] for m in wb_st["available_models_by_provider"]["chatgpt"]],
+            ["gpt-legacy-norm"],
+        )
+
+        # 2. Handover URL trailing-slash 404 fix (_build_handover_url)
+        gemini_u1 = shield._build_handover_url("https://gemini.google.com/app", msg_id="m_1", task_id="tsk_1", provider="gemini")
+        self.assertEqual(gemini_u1, "https://gemini.google.com/app?relay_handover=1&msg_id=m_1&task_id=tsk_1&provider=gemini")
+        gemini_u2 = shield._build_handover_url("https://gemini.google.com/app/", msg_id="m_2")
+        self.assertEqual(gemini_u2, "https://gemini.google.com/app?relay_handover=1&msg_id=m_2")
+        claude_u = shield._build_handover_url("https://claude.ai/new/", msg_id="m_3")
+        self.assertEqual(claude_u, "https://claude.ai/new?relay_handover=1&msg_id=m_3")
+        chatgpt_u = shield._build_handover_url("https://chatgpt.com", msg_id="m_4")
+        self.assertEqual(chatgpt_u, "https://chatgpt.com/?relay_handover=1&msg_id=m_4")
+
+        # 3. Per-platform carrier memory (carrier_by_provider) & Desktop:ChatGPT guard on gemini/claude
+        self._post_json("/studio/action", {
+            "action": "set_task_composer_config",
+            "session_key": "__new_task__",
+            "provider": "chatgpt",
+            "browser_profile": "Desktop:ChatGPT",
+        })
+        # Switch __new_task__ to gemini while passing stale Desktop:ChatGPT -> must guard and fall back to browser profile
+        nt_gemini = self._post_json("/studio/action", {
+            "action": "set_task_composer_config",
+            "session_key": "__new_task__",
+            "provider": "gemini",
+            "browser_profile": "Desktop:ChatGPT",
+        })["binding"]
+        self.assertEqual(nt_gemini["provider"], "gemini")
+        self.assertNotEqual(nt_gemini["browser_profile"], "Desktop:ChatGPT")
+        self.assertFalse(nt_gemini["browser_profile"].lower().startswith("desktop:"))
+        self.assertEqual(nt_gemini["carrier_by_provider"]["chatgpt"], "Desktop:ChatGPT")
+
+        # Bind Edge:Profile 2 specifically for gemini on __new_task__
+        nt_gemini_edge = self._post_json("/studio/action", {
+            "action": "set_task_composer_config",
+            "session_key": "__new_task__",
+            "provider": "gemini",
+            "browser_profile": "Edge:Profile 2",
+        })["binding"]
+        self.assertEqual(nt_gemini_edge["browser_profile"], "Edge:Profile 2")
+        self.assertEqual(nt_gemini_edge["carrier_by_provider"]["gemini"], "Edge:Profile 2")
+        self.assertEqual(nt_gemini_edge["carrier_by_provider"]["chatgpt"], "Desktop:ChatGPT")
+
+        # Switch __new_task__ back to chatgpt without specifying browser_profile -> restores Desktop:ChatGPT
+        nt_back_chatgpt = self._post_json("/studio/action", {
+            "action": "set_task_composer_config",
+            "session_key": "__new_task__",
+            "provider": "chatgpt",
+        })["binding"]
+        self.assertEqual(nt_back_chatgpt["provider"], "chatgpt")
+        self.assertEqual(nt_back_chatgpt["browser_profile"], "Desktop:ChatGPT")
+
+        # Switch __new_task__ to gemini again without specifying browser_profile -> restores Edge:Profile 2
+        nt_back_gemini = self._post_json("/studio/action", {
+            "action": "set_task_composer_config",
+            "session_key": "__new_task__",
+            "provider": "gemini",
+        })["binding"]
+        self.assertEqual(nt_back_gemini["provider"], "gemini")
+        self.assertEqual(nt_back_gemini["browser_profile"], "Edge:Profile 2")
+
+        # 4. Cold/Hot tiered slates & high-frequency heartbeat disk-write throttling
+        self._write_task("tsk_slate_1", "冷热分层缓存测试任务")
+        tasks_1 = shield.load_all_tasks(self.tasks_root)
+        self.assertTrue(any(t["id"] == "tsk_slate_1" for t in tasks_1))
+        self.assertGreaterEqual(len(shield._STUDIO_TASK_FILE_CACHE), 1)
+        # Mutating returned dict must not corrupt _STUDIO_TASK_FILE_CACHE
+        tasks_1[0]["title"] = "MUTATED_IN_MEMORY"
+        tasks_2 = shield.load_all_tasks(self.tasks_root)
+        t_reloaded = next(t for t in tasks_2 if t["id"] == tasks_1[0]["id"])
+        self.assertNotEqual(t_reloaded["title"], "MUTATED_IN_MEMORY")
+
+        # Short-TTL snapshot slate reuse when no state mutations occur
+        snap_1 = shield.build_studio_snapshot(self.data_root, self.tasks_root, self.wb_state_path)
+        snap_2 = shield.build_studio_snapshot(self.data_root, self.tasks_root, self.wb_state_path)
+        self.assertEqual(snap_1["rev"], snap_2["rev"])
+
+        # Heartbeat disk-write throttling: first poll writes to disk, second identical poll with only timestamp change skips disk flush
+        self._post_json("/web-bridge/poll", {
+            "browser": "Chrome",
+            "browser_profile": "Chrome:Default",
+            "tabs": [{
+                "tab_id": "t_hb_1",
+                "provider": "gemini",
+                "url": "https://gemini.google.com/app/room_hb_1",
+                "conv_uuid": "room_hb_1",
+                "is_generating": False,
+            }],
+        })
+        mtime_1 = os.stat(self.wb_state_path).st_mtime_ns
+        time.sleep(0.05)
+        self._post_json("/web-bridge/poll", {
+            "browser": "Chrome",
+            "browser_profile": "Chrome:Default",
+            "tabs": [{
+                "tab_id": "t_hb_1",
+                "provider": "gemini",
+                "url": "https://gemini.google.com/app/room_hb_1",
+                "conv_uuid": "room_hb_1",
+                "is_generating": False,
+            }],
+        })
+        mtime_2 = os.stat(self.wb_state_path).st_mtime_ns
+        self.assertEqual(mtime_1, mtime_2, "Pure heartbeat poll within 10s must throttle redundant disk write")
+
+        # Substantive change (is_generating=True) must flush to disk immediately
+        time.sleep(0.05)
+        self._post_json("/web-bridge/poll", {
+            "browser": "Chrome",
+            "browser_profile": "Chrome:Default",
+            "tabs": [{
+                "tab_id": "t_hb_1",
+                "provider": "gemini",
+                "url": "https://gemini.google.com/app/room_hb_1",
+                "conv_uuid": "room_hb_1",
+                "is_generating": True,
+            }],
+        })
+        mtime_3 = os.stat(self.wb_state_path).st_mtime_ns
+        self.assertGreater(mtime_3, mtime_2, "Substantive state change (is_generating=True) must flush to disk immediately")
 
 
 if __name__ == "__main__":

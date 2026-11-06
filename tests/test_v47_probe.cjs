@@ -447,6 +447,8 @@ async function main() {
     check(claudeCold.available_models.length === 0,'unseen Claude never borrows another platform catalog');
     const gptCache=bg.upsertTabStateCache('35',{}, {url:'https://chatgpt.com/'});
     check(gptCache.available_models[0]?.slug === 'gpt-real','OpenAI cache never replaced by Gemini');
+    const legacyAliasEntry = bg.upsertTabStateCache('36', {provider: 'openai'}, {});
+    check(legacyAliasEntry.provider === 'chatgpt' && bg.normalizeProvider('OpenAI') === 'chatgpt', 'legacy openai provider ID normalizes to canonical chatgpt in background.js');
     let reportedCatalog = null;
     bg.fetch=async (_url, opts) => {reportedCatalog=JSON.parse(opts.body);return {ok:true,async json(){return {}}}};
     await bg.runShuttleTick();

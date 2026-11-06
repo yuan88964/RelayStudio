@@ -1,5 +1,6 @@
 import argparse
 import base64
+import copy
 from datetime import datetime, timezone
 import hashlib
 import hmac
@@ -33,7 +34,24 @@ _CALL_SEQ_COUNTER = 0
 _WEB_BRIDGE_LOCK = threading.Lock()
 _LOG_READER_LOCK = threading.Lock()
 _LOG_READERS: dict[str, dict] = {}
-_WB_LOGICAL_SIG_CACHE: dict[str, tuple[int, int, str, str]] = {}
+_WB_LOGICAL_SIG_CACHE: dict[str, tuple[int, int, int, str, str]] = {}
+_WEB_BRIDGE_MEM_CACHE: dict[str, dict] = {}
+_STUDIO_TASK_CACHE_LOCK = threading.Lock()
+_STUDIO_TASK_FILE_CACHE_LOCK = _STUDIO_TASK_CACHE_LOCK
+_STUDIO_TASK_FILE_CACHE: dict[str, tuple[int, int, dict]] = {}
+_STUDIO_SNAPSHOT_SLATE_LOCK = threading.Lock()
+_STUDIO_SNAPSHOT_SLATE: dict = {}
+_STUDIO_STATE_MUTATION_SEQ = 0
+HEARTBEAT_DISK_FLUSH_INTERVAL_SEC = 10.0
+SNAPSHOT_SLATE_TTL_SEC = 0.8
+_STUDIO_SNAPSHOT_TTL_SEC = SNAPSHOT_SLATE_TTL_SEC
+_CANONICAL_STUDIO_PROVIDERS = ("chatgpt", "gemini", "claude")
+
+
+def _bump_studio_mutation_seq() -> int:
+    global _STUDIO_STATE_MUTATION_SEQ
+    _STUDIO_STATE_MUTATION_SEQ += 1
+    return _STUDIO_STATE_MUTATION_SEQ
 
 # Real machine side effects (cold-starting browsers / ChatGPT Desktop, background CDP ticks) are OFF by
 # default so that unit tests never touch the host; main() switches them on for the production hub.
@@ -77,13 +95,36 @@ PLATFORM_ROUTES = {
     "claude": ("https://claude.ai/new", "chat"),
 }
 
+_STUDIO_PROVIDER_SPECS = {
+    "chatgpt": {"id": "chatgpt", "base_url": "https://chatgpt.com", "room_segment": "c", "allows_desktop": True},
+    "openai": {"id": "chatgpt", "base_url": "https://chatgpt.com", "room_segment": "c", "allows_desktop": True},
+    "gemini": {"id": "gemini", "base_url": "https://gemini.google.com/app", "room_segment": "", "allows_desktop": False},
+    "claude": {"id": "claude", "base_url": "https://claude.ai/new", "room_segment": "chat", "allows_desktop": False},
+}
+
+
+def _normalize_studio_provider(raw_provider: object, default: str = "chatgpt") -> str:
+    val = str(raw_provider or "").strip().lower()
+    if val in ("openai", "chatgpt"):
+        return "chatgpt"
+    if val in ("gemini", "claude"):
+        return val
+    return default
+
+
+def _get_studio_provider_spec(raw_provider: object) -> dict:
+    norm = _normalize_studio_provider(raw_provider)
+    return dict(_STUDIO_PROVIDER_SPECS.get(norm, _STUDIO_PROVIDER_SPECS["chatgpt"]))
+
 
 def _platform(record=None):
-    record = record or {}
+    if isinstance(record, str):
+        return _normalize_studio_provider(record)
+    record = record if isinstance(record, dict) else {}
     host = urllib.parse.urlparse(str(record.get("url") or "")).hostname
     by_host = {"gemini.google.com": "gemini", "claude.ai": "claude", "chatgpt.com": "chatgpt", "chat.openai.com": "chatgpt"}
-    value = str(record.get("provider") or by_host.get(host) or "chatgpt").lower()
-    return "chatgpt" if value == "openai" else value
+    raw_val = record.get("provider") or by_host.get(host) or "chatgpt"
+    return _normalize_studio_provider(raw_val)
 
 
 def _platform_base(record, project_prefix=""):
@@ -95,11 +136,45 @@ def _platform_room_url(record, room, project_prefix=""):
     provider = _platform(record)
     base = _platform_base(record, project_prefix).rstrip("/")
     if not room:
-        return base + "/"
+        return base if provider in ("gemini", "claude") else base + "/"
     room = urllib.parse.quote(str(room), safe="")
     if provider == "claude":
         return "https://claude.ai/chat/" + room
     return base + ("/" if provider == "gemini" else "/c/") + room
+
+
+def _build_handover_url(
+    raw_base: str = "https://chatgpt.com/",
+    msg_id: str = "",
+    model_slug: str = "",
+    browser_profile: str = "",
+    task_id: str = "",
+    provider: str = "",
+) -> str:
+    base = str(raw_base or "").strip()
+    if not base:
+        if provider:
+            base = PLATFORM_ROUTES.get(_normalize_studio_provider(provider), PLATFORM_ROUTES["chatgpt"])[0]
+        else:
+            base = "https://chatgpt.com/"
+    parsed = urllib.parse.urlsplit(base)
+    path = parsed.path or ""
+    if path in ("", "/") or path.startswith("/g/g-p-"):
+        clean_base = base.rstrip("/") + "/"
+    else:
+        clean_base = base.rstrip("/")
+    qs_parts = ["relay_handover=1"]
+    if msg_id:
+        qs_parts.append(f"msg_id={urllib.parse.quote(str(msg_id), safe='')}")
+    if task_id:
+        qs_parts.append(f"task_id={urllib.parse.quote(str(task_id), safe='')}")
+    if provider:
+        qs_parts.append(f"provider={urllib.parse.quote(_normalize_studio_provider(provider), safe='')}")
+    if model_slug:
+        qs_parts.append(f"model={urllib.parse.quote(str(model_slug), safe='')}")
+    if browser_profile:
+        qs_parts.append(f"relay_profile={urllib.parse.quote(str(browser_profile), safe='')}")
+    return f"{clean_base}?{'&'.join(qs_parts)}"
 
 
 def _extract_project_prefix(url: str, explicit_prefix: str = "") -> str:
@@ -896,19 +971,90 @@ def _collect_in_flight_task_ids(wb_path: str, now_epoch: float, tasks_root: str 
     return in_flight_task_ids
 
 
+def _is_desktop_carrier(value: object) -> bool:
+    return str(value or "").strip().lower().startswith("desktop:")
+
+
+def _normalize_carrier_spec(raw_carrier: object, default_browser: str = "Chrome") -> str:
+    clean = str(raw_carrier or "").strip()
+    if not clean:
+        return ""
+    if clean.lower().startswith("desktop:"):
+        return clean
+    if clean.lower().startswith("edge:"):
+        return _normalize_profile_spec(clean, "Edge")
+    return _normalize_profile_spec(clean, default_browser or "Chrome")
+
+
+def _normalize_carrier_by_provider(raw_map: object) -> dict[str, str]:
+    out: dict[str, str] = {}
+    if not isinstance(raw_map, dict):
+        return out
+    for raw_k, raw_v in raw_map.items():
+        norm_p = _normalize_studio_provider(raw_k)
+        norm_c = _normalize_carrier_spec(raw_v)
+        if not norm_c:
+            continue
+        if norm_p in ("gemini", "claude") and _is_desktop_carrier(norm_c):
+            continue
+        out[norm_p] = norm_c
+    return out
+
+
+def _resolve_compatible_carrier_for_provider(
+    provider: str,
+    requested_carrier: str,
+    carrier_by_provider: dict[str, str],
+    fallback_prof: str = "",
+    browser_hint: str = "Chrome",
+) -> str:
+    norm_p = _normalize_studio_provider(provider)
+    cand = _normalize_carrier_spec(requested_carrier, browser_hint)
+    if norm_p in ("gemini", "claude") and _is_desktop_carrier(cand):
+        if "chatgpt" not in carrier_by_provider:
+            carrier_by_provider["chatgpt"] = cand
+        cand = ""
+    if not cand:
+        remembered = carrier_by_provider.get(norm_p, "")
+        if remembered and not (norm_p in ("gemini", "claude") and _is_desktop_carrier(remembered)):
+            cand = remembered
+    if not cand and norm_p in ("gemini", "claude"):
+        for k in ("gemini", "claude", "chatgpt"):
+            v = carrier_by_provider.get(k, "")
+            if v and not _is_desktop_carrier(v):
+                cand = v
+                break
+    if not cand:
+        fb = _normalize_carrier_spec(fallback_prof, browser_hint)
+        if fb and not (norm_p in ("gemini", "claude") and _is_desktop_carrier(fb)):
+            cand = fb
+    if not cand:
+        def_prof = _get_default_browser_profile("Chrome")
+        cand = "Chrome:Default" if _is_desktop_carrier(def_prof) and norm_p in ("gemini", "claude") else def_prof
+    return cand
+
+
 def _ensure_binding_entry(raw_binding: dict | None, browser_profile: str = "Chrome:Default", default_cfg: dict | None = None) -> dict:
     b = dict(raw_binding) if isinstance(raw_binding, dict) else {}
     cfg = default_cfg if isinstance(default_cfg, dict) else {}
+    provider = _platform(b) if b.get("provider") or b.get("url") else "chatgpt"
+    carrier_by_provider = _normalize_carrier_by_provider(b.get("carrier_by_provider"))
     fallback_prof = str(cfg.get("default_browser_profile") or browser_profile or _get_default_browser_profile()).strip()
-    raw_carrier = str(b.get("carrier") or b.get("browser_profile") or fallback_prof or "Chrome:Default").strip()
-    prof = _normalize_profile_spec(raw_carrier, str(b.get("browser") or "Chrome").strip())
+    raw_explicit_carrier = str(b.get("carrier") or b.get("browser_profile") or "").strip()
+    prof = _resolve_compatible_carrier_for_provider(
+        provider,
+        raw_explicit_carrier,
+        carrier_by_provider,
+        fallback_prof=fallback_prof or "Chrome:Default",
+        browser_hint=str(b.get("browser") or "Chrome").strip(),
+    )
+    carrier_by_provider[provider] = prof
     if prof.lower().startswith("desktop:"):
         browser = "Desktop"
     elif prof.lower().startswith("edge:"):
         browser = "Edge"
     else:
-        browser = str(b.get("browser") or "Chrome").strip()
-    provider = str(b.get("provider") or "chatgpt").strip().lower() or "chatgpt"
+        browser = "Chrome" if str(b.get("browser") or "").strip().lower() == "desktop" else str(b.get("browser") or "Chrome").strip()
     retired = b.get("retired_uuids")
     if not isinstance(retired, list):
         retired = []
@@ -926,7 +1072,7 @@ def _ensure_binding_entry(raw_binding: dict | None, browser_profile: str = "Chro
                 continue
             seen_rs_uuids.add(ru)
             retired_sessions.append({
-                "provider": str(rs.get("provider") or provider).strip().lower() or provider,
+                "provider": _normalize_studio_provider(rs.get("provider") or provider),
                 "carrier": str(rs.get("carrier") or prof).strip() or prof,
                 "conv_uuid": ru,
                 "retired_at": str(rs.get("retired_at") or b.get("updated_at") or _utc_now_iso()),
@@ -951,6 +1097,7 @@ def _ensure_binding_entry(raw_binding: dict | None, browser_profile: str = "Chro
     return {
         "provider": provider,
         "carrier": prof,
+        "carrier_by_provider": dict(carrier_by_provider),
         "conv_uuid": str(b.get("conv_uuid") or "").strip(),
         "project_prefix": _extract_project_prefix(str(b.get("url") or ""), str(b.get("project_prefix") or "")),
         "tab_id": str(b.get("tab_id") or "").strip(),
@@ -1218,9 +1365,11 @@ def _ensure_web_bridge_schema(state: dict) -> dict:
     state["available_models"] = _normalize_available_models(state.get("available_models"))
     catalogs = state.get("available_models_by_provider")
     catalogs = catalogs if isinstance(catalogs, dict) else {}
+    chatgpt_raw = catalogs.get("chatgpt") if catalogs.get("chatgpt") else catalogs.get("openai")
     state["available_models_by_provider"] = {
-        provider: _normalize_available_models(catalogs.get(provider))
-        for provider in ("chatgpt", "gemini", "claude")
+        "chatgpt": _normalize_available_models(chatgpt_raw),
+        "gemini": _normalize_available_models(catalogs.get("gemini")),
+        "claude": _normalize_available_models(catalogs.get("claude")),
     }
     if not state["available_models_by_provider"]["chatgpt"]:
         state["available_models_by_provider"]["chatgpt"] = state["available_models"]
@@ -1307,15 +1456,81 @@ def _ensure_web_bridge_schema(state: dict) -> dict:
     return state
 
 
+def _compute_wb_substantive_sig(state: dict) -> str:
+    """Compute a fast signature over all non-timestamp substantive fields of web-bridge-state."""
+    h = hashlib.sha1()
+    tabs = state.get("tabs") if isinstance(state.get("tabs"), dict) else {}
+    for tk in sorted(tabs.keys()):
+        tv = tabs.get(tk)
+        if not isinstance(tv, dict):
+            continue
+        t_clean = {
+            k: v for k, v in tv.items()
+            if k not in ("last_seen_at", "last_seen", "updated_at", "last_live_at")
+        }
+        h.update(json.dumps((tk, t_clean), sort_keys=True, ensure_ascii=False).encode("utf-8", errors="replace"))
+    insts = state.get("browser_instances") if isinstance(state.get("browser_instances"), dict) else {}
+    for ik in sorted(insts.keys()):
+        iv = insts.get(ik)
+        if not isinstance(iv, dict):
+            continue
+        i_clean = {k: v for k, v in iv.items() if k not in ("last_seen_at", "updated_at")}
+        h.update(json.dumps((ik, i_clean), sort_keys=True, ensure_ascii=False).encode("utf-8", errors="replace"))
+    bindings = state.get("session_bindings") if isinstance(state.get("session_bindings"), dict) else {}
+    for bk in sorted(bindings.keys()):
+        bv = bindings.get(bk)
+        if not isinstance(bv, dict):
+            continue
+        b_clean = {k: v for k, v in bv.items() if k != "updated_at"}
+        h.update(json.dumps((bk, b_clean), sort_keys=True, ensure_ascii=False).encode("utf-8", errors="replace"))
+    breakers = state.get("breakers") if isinstance(state.get("breakers"), dict) else {}
+    for brk_k in sorted(breakers.keys()):
+        brk_v = breakers.get(brk_k)
+        if not isinstance(brk_v, dict):
+            continue
+        brk_clean = {k: v for k, v in brk_v.items() if k not in ("updated_at", "last_live_at")}
+        h.update(json.dumps((brk_k, brk_clean), sort_keys=True, ensure_ascii=False).encode("utf-8", errors="replace"))
+    for list_key in ("queue", "retire_actions", "available_models"):
+        h.update(json.dumps(state.get(list_key) or [], sort_keys=True, ensure_ascii=False).encode("utf-8", errors="replace"))
+    for map_key in ("available_models_by_provider", "available_models_by_profile"):
+        h.update(json.dumps(state.get(map_key) or {}, sort_keys=True, ensure_ascii=False).encode("utf-8", errors="replace"))
+    ar_cfg = state.get("auto_resend_config") if isinstance(state.get("auto_resend_config"), dict) else {}
+    ar_clean = {k: v for k, v in ar_cfg.items() if k != "updated_at"}
+    h.update(json.dumps(ar_clean, sort_keys=True, ensure_ascii=False).encode("utf-8", errors="replace"))
+    return h.hexdigest()
+
+
 def _load_web_bridge_state(wb_path: str) -> dict:
-    if wb_path and os.path.isfile(wb_path):
-        try:
-            with open(wb_path, "r", encoding="utf-8-sig") as fh:
-                data = json.load(fh)
-                if isinstance(data, dict):
-                    return _ensure_web_bridge_schema(data)
-        except Exception:
-            pass
+    if not wb_path:
+        return _default_web_bridge_state()
+    abs_p = os.path.abspath(wb_path)
+    mtime_ns, fsize = _file_stat_sig(abs_p)
+    if mtime_ns == 0 and fsize == 0:
+        _WEB_BRIDGE_MEM_CACHE.pop(abs_p, None)
+        return _default_web_bridge_state()
+    mem_entry = _WEB_BRIDGE_MEM_CACHE.get(abs_p)
+    if (
+        isinstance(mem_entry, dict)
+        and mem_entry.get("disk_mtime_ns") == mtime_ns
+        and mem_entry.get("disk_size") == fsize
+        and isinstance(mem_entry.get("state"), dict)
+    ):
+        return copy.deepcopy(mem_entry["state"])
+    try:
+        with open(abs_p, "r", encoding="utf-8-sig") as fh:
+            data = json.load(fh)
+            if isinstance(data, dict):
+                norm = _ensure_web_bridge_schema(data)
+                _WEB_BRIDGE_MEM_CACHE[abs_p] = {
+                    "disk_mtime_ns": mtime_ns,
+                    "disk_size": fsize,
+                    "last_disk_write_at": float((mem_entry or {}).get("last_disk_write_at") or time.time()),
+                    "substantive_sig": _compute_wb_substantive_sig(norm),
+                    "state": copy.deepcopy(norm),
+                }
+                return norm
+    except Exception:
+        pass
     return _default_web_bridge_state()
 
 
@@ -1510,31 +1725,60 @@ def _get_wb_logical_sigs(wb_path: str, now_epoch: float | None = None) -> tuple[
     cached = _WB_LOGICAL_SIG_CACHE.get(abs_p)
     # Re-evaluate online freshness bucket every 6 seconds even if file did not change
     fresh_bucket = int(now // 6)
-    if cached and cached[0] == (mtime_ns ^ fresh_bucket) and cached[1] == fsize:
-        return (cached[2], cached[3])
+    if cached and cached[0] == (mtime_ns ^ fresh_bucket) and cached[1] == fsize and cached[2] == _STUDIO_STATE_MUTATION_SEQ:
+        return (cached[3], cached[4])
     state = _load_web_bridge_state(abs_p)
     wb_sig, q_rev = _compute_wb_logical_sig(state, now)
-    _WB_LOGICAL_SIG_CACHE[abs_p] = (mtime_ns ^ fresh_bucket, fsize, wb_sig, q_rev)
+    _WB_LOGICAL_SIG_CACHE[abs_p] = (mtime_ns ^ fresh_bucket, fsize, _STUDIO_STATE_MUTATION_SEQ, wb_sig, q_rev)
     return (wb_sig, q_rev)
 
 
-def _save_web_bridge_state(wb_path: str, state: dict) -> None:
+def _save_web_bridge_state(wb_path: str, state: dict, allow_throttle: bool = False) -> bool:
     if not wb_path:
-        return
-    os.makedirs(os.path.dirname(wb_path), exist_ok=True)
+        return False
+    _bump_studio_mutation_seq()
+    abs_p = os.path.abspath(wb_path)
+    now = time.time()
     state["updated_at"] = _utc_now_iso()
-    tmp_path = f"{wb_path}.{threading.get_ident()}.tmp"
+    new_sub_sig = _compute_wb_substantive_sig(state)
+    if allow_throttle:
+        mem_entry = _WEB_BRIDGE_MEM_CACHE.get(abs_p)
+        disk_mtime_ns, disk_size = _file_stat_sig(abs_p)
+        if (
+            isinstance(mem_entry, dict)
+            and disk_mtime_ns > 0
+            and mem_entry.get("disk_mtime_ns") == disk_mtime_ns
+            and mem_entry.get("disk_size") == disk_size
+            and mem_entry.get("substantive_sig") == new_sub_sig
+            and (now - float(mem_entry.get("last_disk_write_at") or 0.0)) < HEARTBEAT_DISK_FLUSH_INTERVAL_SEC
+        ):
+            mem_entry["state"] = copy.deepcopy(state)
+            try:
+                wb_sig, q_rev = _compute_wb_logical_sig(state, now)
+                _WB_LOGICAL_SIG_CACHE[abs_p] = (disk_mtime_ns ^ int(now // 6), disk_size, _STUDIO_STATE_MUTATION_SEQ, wb_sig, q_rev)
+            except Exception:
+                pass
+            return False
+
+    os.makedirs(os.path.dirname(abs_p), exist_ok=True)
+    tmp_path = f"{abs_p}.{threading.get_ident()}.tmp"
     with open(tmp_path, "w", encoding="utf-8") as fh:
         json.dump(state, fh, ensure_ascii=False, indent=2)
-    os.replace(tmp_path, wb_path)
+    os.replace(tmp_path, abs_p)
     try:
-        abs_p = os.path.abspath(wb_path)
-        now = time.time()
         mtime_ns, fsize = _file_stat_sig(abs_p)
+        _WEB_BRIDGE_MEM_CACHE[abs_p] = {
+            "disk_mtime_ns": mtime_ns,
+            "disk_size": fsize,
+            "last_disk_write_at": now,
+            "substantive_sig": new_sub_sig,
+            "state": copy.deepcopy(state),
+        }
         wb_sig, q_rev = _compute_wb_logical_sig(state, now)
-        _WB_LOGICAL_SIG_CACHE[abs_p] = (mtime_ns ^ int(now // 6), fsize, wb_sig, q_rev)
+        _WB_LOGICAL_SIG_CACHE[abs_p] = (mtime_ns ^ int(now // 6), fsize, _STUDIO_STATE_MUTATION_SEQ, wb_sig, q_rev)
     except Exception:
         pass
+    return True
 
 
 def _resolve_browser_exe(browser_name: str, profile_spec: str = "") -> tuple[str | None, str]:
@@ -2028,6 +2272,7 @@ def save_task_archive_state(data_root: str, session_key: str, state_val: str, re
                 save_task_registry(data_root, reg_doc)
         except Exception:
             pass
+    _bump_studio_mutation_seq()
     return payload
 
 
@@ -2136,28 +2381,51 @@ def sync_task_registry(
 
 
 def load_all_tasks(tasks_root: str) -> list[dict]:
-    """Load all tsk_*.json task ledgers sorted by updated_at descending."""
+    """Load all tsk_*.json task ledgers sorted by updated_at descending (with mtime/size slate cache)."""
     if not tasks_root or not os.path.isdir(tasks_root):
         return []
+    abs_root = os.path.abspath(tasks_root)
+    seen_paths: set[str] = set()
     result = []
     try:
         for fname in os.listdir(tasks_root):
             if not (fname.startswith("tsk_") and fname.endswith(".json")):
                 continue
             fpath = os.path.join(tasks_root, fname)
+            abs_fpath = os.path.abspath(fpath)
+            seen_paths.add(abs_fpath)
             try:
+                st = os.stat(fpath)
+                mtime_ns = st.st_mtime_ns
+                fsize = st.st_size
+                with _STUDIO_TASK_FILE_CACHE_LOCK:
+                    cached = _STUDIO_TASK_FILE_CACHE.get(abs_fpath)
+                if cached is not None and cached[0] == mtime_ns and cached[1] == fsize:
+                    doc = copy.deepcopy(cached[2])
+                    doc["_file_path"] = fpath
+                    result.append(doc)
+                    continue
                 with open(fpath, "r", encoding="utf-8-sig") as fh:
                     doc = json.load(fh)
                 if isinstance(doc, dict) and doc.get("id"):
                     doc["_file_path"] = fpath
                     doc["_updated_epoch"] = _parse_iso_epoch(str(doc.get("updated_at") or doc.get("created_at") or ""))
+                    with _STUDIO_TASK_FILE_CACHE_LOCK:
+                        _STUDIO_TASK_FILE_CACHE[abs_fpath] = (mtime_ns, fsize, copy.deepcopy(doc))
                     result.append(doc)
             except Exception:
                 continue
+        with _STUDIO_TASK_FILE_CACHE_LOCK:
+            for cached_path in list(_STUDIO_TASK_FILE_CACHE.keys()):
+                if os.path.dirname(cached_path) == abs_root and cached_path not in seen_paths:
+                    _STUDIO_TASK_FILE_CACHE.pop(cached_path, None)
     except Exception:
         pass
     result.sort(key=lambda x: x.get("_updated_epoch", 0.0), reverse=True)
     return result
+
+
+_studio_list_tasks = load_all_tasks
 
 
 def list_active_unfinished_tasks(tasks_root: str, data_root: str) -> list[dict]:
@@ -2193,6 +2461,8 @@ def purge_archived_session(data_root: str, tasks_root: str, session_key: str) ->
     purged_files = []
     if tasks_root:
         task_file = os.path.join(tasks_root, f"{session_key}.json")
+        with _STUDIO_TASK_FILE_CACHE_LOCK:
+            _STUDIO_TASK_FILE_CACHE.pop(os.path.abspath(task_file), None)
         if os.path.isfile(task_file):
             try:
                 os.remove(task_file)
@@ -2491,6 +2761,9 @@ def _write_task_doc(tasks_root: str, doc: dict) -> None:
     with open(tmp, "w", encoding="utf-8") as fh:
         json.dump(clean, fh, ensure_ascii=False, indent=2)
     os.replace(tmp, path)
+    with _STUDIO_TASK_FILE_CACHE_LOCK:
+        _STUDIO_TASK_FILE_CACHE.pop(os.path.abspath(path), None)
+    _bump_studio_mutation_seq()
 
 
 def mint_app_task(tasks_root: str, user_text: str, now_iso: str = "") -> dict:
@@ -3188,7 +3461,10 @@ _BINDING_PRESET_FIELDS = (
     "provider",
     "browser",
     "browser_profile",
+    "carrier",
+    "carrier_by_provider",
     "user_locked_browser",
+    "user_locked_carrier",
     "target_model",
     "reasoning_effort",
     "user_locked_model",
@@ -3211,8 +3487,19 @@ def _inherit_new_task_binding(state: dict, new_task_id: str, ar_cfg: dict, overr
     if isinstance(preset, dict):
         for key in _BINDING_PRESET_FIELDS:
             if key in preset:
-                raw[key] = preset[key]
-    for key, value in (overrides or {}).items():
+                raw[key] = copy.deepcopy(preset[key]) if isinstance(preset[key], dict) else preset[key]
+    override_dict = overrides or {}
+    explicit_prof = str(override_dict.get("browser_profile") or override_dict.get("carrier") or "").strip()
+    explicit_prov = str(override_dict.get("provider") or "").strip()
+    if explicit_prov and not explicit_prof:
+        norm_prov = _normalize_studio_provider(explicit_prov, default="")
+        if norm_prov and norm_prov != _normalize_studio_provider(raw.get("provider"), default="chatgpt"):
+            raw.pop("browser_profile", None)
+            raw.pop("carrier", None)
+    for key, value in override_dict.items():
+        if isinstance(value, dict):
+            raw[key] = copy.deepcopy(value)
+            continue
         clean = str(value or "").strip()
         if clean and clean.lower() != "inherit":
             raw[key] = clean
@@ -3430,10 +3717,65 @@ def _is_tunnel_drop_line(line: str) -> bool:
     return ("failed to post response to control plane" in line and "EOF" in line) or ("command response deadline reached" in line)
 
 
+def _parse_tunnel_forward_line(line: str) -> dict | None:
+    """Parse a single tunnel forward log line once and cache its structured classification."""
+    if _TUNNEL_FORWARD_MARK not in line or "openai-mcp-discover" in line:
+        return None
+    m_cid = re.search(r'"cmd_request_id"\s*:\s*"([^"]+)"', line)
+    if not m_cid:
+        return None
+    cid = m_cid.group(1)
+    m_time = re.search(r'"time"\s*:\s*"([^"]+)"', line)
+    t_iso = m_time.group(1) if m_time else ""
+    t_epoch = _parse_iso_epoch(t_iso)
+    m_rpc_str = re.search(r'"rpc_request_id"\s*:\s*"([^"]+)"', line)
+    m_rpc_num = re.search(r'"rpc_request_id"\s*:\s*(\d+)', line)
+    rpc_id = m_rpc_str.group(1) if m_rpc_str else (m_rpc_num.group(1) if m_rpc_num else "")
+
+    m_wfr = re.match(r"^(wfr_[0-9a-zA-Z_]+)(?:/[a-z0-9]{3,6})?$", cid)
+    m_uuid_stream = (
+        re.match(r"^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$", cid)
+        if not (rpc_id and rpc_id.isdigit())
+        else None
+    )
+    if m_wfr or m_uuid_stream:
+        base_wfr = m_wfr.group(1) if m_wfr else m_uuid_stream.group(1)
+        return {
+            "kind": "wfr",
+            "stream_id": base_wfr,
+            "cid": cid,
+            "rpc_id": rpc_id,
+            "t_iso": t_iso,
+            "t_epoch": t_epoch,
+        }
+    m_slash = re.match(r"^([0-9a-fA-F-]{36})/[a-z0-9]{3,6}$", cid)
+    if m_slash:
+        return {
+            "kind": "slash",
+            "stream_id": m_slash.group(1),
+            "cid": cid,
+            "rpc_id": rpc_id,
+            "t_iso": t_iso,
+            "t_epoch": t_epoch,
+        }
+    if re.search(r"/[a-z0-9]{3,6}$", cid) or (rpc_id and rpc_id.isdigit()):
+        return None
+    return {
+        "kind": "subagent",
+        "stream_id": cid,
+        "cid": cid,
+        "rpc_id": rpc_id,
+        "t_iso": t_iso,
+        "t_epoch": t_epoch,
+    }
+
+
 def _new_log_reader_state() -> dict:
     return {
         "byte_offset": 0,
+        "last_stat_size": 0,
         "lines": [],
+        "parsed_lines": [],
         "evicted_valid_tool_count": 0,
         "evicted_wfr_counts": {},
         "evicted_slash_counts": {},
@@ -3493,6 +3835,7 @@ def get_tunnel_log_reader_state(tunnel_log_path: str) -> dict:
     """Return a detached copy of the evicted_* accumulators and drop probe for a tunnel log (no lines)."""
     base = _new_log_reader_state()
     base.pop("lines", None)
+    base.pop("parsed_lines", None)
     if not tunnel_log_path:
         return base
     with _LOG_READER_LOCK:
@@ -3501,6 +3844,8 @@ def get_tunnel_log_reader_state(tunnel_log_path: str) -> dict:
             return base
         return {
             "byte_offset": int(state.get("byte_offset") or 0),
+            "last_stat_size": int(state.get("last_stat_size") or 0),
+            "parsed_lines": list(state.get("parsed_lines") or []),
             "evicted_valid_tool_count": int(state.get("evicted_valid_tool_count") or 0),
             "evicted_wfr_counts": dict(state.get("evicted_wfr_counts") or {}),
             "evicted_slash_counts": dict(state.get("evicted_slash_counts") or {}),
@@ -3548,7 +3893,9 @@ def read_tunnel_log_incremental(tunnel_log_path: str) -> list[str]:
 
         if file_size < state["byte_offset"]:
             state["byte_offset"] = 0
+            state["last_stat_size"] = 0
             state["lines"] = []
+            state["parsed_lines"] = []
 
         if file_size > state["byte_offset"]:
             try:
@@ -3556,30 +3903,42 @@ def read_tunnel_log_incremental(tunnel_log_path: str) -> list[str]:
                     fh.seek(state["byte_offset"])
                     chunk = fh.read()
                     state["byte_offset"] = fh.tell()
+                    state["last_stat_size"] = file_size
                 text = chunk.decode("utf-8", errors="replace")
                 new_lines = [ln for ln in text.splitlines() if ln.strip()]
                 state["lines"].extend(new_lines)
+                parsed_list = state.setdefault("parsed_lines", [])
                 for ln in new_lines:
+                    parsed_list.append(_parse_tunnel_forward_line(ln))
                     if _is_tunnel_drop_line(ln):
                         state["last_tunnel_drop_epoch"] = max(float(state.get("last_tunnel_drop_epoch") or 0.0), _tunnel_line_epoch(ln))
             except Exception:
                 pass
+        else:
+            state["last_stat_size"] = file_size
 
         if len(state["lines"]) > 2500:
             # Spec v4.7 §2.1: archive the evicted head into cumulative counters before trimming (breaks the ~1007 cap).
             _archive_evicted_tunnel_lines(state, state["lines"][:-2000])
             kept = state["lines"][-2000:]
+            kept_parsed = (state.get("parsed_lines") or [])[-2000:]
             try:
                 tmp_path = f"{abs_path}.{threading.get_ident()}.tmp"
                 with open(tmp_path, "w", encoding="utf-8") as fh:
                     fh.write("\n".join(kept) + "\n")
                 os.replace(tmp_path, abs_path)
                 state["lines"] = kept
+                state["parsed_lines"] = kept_parsed
                 state["byte_offset"] = os.path.getsize(abs_path)
+                state["last_stat_size"] = state["byte_offset"]
             except Exception:
                 state["lines"] = kept
+                state["parsed_lines"] = kept_parsed
 
         return list(state["lines"])
+
+
+_collect_mcp_tunnel_Observation = read_tunnel_log_incremental
 
 
 def extract_mcp_call_telemetry(raw_bytes: bytes) -> dict | None:
@@ -3705,6 +4064,7 @@ def _save_activity_file(activity_path: str, payload: dict) -> None:
     with open(tmp_path, "w", encoding="utf-8") as fh:
         json.dump(payload, fh, ensure_ascii=False)
     os.replace(tmp_path, activity_path)
+    _bump_studio_mutation_seq()
 
 
 def record_tools_list_sync(activity_path: str) -> None:
@@ -4389,6 +4749,24 @@ def build_studio_snapshot(data_root: str, tasks_root: str, web_bridge_path: str 
     if since_sig and since_sig == cur_sig:
         return {"ok": True, "not_modified": True, "rev": cur_sig}
 
+    slate_key = (
+        os.path.abspath(data_root) if data_root else "",
+        os.path.abspath(tasks_root) if tasks_root else "",
+        os.path.abspath(wb_path) if wb_path else "",
+    )
+    if not since_sig:
+        with _STUDIO_SNAPSHOT_SLATE_LOCK:
+            cached_ws_roots = _STUDIO_SNAPSHOT_SLATE.get("ws_roots") or ()
+            if (
+                _STUDIO_SNAPSHOT_SLATE.get("key") == slate_key
+                and _STUDIO_SNAPSHOT_SLATE.get("mutation_seq") == _STUDIO_STATE_MUTATION_SEQ
+                and _STUDIO_SNAPSHOT_SLATE.get("sig") == cur_sig
+                and 0.0 <= (now_epoch - float(_STUDIO_SNAPSHOT_SLATE.get("ts") or 0.0)) <= _STUDIO_SNAPSHOT_TTL_SEC
+                and _STUDIO_SNAPSHOT_SLATE.get("pipe_mtimes") == tuple(_probe_pipeline_state_mtime(r, now_epoch) for r in cached_ws_roots)
+                and isinstance(_STUDIO_SNAPSHOT_SLATE.get("snapshot"), dict)
+            ):
+                return copy.deepcopy(_STUDIO_SNAPSHOT_SLATE["snapshot"])
+
     lines = read_tunnel_log_incremental(tunnel_log_path)
     act_doc = _load_activity_file(activity_path)
     calls_map = act_doc.get("calls") if isinstance(act_doc.get("calls"), dict) else {}
@@ -4456,38 +4834,27 @@ def build_studio_snapshot(data_root: str, tasks_root: str, web_bridge_path: str 
     subagent_events: list[dict] = []
     # Spec v4.7 §2.1: seed counters with the evicted_* base archived before each 2500->2000 trim.
     log_reader_state = get_tunnel_log_reader_state(tunnel_log_path)
+    parsed_lines = log_reader_state.get("parsed_lines") if isinstance(log_reader_state.get("parsed_lines"), list) else []
+    use_cached_parsed = len(parsed_lines) == len(lines)
     tunnel_network_hold = compute_tunnel_network_hold(lines, now_epoch)
     last_tunnel_drop_epoch = float(log_reader_state.get("last_tunnel_drop_epoch") or 0.0)
     counted_tunnel_rpc_ids: set[str] = set(log_reader_state.get("evicted_rpc_ids") or [])
     recent_minute_count = 0
     valid_tool_count = int(log_reader_state.get("evicted_valid_tool_count") or 0)
 
-    for line in lines:
-        if "dispatcher forwarded command to MCP server" not in line:
+    for line_idx, line in enumerate(lines):
+        rec = parsed_lines[line_idx] if use_cached_parsed else _parse_tunnel_forward_line(line)
+        if not rec:
             continue
-        if "openai-mcp-discover" in line:
-            continue
-        m_cid = re.search(r'"cmd_request_id"\s*:\s*"([^"]+)"', line)
-        if not m_cid:
-            continue
-        cid = m_cid.group(1)
-        m_time = re.search(r'"time"\s*:\s*"([^"]+)"', line)
-        t_iso = m_time.group(1) if m_time else ""
-        t_epoch = _parse_iso_epoch(t_iso)
-
-        m_rpc_str = re.search(r'"rpc_request_id"\s*:\s*"([^"]+)"', line)
-        m_rpc_num = re.search(r'"rpc_request_id"\s*:\s*(\d+)', line)
-        rpc_id = m_rpc_str.group(1) if m_rpc_str else (m_rpc_num.group(1) if m_rpc_num else "")
+        kind = rec["kind"]
+        cid = rec["cid"]
+        t_iso = rec["t_iso"]
+        t_epoch = rec["t_epoch"]
+        rpc_id = rec["rpc_id"]
 
         # 1. Primary workflow stream: wfr_<hex> OR pure 36-char UUID cmd_request_id (non-numeric rpc_id)
-        m_wfr = re.match(r"^(wfr_[0-9a-zA-Z_]+)(?:/[a-z0-9]{3,6})?$", cid)
-        m_uuid_stream = (
-            re.match(r"^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$", cid)
-            if not (rpc_id and rpc_id.isdigit())
-            else None
-        )
-        if m_wfr or m_uuid_stream:
-            base_wfr = m_wfr.group(1) if m_wfr else m_uuid_stream.group(1)
+        if kind == "wfr":
+            base_wfr = rec["stream_id"]
             valid_tool_count += 1
             if rpc_id:
                 counted_tunnel_rpc_ids.add(rpc_id)
@@ -4539,9 +4906,8 @@ def build_studio_snapshot(data_root: str, tasks_root: str, web_bridge_path: str 
             continue
 
         # 2. <conv_uuid>/<4char> web conversation stream
-        m_slash = re.match(r"^([0-9a-fA-F-]{36})/[a-z0-9]{3,6}$", cid)
-        if m_slash:
-            conv_uuid = m_slash.group(1)
+        if kind == "slash":
+            conv_uuid = rec["stream_id"]
             s_entry = slash_streams.get(conv_uuid)
             if not s_entry:
                 s_entry = {
@@ -4584,10 +4950,6 @@ def build_studio_snapshot(data_root: str, tasks_root: str, web_bridge_path: str 
                     s_entry["WorkspaceRoot"] = str(meta["workspace_root"])
                 if meta.get("in_flight"):
                     s_entry["InFlight"] = True
-            continue
-
-        # Skip other numeric handshake pings
-        if re.search(r"/[a-z0-9]{3,6}$", cid) or (rpc_id and rpc_id.isdigit()):
             continue
 
         valid_tool_count += 1
@@ -5200,6 +5562,7 @@ def build_studio_snapshot(data_root: str, tasks_root: str, web_bridge_path: str 
             "Provider": b_entry.get("provider", "chatgpt"),
             "Carrier": b_entry.get("carrier", b_entry["browser_profile"]),
             "BrowserProfile": b_entry["browser_profile"],
+            "CarrierByProvider": dict(b_entry.get("carrier_by_provider") or {}),
             "BoundConvUuid": str(b_entry.get("conv_uuid") or ""),
             "UserLockedBrowser": b_entry["user_locked_browser"],
             "UserLockedCarrier": b_entry.get("user_locked_carrier", b_entry["user_locked_browser"]),
@@ -5260,7 +5623,7 @@ def build_studio_snapshot(data_root: str, tasks_root: str, web_bridge_path: str 
     desktop_online = _is_host_online(wb_state, "Desktop", "Desktop:ChatGPT", now_epoch)
     final_sig = _compute_studio_state_sig(data_root, tasks_root, wb_path, now_epoch)
     _, queue_rev = _get_wb_logical_sigs(wb_path, now_epoch)
-    return {
+    out_snap = {
         "ok": True,
         "rev": final_sig,
         "queue_rev": queue_rev,
@@ -5294,6 +5657,24 @@ def build_studio_snapshot(data_root: str, tasks_root: str, web_bridge_path: str 
             "DesktopAppOnline": desktop_online,
         },
     }
+    ws_roots_tuple = tuple(sorted({str(s.get("WorkspaceRoot") or "") for s in sessions if s.get("WorkspaceRoot")}))
+    with _STUDIO_SNAPSHOT_SLATE_LOCK:
+        _STUDIO_SNAPSHOT_SLATE.clear()
+        _STUDIO_SNAPSHOT_SLATE.update(
+            {
+                "key": slate_key,
+                "mutation_seq": _STUDIO_STATE_MUTATION_SEQ,
+                "sig": final_sig,
+                "ts": now_epoch,
+                "ws_roots": ws_roots_tuple,
+                "pipe_mtimes": tuple(_probe_pipeline_state_mtime(r, now_epoch) for r in ws_roots_tuple),
+                "snapshot": copy.deepcopy(out_snap),
+            }
+        )
+    return out_snap
+
+
+_studio_collect_state = build_studio_snapshot
 
 
 def _build_wakeup_prompt(session: dict) -> str:
@@ -6820,10 +7201,17 @@ def handle_web_bridge_poll(wb_path: str, tasks_root: str, payload: dict) -> dict
             _store_provider_models(state, _platform(payload), top_models)
         top_catalogs = payload.get("available_models_by_provider")
         if isinstance(top_catalogs, dict):
-            for top_provider in ("chatgpt", "gemini", "claude"):
-                models = _normalize_available_models(top_catalogs.get(top_provider))
-                if models:
-                    _store_provider_models(state, top_provider, models)
+            # Process legacy aliases (e.g. "openai") first, then canonical keys so canonical "chatgpt" wins if both are supplied
+            ordered_items = sorted(
+                top_catalogs.items(),
+                key=lambda kv: 1 if str(kv[0]).strip().lower() in _CANONICAL_STUDIO_PROVIDERS else 0,
+            )
+            for raw_prov, raw_list in ordered_items:
+                norm_prov = _normalize_studio_provider(raw_prov, default="")
+                if norm_prov in _CANONICAL_STUDIO_PROVIDERS:
+                    models = _normalize_available_models(raw_list)
+                    if models:
+                        _store_provider_models(state, norm_prov, models)
 
         is_batch = isinstance(payload.get("tabs"), list)
         raw_tabs_list = payload["tabs"] if is_batch else [payload]
@@ -7012,9 +7400,12 @@ def handle_web_bridge_poll(wb_path: str, tasks_root: str, payload: dict) -> dict
                             str(msg.get("target_model") or binding.get("target_model") or "inherit"),
                             _provider_models(state, _platform(msg), target_profile),
                         )
-                        model_qs = f"&model={model_slug}" if model_slug else ""
-                        prof_qs = f"&relay_profile={urllib.parse.quote(target_profile)}" if target_profile else ""
-                        handover_url = f"{base_url.rstrip('/')}/?relay_handover=1&msg_id={msg_id}{model_qs}{prof_qs}"
+                        handover_url = _build_handover_url(
+                            base_url,
+                            msg_id=msg_id,
+                            model_slug=model_slug,
+                            browser_profile=target_profile,
+                        )
                         msg["browser_tab_opened"] = True
                         msg["browser_tab_opened_at"] = now_iso
                         if msg_session_key:
@@ -7208,7 +7599,11 @@ def handle_web_bridge_poll(wb_path: str, tasks_root: str, payload: dict) -> dict
             state["queue"] = state["queue"][-50:]
         if len(state.get("retire_actions", [])) > 60:
             state["retire_actions"] = state["retire_actions"][-50:]
-        _save_web_bridge_state(wb_path, state)
+        _save_web_bridge_state(
+            wb_path,
+            state,
+            allow_throttle=not bool(dispatches or matched_messages or focus_tab_to_send),
+        )
 
     return {
         "ok": True,
@@ -7308,8 +7703,12 @@ def cold_start_pending_hosts(wb_path: str, only_msg_id: str = "", tasks_root: st
             prof_qs = f"relay_profile={urllib.parse.quote(profile)}"
             if mode == "new_window_handover":
                 slug = _model_to_url_slug(str(m.get("target_model") or "inherit"), _provider_models(state, _platform(m), str(m.get("browser_profile") or "")))
-                model_qs = f"&model={slug}" if slug else ""
-                url = f"{base}/?relay_handover=1&msg_id={m.get('id')}{model_qs}&{prof_qs}"
+                url = _build_handover_url(
+                    base,
+                    msg_id=str(m.get("id") or ""),
+                    model_slug=slug,
+                    browser_profile=profile,
+                )
             else:
                 url = _platform_room_url(m, conv, str(m.get("project_prefix") or "")) + f"?{prof_qs}"
             m["cold_started_at"] = now_iso
@@ -7394,7 +7793,9 @@ def _enqueue_web_bridge_message(wb_path: str, payload: dict, now_iso: str, tasks
                 session_key,
                 ar_cfg,
                 {
+                    "provider": payload.get("provider"),
                     "browser_profile": explicit_profile,
+                    "carrier_by_provider": payload.get("carrier_by_provider"),
                     "target_model": payload.get("target_model"),
                     "reasoning_effort": payload.get("reasoning_effort"),
                 },
@@ -7424,16 +7825,23 @@ def _enqueue_web_bridge_message(wb_path: str, payload: dict, now_iso: str, tasks
                 state["session_bindings"][session_key] = binding
         project_prefix = _extract_project_prefix("", str(payload.get("project_prefix") or binding.get("project_prefix") or ""))
 
-        browser_profile = _normalize_profile_spec(
-            explicit_profile or str(binding.get("browser_profile") or ar_cfg.get("default_browser_profile") or _get_default_browser_profile())
+        browser_profile = _resolve_compatible_carrier_for_provider(
+            provider,
+            explicit_profile or str(binding.get("browser_profile") or ""),
+            binding.get("carrier_by_provider"),
+            fallback_prof=str(ar_cfg.get("default_browser_profile") or _get_default_browser_profile()),
         )
-        browser = explicit_browser or str(
-            binding.get("browser")
-            or (
-                "Desktop"
-                if browser_profile.lower().startswith("desktop:")
-                else ("Edge" if browser_profile.lower().startswith("edge:") else "Chrome")
-            )
+        binding["browser_profile"] = browser_profile
+        binding["carrier"] = browser_profile
+        cbp_enq = _normalize_carrier_by_provider(binding.get("carrier_by_provider"))
+        cbp_enq[provider] = browser_profile
+        binding["carrier_by_provider"] = cbp_enq
+        if session_key:
+            state["session_bindings"][session_key] = binding
+        browser = (
+            "Desktop"
+            if browser_profile.lower().startswith("desktop:")
+            else ("Edge" if browser_profile.lower().startswith("edge:") else (explicit_browser or "Chrome"))
         )
         explicit_target_model = str(payload.get("target_model") or "").strip()
         explicit_reasoning_effort = str(payload.get("reasoning_effort") or "").strip()
@@ -7530,9 +7938,12 @@ def _enqueue_web_bridge_message(wb_path: str, payload: dict, now_iso: str, tasks
                 pioneer_id = str(existing_pioneer.get("id") or "")
                 base_url = _platform_base(binding, project_prefix)
                 model_slug = _model_to_url_slug(target_model, avail_models)
-                model_qs = f"&model={model_slug}" if model_slug else ""
-                prof_qs = f"&relay_profile={urllib.parse.quote(browser_profile)}" if browser_profile else ""
-                pioneer_url = f"{base_url.rstrip('/')}/?relay_handover=1&msg_id={pioneer_id}{model_qs}{prof_qs}"
+                pioneer_url = _build_handover_url(
+                    base_url,
+                    msg_id=pioneer_id,
+                    model_slug=model_slug,
+                    browser_profile=browser_profile,
+                )
                 return {
                     "ok": True,
                     "message_id": pioneer_id,
@@ -7705,9 +8116,12 @@ def _enqueue_web_bridge_message(wb_path: str, payload: dict, now_iso: str, tasks
     if mode == "new_window_handover":
         base_url = _platform_base(binding, project_prefix)
         model_slug = _model_to_url_slug(target_model, avail_models)
-        model_qs = f"&model={model_slug}" if model_slug else ""
-        prof_qs = f"&relay_profile={urllib.parse.quote(browser_profile)}" if browser_profile else ""
-        handover_url = f"{base_url.rstrip('/')}/?relay_handover=1&msg_id={msg_id}{model_qs}{prof_qs}"
+        handover_url = _build_handover_url(
+            base_url,
+            msg_id=msg_id,
+            model_slug=model_slug,
+            browser_profile=browser_profile,
+        )
 
     # Spec v4.1 ZeroDisturbHostLauncher: a closed host is cold-started minimized without taking focus,
     # for every mode (not only handovers). In production HTTP mode, run off-request-thread so /studio/action
@@ -7818,6 +8232,14 @@ def _open_session_web_tab(wb_path: str, payload: dict) -> dict:
                 )
 
         # Desktop:ChatGPT native Plan C routing: switch ChatGPT.exe memory router via CDP, never launch external Chrome!
+        if DesktopAppBridge._is_desktop_profile(browser_profile) and _platform(binding) != "chatgpt":
+            browser_profile = _resolve_compatible_carrier_for_provider(
+                _platform(binding),
+                "",
+                binding.get("carrier_by_provider"),
+                fallback_prof="Chrome:Default",
+            )
+            browser = "Edge" if browser_profile.lower().startswith("edge:") else "Chrome"
         if DesktopAppBridge._is_desktop_profile(browser_profile):
             desk_tab = state.get("tabs", {}).get(DesktopAppBridge.TAB_ID)
             if isinstance(desk_tab, dict) and not conv_uuid:
@@ -7875,8 +8297,11 @@ def _open_session_web_tab(wb_path: str, payload: dict) -> dict:
             for m in session_msgs:
                 if m.get("mode") == "new_window_handover" and m.get("status") in ("pending", "claimed") and not conv_uuid:
                     base_u = _platform_base(binding, project_prefix).rstrip("/")
-                    prof_qs = f"&relay_profile={urllib.parse.quote(browser_profile)}" if browser_profile else ""
-                    latest_handover_url = f"{base_u}/?relay_handover=1&msg_id={m.get('id')}{prof_qs}"
+                    latest_handover_url = _build_handover_url(
+                        base_u,
+                        msg_id=str(m.get("id") or ""),
+                        browser_profile=browser_profile,
+                    )
                     break
 
             has_exact_profile_tabs = any(
@@ -8326,27 +8751,65 @@ def handle_studio_action(data_root: str, tasks_root: str, wb_path: str, payload:
             state = _load_web_bridge_state(wb_path)
             ar_cfg = state["auto_resend_config"]
             b = _ensure_binding_entry(state["session_bindings"].get(session_key), default_cfg=ar_cfg)
-            new_prof = str(payload.get("carrier") or payload.get("browser_profile") or "").strip()
-            new_provider = str(payload.get("provider") or "").strip().lower()
+            raw_requested_prof = _normalize_carrier_spec(str(payload.get("carrier") or payload.get("browser_profile") or "").strip())
+            new_provider = str(payload.get("provider") or "").strip()
             new_conv = str(payload.get("conv_uuid") or "").strip()
             new_tab_id = str(payload.get("tab_id") or "").strip()
             new_title = str(payload.get("title") or "").strip()
             new_proj = _extract_project_prefix("", str(payload.get("project_prefix") or ""))
             new_mode = str(payload.get("target_mode") or "").strip()
 
+            prev_provider = _platform(b)
+            prev_prof = str(b.get("browser_profile") or "").strip()
+            cbp = _normalize_carrier_by_provider(b.get("carrier_by_provider"))
+            if prev_prof and not (prev_provider in ("gemini", "claude") and _is_desktop_carrier(prev_prof)):
+                cbp[prev_provider] = prev_prof
+            if isinstance(payload.get("carrier_by_provider"), dict):
+                cbp.update(_normalize_carrier_by_provider(payload.get("carrier_by_provider")))
+            if raw_requested_prof and _is_desktop_carrier(raw_requested_prof) and (prev_provider == "chatgpt" or "chatgpt" not in cbp):
+                cbp["chatgpt"] = raw_requested_prof
+
             if new_provider:
-                new_provider = _platform({"provider": new_provider})
-                if new_provider != _platform(b):
+                eff_provider = _normalize_studio_provider(new_provider, default=prev_provider)
+                if eff_provider != prev_provider:
                     _bind_conv_uuid(b, "", clear_if_empty=True)
                     b["tab_id"] = ""
                     b["project_prefix"] = ""
-                b["provider"] = new_provider
-            prev_prof = str(b.get("browser_profile") or "").strip()
-            if new_prof:
+                b["provider"] = eff_provider
+            else:
+                eff_provider = prev_provider
+
+            default_fb = str(ar_cfg.get("default_browser_profile") or "Chrome:Default")
+            if raw_requested_prof:
+                if eff_provider in ("gemini", "claude") and _is_desktop_carrier(raw_requested_prof):
+                    new_prof = _resolve_compatible_carrier_for_provider(eff_provider, "", cbp, fallback_prof=default_fb)
+                    explicit_valid_prof = False
+                else:
+                    new_prof = raw_requested_prof
+                    explicit_valid_prof = True
+            elif eff_provider != prev_provider or (eff_provider in ("gemini", "claude") and _is_desktop_carrier(prev_prof)):
+                non_desk_prev = prev_prof if (prev_prof and not _is_desktop_carrier(prev_prof)) else default_fb
+                new_prof = _resolve_compatible_carrier_for_provider(
+                    eff_provider,
+                    cbp.get(eff_provider, ""),
+                    cbp,
+                    fallback_prof=non_desk_prev,
+                )
+                explicit_valid_prof = False
+            else:
+                new_prof = _resolve_compatible_carrier_for_provider(eff_provider, prev_prof, cbp, fallback_prof=default_fb)
+                explicit_valid_prof = False
+
+            cbp[eff_provider] = new_prof
+            b["carrier_by_provider"] = cbp
+
+            if explicit_valid_prof:
                 b["user_locked_browser"] = True
                 b["user_locked_carrier"] = True
-                if session_key in ("", "__new_task__"):
+                if session_key in ("", "__new_task__") and not _is_desktop_carrier(new_prof):
                     ar_cfg["default_browser_profile"] = new_prof
+
+            if new_prof:
                 if action in ("bind_browser", "set_task_composer_config") and prev_prof and new_prof != prev_prof:
                     old_u = str(b.get("conv_uuid") or "").strip()
                     if old_u:
@@ -8361,7 +8824,7 @@ def handle_studio_action(data_root: str, tasks_root: str, wb_path: str, payload:
                             now_iso=now_iso,
                             stop_before_archive=True,
                             operation="archive",
-                            provider=str(b.get("provider") or "chatgpt"),
+                            provider=prev_provider,
                             carrier=prev_prof,
                         )
                         _bind_conv_uuid(b, "", clear_if_empty=True)
@@ -9152,13 +9615,16 @@ class ShieldHandler(BaseHTTPRequestHandler):
         if norm_path == "/":
             self.path = "/mcp"
 
-        if self.path.startswith("/studio/action") or self.path.startswith("/__studio__/action"):
+        if self.path.startswith("/studio/action") or self.path.startswith("/__studio__/action") or self.path.startswith("/studio/session-binding") or self.path.startswith("/__studio__/session-binding"):
             content_length = int(self.headers.get("Content-Length", "0"))
             raw = self.rfile.read(content_length) if content_length > 0 else b"{}"
             try:
                 payload = json.loads(raw.decode("utf-8"))
             except Exception:
                 payload = {}
+            if (self.path.startswith("/studio/session-binding") or self.path.startswith("/__studio__/session-binding")) and isinstance(payload, dict) and not payload.get("action"):
+                payload = dict(payload)
+                payload["action"] = "set_task_composer_config"
             res = handle_studio_action(self.server.data_root, self.server.tasks_root, self.server.web_bridge_path, payload)
             self._send_json(200, res)
             return
@@ -9229,9 +9695,12 @@ class ShieldHandler(BaseHTTPRequestHandler):
                 {
                     "action": "bind_browser" if payload.get("browser_profile") and not payload.get("conv_uuid") else "bind_session",
                     "session_key": session_key,
+                    "provider": payload.get("provider", ""),
                     "conv_uuid": payload.get("conv_uuid", ""),
                     "project_prefix": payload.get("project_prefix", ""),
-                    "browser_profile": payload.get("browser_profile", ""),
+                    "browser_profile": payload.get("browser_profile") or payload.get("carrier") or "",
+                    "carrier": payload.get("carrier") or payload.get("browser_profile") or "",
+                    "carrier_by_provider": payload.get("carrier_by_provider"),
                     "target_mode": payload.get("target_mode", ""),
                 },
             )
