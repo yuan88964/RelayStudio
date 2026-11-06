@@ -1114,7 +1114,34 @@ try {
     $script:controls.AddPlatformCellButton.RaiseEvent((New-Object Windows.RoutedEventArgs([Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
     Assert ($script:controls.KeyPopoverBorder.Visibility -eq 'Visible' -and $script:controls.AddPlatformPanelBorder.Visibility -eq 'Visible' -and $script:controls.AddPlatformListPanel.Children.Count -eq 3 -and $script:controls.PopoverHeaderTitle.Text -eq '添加平台通道' -and $script:controls.ProfilesListScroll.Visibility -eq 'Collapsed' -and $script:controls.PopoverFooterBorder.Visibility -eq 'Collapsed' -and $script:controls.AddProfileButton.Visibility -eq 'Collapsed') 'Clicking AddPlatformCellButton (+) opens standalone 添加平台通道 panel and hides OpenAI profile list, + 新增配置, and footer bar'
     Invoke-SelectOrAddCapsulePlatform 'claude'
-    Assert ($script:activeCapsulePlatform -eq 'claude' -and $script:controls.PopoverHeaderTitle.Text -match '^Claude 接入配置' -and [string]$script:controls.PlatformButton.Content -eq '网页端 Connectors ↗' -and [string]$script:controls.QuickConnectButton.Content -eq '▶ 启动 HTTPS 隧道' -and [string]$script:controls.DisconnectButton.Content -eq '断开共享隧道' -and $script:controls.CapsuleExtraSegmentsPanel.Children.Count -ge 2) 'Selecting Claude from + panel grows capsule segment and switches KeyPopoverBorder to Claude apikey config with ✓ 测试连接 and 启用/停用'
+    Assert ($script:activeCapsulePlatform -eq 'claude' -and $script:controls.PopoverHeaderTitle.Text -match '^Claude 接入配置' -and [string]$script:controls.PlatformButton.Content -eq '网页端 Connectors ↗' -and [string]$script:controls.QuickConnectButton.Content -eq '▶ 启动隧道' -and [string]$script:controls.DisconnectButton.Content -eq '断开隧道' -and $script:controls.CapsuleExtraSegmentsPanel.Children.Count -ge 2) 'Selecting Claude from + panel grows capsule segment and switches KeyPopoverBorder to normalized multi-tunnel popover with ▶ 启动隧道 and 断开隧道'
+    Assert ($script:controls.TunnelInputLabel.Text -eq '隧道' -and $script:controls.KeyInputLabel.Text -eq 'Key') 'Expanded edit form normalizes field labels to 隧道 and Key across all platforms'
+    Toggle-ProfileInlineEdit 'prof_claude_default'
+    Assert ($script:controls.TunnelInputPlaceholder.Visibility -eq 'Visible' -and $script:controls.KeyInputPlaceholder.Visibility -eq 'Visible') 'Empty TunnelInput and KeyInput display muted watermark placeholders'
+    $script:controls.TunnelInput.Text = 'https://claude-box.tail9999.ts.net'
+    $script:controls.KeyInput.Text = 'cf-token-123456'
+    Assert ($script:controls.TunnelInputPlaceholder.Visibility -eq 'Collapsed' -and $script:controls.KeyInputPlaceholder.Visibility -eq 'Collapsed') 'Typing into TunnelInput and KeyInput automatically hides watermark placeholders'
+    $script:controls.TunnelInput.Text = ''
+    $script:controls.KeyInput.Text = ''
+    Assert ($script:controls.TunnelInputPlaceholder.Visibility -eq 'Visible' -and $script:controls.KeyInputPlaceholder.Visibility -eq 'Visible') 'Clearing TunnelInput and KeyInput restores watermark placeholders'
+    Toggle-ProfileInlineEdit 'prof_claude_default'
+    Start-NewProfileForm
+    $secondClaudeProfId = $script:viewingProfileId
+    $script:controls.ProfileNameInput.Text = 'Claude备用号'
+    $script:controls.TunnelInput.Text = 'https://claude-alt.tail9999.ts.net'
+    Save-Form
+    Select-ProfileCard 'prof_claude_default'
+    Assert ([string]$script:controls.QuickConnectButton.Content -eq '▶ 启动隧道') 'Selecting active profile shows ▶ 启动隧道 when tunnel is offline'
+    Select-ProfileCard $secondClaudeProfId
+    Assert ([string]$script:controls.QuickConnectButton.Content -eq '▶ 启动此隧道') 'Selecting non-active profile on Claude/Gemini shows ▶ 启动此隧道'
+    try { [Windows.Clipboard]::SetText('sentinel-clipboard-keep') } catch { }
+    Invoke-PopoverQuickConnect
+    $claudeSegBtn = $script:capsuleSegmentButtons['claude']
+    $claudeSegTxt = ($claudeSegBtn.Content.Children | Where-Object { $_ -is [Windows.Controls.TextBlock] } | Select-Object -First 1).Text
+    $clipAfterStart = try { [Windows.Clipboard]::GetText() } catch { 'sentinel-clipboard-keep' }
+    Assert ($script:profilesState.ActiveProfileByPlatform['claude'] -eq $secondClaudeProfId -and $claudeSegTxt -eq 'Claude · Claude备用号 ▾' -and [string]$script:controls.QuickConnectButton.Content -eq '↻ 重新连接' -and $clipAfterStart -eq 'sentinel-clipboard-keep') "Clicking ▶ 启动此隧道 on Claude switches active profile, updates top capsule text ($claudeSegTxt), starts tunnel without overwriting clipboard"
+    Stop-PublicMcpTunnel $script:context
+    Refresh-ProfilePopoverState
     $script:controls.DismissKeyPopoverButton.RaiseEvent((New-Object Windows.RoutedEventArgs([Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
     Assert ($script:controls.KeyPopoverBorder.Visibility -eq 'Collapsed' -and (-not $script:popoverOpen)) 'Clicking top-right × DismissKeyPopoverButton closes non-OpenAI popover'
     Select-CapsulePlatform 'claude'

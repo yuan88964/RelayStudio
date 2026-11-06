@@ -651,10 +651,16 @@ $script:PANE_SNAP_HIDE_PX = 140.0
       <StackPanel>
        <TextBlock Text="配置名称" FontSize="11" Foreground="#52525B" FontWeight="SemiBold" Margin="0,0,0,2"/>
        <TextBox x:Name="ProfileNameInput" AutomationProperties.Name="配置名称" FontSize="11.5" Padding="7,3" MinHeight="24" Margin="0,0,0,5"/>
-       <TextBlock x:Name="TunnelInputLabel" Text="隧道编号或完整链接" FontSize="11" Foreground="#52525B" FontWeight="SemiBold" Margin="0,0,0,2"/>
-       <TextBox x:Name="TunnelInput" AutomationProperties.Name="隧道编号或链接" FontFamily="Consolas, Cascadia Mono, Source Han Serif SC VF, Noto Serif SC" FontSize="11.5" Padding="7,3" MinHeight="24" Margin="0,0,0,5"/>
-       <TextBlock x:Name="KeyInputLabel" Text="OpenAI API Key (仅用于拉起本地 MCP 隧道)" FontSize="11" Foreground="#52525B" FontWeight="SemiBold" Margin="0,0,0,2"/>
-       <TextBox x:Name="KeyInput" AutomationProperties.Name="OpenAI API Key" FontFamily="Consolas, Cascadia Mono, Source Han Serif SC VF, Noto Serif SC" FontSize="11.5" Padding="7,3" MinHeight="24" Margin="0,0,0,5"/>
+       <TextBlock x:Name="TunnelInputLabel" Text="隧道" FontSize="11" Foreground="#52525B" FontWeight="SemiBold" Margin="0,0,0,2"/>
+       <Grid Margin="0,0,0,5">
+        <TextBox x:Name="TunnelInput" AutomationProperties.Name="隧道编号或链接" FontFamily="Consolas, Cascadia Mono, Source Han Serif SC VF, Noto Serif SC" FontSize="11.5" Padding="7,3" MinHeight="24"/>
+        <TextBlock x:Name="TunnelInputPlaceholder" Text="请输入隧道编号或完整链接" FontFamily="Microsoft YaHei UI, Segoe UI" FontSize="11" FontStyle="Italic" Foreground="#A1A1AA" Margin="9,0,8,0" VerticalAlignment="Center" IsHitTestVisible="False" TextTrimming="CharacterEllipsis" Visibility="Collapsed"/>
+       </Grid>
+       <TextBlock x:Name="KeyInputLabel" Text="Key" FontSize="11" Foreground="#52525B" FontWeight="SemiBold" Margin="0,0,0,2"/>
+       <Grid Margin="0,0,0,5">
+        <TextBox x:Name="KeyInput" AutomationProperties.Name="OpenAI API Key" FontFamily="Consolas, Cascadia Mono, Source Han Serif SC VF, Noto Serif SC" FontSize="11.5" Padding="7,3" MinHeight="24"/>
+        <TextBlock x:Name="KeyInputPlaceholder" Text="请输入 OpenAI API Key (仅用于拉起本地 MCP 隧道)" FontFamily="Microsoft YaHei UI, Segoe UI" FontSize="11" FontStyle="Italic" Foreground="#A1A1AA" Margin="9,0,8,0" VerticalAlignment="Center" IsHitTestVisible="False" TextTrimming="CharacterEllipsis" Visibility="Collapsed"/>
+       </Grid>
        <TextBlock x:Name="KeyHint" Foreground="#71717A" FontSize="10.5" Visibility="Collapsed"/>
 
        <!-- Hidden Advanced Expander (Paths are auto-resolved relative to app folder) -->
@@ -1420,7 +1426,14 @@ function Test-HasUnsavedFormEdits {
     }
     $savedName = if ($viewProf -and $viewProf.Name) { [string]$viewProf.Name.Trim() } else { '' }
     $curName = if ($script:controls.ProfileNameInput) { [string]$script:controls.ProfileNameInput.Text.Trim() } else { $savedName }
-    $savedTunnel = if ($viewProf -and $viewProf.TunnelId) { [string]$viewProf.TunnelId.Trim() } elseif ($script:settings.tunnel_id) { [string]$script:settings.tunnel_id.Trim() } else { '' }
+    $profPlat = if ($viewProf -and $viewProf.PSObject.Properties['Platform'] -and $viewProf.Platform) { ([string]$viewProf.Platform).ToLowerInvariant() } else { 'chatgpt' }
+    $savedTunnel = if ($profPlat -notin @('chatgpt', 'openai')) {
+        if ($viewProf -and $viewProf.BaseUrl) { [string]$viewProf.BaseUrl.Trim() } else { '' }
+    } elseif ($viewProf -and $viewProf.TunnelId) {
+        [string]$viewProf.TunnelId.Trim()
+    } elseif ($script:settings.tunnel_id) {
+        [string]$script:settings.tunnel_id.Trim()
+    } else { '' }
     $curTunnel = [string]$script:controls.TunnelInput.Text.Trim()
     $savedKey = if ($viewProf -and $viewProf.PlainKey) { [string]$viewProf.PlainKey.Trim() } else { '' }
     $curKey = [string]$script:controls.KeyInput.Text.Trim()
@@ -1697,6 +1710,9 @@ function Get-CapsulePlatformMeta([string]$Platform = 'chatgpt') {
                 DefaultUrl = ''
                 PurposeDesc = '共享公网 MCP 隧道 · 连接 Claude 云端会话房间'
                 SecondLabel = '固定 HTTPS 域名（选填，留空使用临时隧道）'; KeyLabel = 'Cloudflare 隧道凭证（选填）'
+                DisplaySecondLabel = '隧道'; DisplayKeyLabel = 'Key'
+                TunnelPlaceholder = '选填：固定 HTTPS 域名，留空使用临时隧道'
+                KeyPlaceholder = '选填：Cloudflare 隧道凭证，不用可留空'
                 ApiKeysUrl = 'https://developers.cloudflare.com/tunnel/get-started/'
                 PlatText = '网页端 Connectors ↗'; PlatUrl = 'https://claude.ai/settings/connectors'
             }
@@ -1707,6 +1723,9 @@ function Get-CapsulePlatformMeta([string]$Platform = 'chatgpt') {
                 DefaultUrl = ''
                 PurposeDesc = '共享公网 MCP 隧道 · 连接 Gemini 云端会话房间'
                 SecondLabel = '固定 HTTPS 域名（选填，留空使用临时隧道）'; KeyLabel = 'Cloudflare 隧道凭证（选填）'
+                DisplaySecondLabel = '隧道'; DisplayKeyLabel = 'Key'
+                TunnelPlaceholder = '选填：固定 HTTPS 域名，留空使用临时隧道'
+                KeyPlaceholder = '选填：Cloudflare 隧道凭证，不用可留空'
                 ApiKeysUrl = 'https://developers.cloudflare.com/tunnel/get-started/'
                 PlatText = '已关联的应用 ↗'; PlatUrl = 'https://gemini.google.com/extensions'
             }
@@ -1717,10 +1736,29 @@ function Get-CapsulePlatformMeta([string]$Platform = 'chatgpt') {
                 DefaultUrl = 'https://api.openai.com'
                 PurposeDesc = 'MCP 反向隧道连接与 API Key · 供 ChatGPT 网页端操控本地电脑'
                 SecondLabel = '隧道编号或完整链接'; KeyLabel = 'OpenAI API Key (仅用于拉起本地 MCP 隧道)'
+                DisplaySecondLabel = '隧道'; DisplayKeyLabel = 'Key'
+                TunnelPlaceholder = '请输入隧道编号或完整链接'
+                KeyPlaceholder = '请输入 OpenAI API Key (仅用于拉起本地 MCP 隧道)'
                 ApiKeysUrl = 'https://platform.openai.com/settings/organization/api-keys'
                 PlatText = '打开 OpenAI 隧道设置 ↗'; PlatUrl = 'https://platform.openai.com/settings/organization/tunnels'
             }
         }
+    }
+}
+
+function Update-ProfileFormPlaceholders([string]$Platform = '') {
+    $curPlat = if ($Platform) { $Platform.Trim().ToLowerInvariant() } elseif ($script:activeCapsulePlatform) { $script:activeCapsulePlatform.Trim().ToLowerInvariant() } else { 'chatgpt' }
+    if ($curPlat -eq 'openai') { $curPlat = 'chatgpt' }
+    $pm = Get-CapsulePlatformMeta $curPlat
+    if ($script:controls.TunnelInputPlaceholder) {
+        $script:controls.TunnelInputPlaceholder.Text = [string]$pm.TunnelPlaceholder
+        $hasTunTxt = ($script:controls.TunnelInput -and [string]$script:controls.TunnelInput.Text -ne '')
+        $script:controls.TunnelInputPlaceholder.Visibility = $(if ($hasTunTxt) { 'Collapsed' } else { 'Visible' })
+    }
+    if ($script:controls.KeyInputPlaceholder) {
+        $script:controls.KeyInputPlaceholder.Text = [string]$pm.KeyPlaceholder
+        $hasKeyTxt = ($script:controls.KeyInput -and [string]$script:controls.KeyInput.Text -ne '')
+        $script:controls.KeyInputPlaceholder.Visibility = $(if ($hasKeyTxt) { 'Collapsed' } else { 'Visible' })
     }
 }
 
@@ -1987,10 +2025,10 @@ function Refresh-ProfilePopoverState {
         if ($script:controls.PopoverFooterBorder) { $script:controls.PopoverFooterBorder.Visibility = 'Visible' }
     }
     if ($script:controls.TunnelInputLabel) {
-        $script:controls.TunnelInputLabel.Text = $platMeta.SecondLabel
+        $script:controls.TunnelInputLabel.Text = $platMeta.DisplaySecondLabel
     }
     if ($script:controls.KeyInputLabel) {
-        $script:controls.KeyInputLabel.Text = $platMeta.KeyLabel
+        $script:controls.KeyInputLabel.Text = $platMeta.DisplayKeyLabel
     }
     $script:controls.ApiKeysButton.Content = $(if ($curPlat -in @('openai', 'chatgpt')) { '获取或管理 API Key ↗' } else { '公网隧道设置帮助 ↗' })
     if ($script:controls.PlatformButton) {
@@ -2052,12 +2090,10 @@ function Refresh-ProfilePopoverState {
             $nameRow.Orientation = 'Horizontal'
             $nameRow.VerticalAlignment = 'Center'
             $isChatGptPlat = ($curPlat -in @('openai', 'chatgpt'))
-            $isApiKeyProfReady = (-not $isChatGptPlat) -and [bool]$prof.Enabled -and [bool]$prof.HasKey
+            $platTunRunning = if ($isChatGptPlat) { $tunRunning } else { [bool]$publicTunnel.Running }
             $dot = New-Object Windows.Shapes.Ellipse
             $dot.Width = 7; $dot.Height = 7
-            $dot.Fill = ConvertTo-Brush $(if (-not $isChatGptPlat) {
-                if ($isApiKeyProfReady) { '#16A34A' } elseif ($isProfViewing) { '#2563EB' } else { '#A1A1AA' }
-            } elseif ($isProfActive -and $tunRunning) { '#16A34A' } elseif ($isProfActive) { '#22C55E' } elseif ($isProfViewing) { '#2563EB' } else { '#A1A1AA' })
+            $dot.Fill = ConvertTo-Brush $(if ($isProfActive -and $platTunRunning) { '#16A34A' } elseif ($isProfActive) { '#22C55E' } elseif ($isProfViewing) { '#2563EB' } else { '#A1A1AA' })
             $dot.VerticalAlignment = 'Center'
             $dot.Margin = [Windows.Thickness]::new(0, 0, 7, 0)
             [void]$nameRow.Children.Add($dot)
@@ -2066,7 +2102,7 @@ function Refresh-ProfilePopoverState {
             $nTxt.Text = $prof.Name
             $nTxt.FontSize = 12.5
             $nTxt.FontWeight = 'SemiBold'
-            $nTxt.Foreground = ConvertTo-Brush $(if (($isChatGptPlat -and $isProfActive) -or $isApiKeyProfReady) { '#14532D' } else { '#18181B' })
+            $nTxt.Foreground = ConvertTo-Brush $(if ($isProfActive) { '#14532D' } else { '#18181B' })
             $nTxt.VerticalAlignment = 'Center'
             [void]$nameRow.Children.Add($nTxt)
             [Windows.Controls.Grid]::SetColumn($nameRow, 0)
@@ -2076,27 +2112,14 @@ function Refresh-ProfilePopoverState {
             $rightStack.Orientation = 'Horizontal'
             $rightStack.VerticalAlignment = 'Center'
 
-            if (-not $isChatGptPlat) {
-                $actTag = New-Object Windows.Controls.Border
-                $actTag.Background = ConvertTo-Brush $(if ($isApiKeyProfReady) { '#DCFCE7' } else { '#F4F4F5' })
-                $actTag.CornerRadius = [Windows.CornerRadius]::new(4)
-                $actTag.Padding = [Windows.Thickness]::new(6, 2, 6, 2)
-                $actTag.VerticalAlignment = 'Center'
-                $actTxt = New-Object Windows.Controls.TextBlock
-                $actTxt.Text = $(if ($isApiKeyProfReady) { '已启用' } else { '待配置密钥' })
-                $actTxt.FontSize = 10.5
-                $actTxt.FontWeight = 'SemiBold'
-                $actTxt.Foreground = ConvertTo-Brush $(if ($isApiKeyProfReady) { '#15803D' } else { '#71717A' })
-                $actTag.Child = $actTxt
-                [void]$rightStack.Children.Add($actTag)
-            } elseif ($isProfActive) {
+            if ($isProfActive) {
                 $actTag = New-Object Windows.Controls.Border
                 $actTag.Background = ConvertTo-Brush '#DCFCE7'
                 $actTag.CornerRadius = [Windows.CornerRadius]::new(4)
                 $actTag.Padding = [Windows.Thickness]::new(6, 2, 6, 2)
                 $actTag.VerticalAlignment = 'Center'
                 $actTxt = New-Object Windows.Controls.TextBlock
-                $actTxt.Text = $(if ($tunRunning) { '当前生效' } else { '当前默认' })
+                $actTxt.Text = $(if ($platTunRunning) { '当前生效' } else { '当前默认' })
                 $actTxt.FontSize = 10.5
                 $actTxt.FontWeight = 'Bold'
                 $actTxt.Foreground = ConvertTo-Brush '#15803D'
@@ -2126,7 +2149,7 @@ function Refresh-ProfilePopoverState {
             $expandBtn.MinHeight = 20
             $expandBtn.Margin = [Windows.Thickness]::new(4, 0, 0, 0)
             $expandBtn.Foreground = ConvertTo-Brush $(if ($isProfActive) { '#15803D' } elseif ($isProfViewing) { '#2563EB' } else { '#71717A' })
-            $expandBtn.ToolTip = $(if ($isProfExpanded) { '收起编辑框' } else { '展开修改配置名称、固定域名与隧道凭证' })
+            $expandBtn.ToolTip = $(if ($isProfExpanded) { '收起编辑框' } else { '展开修改配置名称、隧道与 Key' })
             $expandBtn.Tag = $prof.Id
             $expandBtn.Add_Click({
                 param($s, $e)
@@ -2139,37 +2162,48 @@ function Refresh-ProfilePopoverState {
             [void]$rGrid.Children.Add($rightStack)
             [void]$cardStack.Children.Add($rGrid)
 
-            # Line 2: Small Font Masked Endpoint/Tunnel ID + API Key + Inline Copy Links
+            # Line 2: Unified Tunnel + Key + Inline Copy Links across all platforms
             $rawEndpointOrTid = if (-not $isChatGptPlat) {
-                [string]$publicTunnel.Url
+                $profDomain = if ($prof.PSObject.Properties['BaseUrl'] -and $prof.BaseUrl) { ([string]$prof.BaseUrl).Trim() } else { '' }
+                if ($profDomain) {
+                    try { ConvertTo-PublicMcpUrl $profDomain } catch { $profDomain }
+                } elseif ($isProfActive -and $publicTunnel.Running -and $publicTunnel.Url -and ((-not $publicTunnel.ProfileId) -or ($publicTunnel.ProfileId -eq $prof.Id))) {
+                    [string]$publicTunnel.Url
+                } else {
+                    ''
+                }
             } else {
                 [string]$prof.TunnelId
             }
-            $shortEndpointOrTid = if (-not $isChatGptPlat) {
-                if ($rawEndpointOrTid.Length -gt 28) { "$($rawEndpointOrTid.Substring(0, 25))..." } elseif ($rawEndpointOrTid) { $rawEndpointOrTid } else { '默认官方接口' }
-            } else {
+            $shortEndpointOrTid = if (-not $rawEndpointOrTid) {
+                ''
+            } elseif ($isChatGptPlat) {
                 if ($rawEndpointOrTid.Length -gt 18) {
                     "$($rawEndpointOrTid.Substring(0, 11))...$($rawEndpointOrTid.Substring($rawEndpointOrTid.Length - 5))"
-                } elseif ($rawEndpointOrTid.Length -gt 0) {
-                    $rawEndpointOrTid
                 } else {
-                    '未填写'
+                    $rawEndpointOrTid
+                }
+            } else {
+                if ($rawEndpointOrTid.Length -gt 28) {
+                    "$($rawEndpointOrTid.Substring(0, 25))..."
+                } else {
+                    $rawEndpointOrTid
                 }
             }
             $rawPlain = [string]$prof.PlainKey
             $shortKey = if ($rawPlain.Length -ge 12) {
                 "$($rawPlain.Substring(0, 8))••••$($rawPlain.Substring($rawPlain.Length - 4))"
             } elseif ($rawPlain.Length -gt 0) {
-                'sk-••••'
+                '••••••••'
             } else {
-                '未填写'
+                ''
             }
 
             $subRow = New-Object Windows.Controls.WrapPanel
             $subRow.Margin = [Windows.Thickness]::new(14, 3, 0, 0)
 
             $tunLbl = New-Object Windows.Controls.TextBlock
-            $tunLbl.Text = $(if (-not $isChatGptPlat) { "公网 MCP ($($publicTunnel.Status)): $rawEndpointOrTid " } else { "隧道: $shortEndpointOrTid " })
+            $tunLbl.Text = "隧道: $shortEndpointOrTid "
             $tunLbl.FontSize = 10.5
             $tunLbl.Foreground = ConvertTo-Brush '#71717A'
             $tunLbl.FontFamily = New-Object Windows.Media.FontFamily('Consolas, Cascadia Mono, Microsoft YaHei UI')
@@ -2194,9 +2228,9 @@ function Refresh-ProfilePopoverState {
                     try { [Windows.Clipboard]::SetText($val) } catch { }
                     $s.Content = '✓ 已复制'
                     $s.Foreground = ConvertTo-Brush '#16A34A'
-                    Show-QuickToast ($(if ($isTun) { '已复制隧道编号到剪贴板' } else { '已复制接口地址到剪贴板' }))
+                    Show-QuickToast ($(if ($isTun) { '已复制隧道编号到剪贴板' } else { '已复制隧道地址到剪贴板' }))
                 } else {
-                    Show-QuickToast ($(if ($isTun) { '当前配置尚未填写隧道编号' } else { '当前配置尚未填写接口地址' }))
+                    Show-QuickToast ($(if ($isTun) { '当前配置尚未填写隧道编号' } else { '当前配置尚未生成或填写隧道地址' }))
                 }
             })
             [void]$subRow.Children.Add($copyTunBtn)
@@ -2207,7 +2241,7 @@ function Refresh-ProfilePopoverState {
             $sepLbl.Foreground = ConvertTo-Brush '#71717A'
             $sepLbl.FontFamily = New-Object Windows.Media.FontFamily('Consolas, Cascadia Mono, Microsoft YaHei UI')
             $sepLbl.VerticalAlignment = 'Center'
-            if ($isChatGptPlat) { [void]$subRow.Children.Add($sepLbl) }
+            [void]$subRow.Children.Add($sepLbl)
 
             $copyKeyBtn = New-Object Windows.Controls.Button
             $copyKeyBtn.Style = $script:window.Resources['LinkButton']
@@ -2225,12 +2259,12 @@ function Refresh-ProfilePopoverState {
                     try { [Windows.Clipboard]::SetText($val) } catch { }
                     $s.Content = '✓ 已复制'
                     $s.Foreground = ConvertTo-Brush '#16A34A'
-                    Show-QuickToast '已复制完整 API Key 到剪贴板'
+                    Show-QuickToast '已复制完整 Key 到剪贴板'
                 } else {
-                    Show-QuickToast '当前配置尚未保存 API Key'
+                    Show-QuickToast '当前配置尚未填写 Key'
                 }
             })
-            if ($isChatGptPlat) { [void]$subRow.Children.Add($copyKeyBtn) }
+            [void]$subRow.Children.Add($copyKeyBtn)
             [void]$cardStack.Children.Add($subRow)
 
             # Inline Accordion Edit Box directly below this strip when expanded
@@ -2256,17 +2290,16 @@ function Refresh-ProfilePopoverState {
         $script:controls.DeleteProfileButton.Visibility = 'Visible'
     }
 
-    # Bottom Start / Reconnect / Test / Disable Button State
+    # Bottom Start / Reconnect / Disconnect Button State (normalized across all platforms)
     $isCurChatGpt = ($curPlat -in @('openai', 'chatgpt'))
+    $curPlatTunRunning = if ($isCurChatGpt) { $tunRunning } else { [bool]$publicTunnel.Running }
     if ($script:controls.QuickConnectButton) {
-        if (-not $isCurChatGpt) {
-            $script:controls.QuickConnectButton.Content = $(if ($publicTunnel.Running) { '复制 MCP 网址' } elseif ($publicTunnel.ProcessId) { '↻ 查看连接状态' } else { '▶ 启动 HTTPS 隧道' })
-        } elseif ($viewProf -and $activeProf -and $viewProf.Id -ne $activeProf.Id) {
+        if ($viewProf -and $activeProf -and $viewProf.Id -ne $activeProf.Id) {
             $script:controls.QuickConnectButton.Content = "▶ 启动此隧道"
             $script:controls.QuickConnectButton.Background = ConvertTo-Brush '#2563EB'
             $script:controls.QuickConnectButton.BorderBrush = ConvertTo-Brush '#2563EB'
             $script:controls.QuickConnectButton.Foreground = ConvertTo-Brush '#FEFEFF'
-        } elseif (-not $tunRunning) {
+        } elseif (-not $curPlatTunRunning) {
             $script:controls.QuickConnectButton.Content = "▶ 启动隧道"
             $script:controls.QuickConnectButton.Background = ConvertTo-Brush '#2563EB'
             $script:controls.QuickConnectButton.BorderBrush = ConvertTo-Brush '#2563EB'
@@ -2279,14 +2312,13 @@ function Refresh-ProfilePopoverState {
         }
     }
     if ($script:controls.DisconnectButton) {
+        $script:controls.DisconnectButton.Content = '断开隧道'
         if (-not $isCurChatGpt) {
             $script:controls.DisconnectButton.Visibility = 'Visible'
-            $script:controls.DisconnectButton.Content = '断开共享隧道'
-            $script:controls.DisconnectButton.IsEnabled = [bool]$publicTunnel.ProcessId
+            $script:controls.DisconnectButton.IsEnabled = [bool]($publicTunnel.Running -or $publicTunnel.ProcessId)
         } else {
             $coreReady = ($script:display -and $script:display.Core -eq '已准备好')
             $legacy = ($script:display -and $script:display.Tunnel -eq '旧脚本连接仍在运行')
-            $script:controls.DisconnectButton.Content = '断开隧道'
             $script:controls.DisconnectButton.IsEnabled = [bool]($script:display -and $script:display.Running)
             $script:controls.DisconnectButton.Visibility = $(if ($coreReady -and $legacy) { 'Collapsed' } else { 'Visible' })
         }
@@ -2320,6 +2352,7 @@ function Refresh-ProfilePopoverState {
             $script:initializing = $prevInit
         }
     }
+    Update-ProfileFormPlaceholders $curPlat
 
     $acpLim = Get-AcpConcurrencyLimit $script:context
     $script:controls.AcpConcurrencyLabel.Text = if ($acpLim -eq 0) { "CLI 智能体并发上限：已关闭" } else { "CLI 智能体并发上限：$acpLim 个" }
@@ -2468,6 +2501,7 @@ function Enter-ProfileEditMode([string]$ProfileId = '') {
         } finally {
             $script:initializing = $false
         }
+        Update-ProfileFormPlaceholders $pPlat
     }
     $script:dirty = $false
     $script:popoverExpandedProfileId = $script:viewingProfileId
@@ -2504,6 +2538,7 @@ function Select-ProfileCard([string]$ProfileId) {
         } finally {
             $script:initializing = $false
         }
+        Update-ProfileFormPlaceholders $pPlat
     }
     Refresh-ProfilePopoverState
 }
@@ -2535,10 +2570,20 @@ function Start-NewProfileForm {
 function Invoke-DeleteCurrentProfile {
     if (-not $script:viewingProfileId) { return }
     try {
+        $curPlat = if ($script:activeCapsulePlatform) { $script:activeCapsulePlatform.Trim().ToLowerInvariant() } else { 'chatgpt' }
+        if ($curPlat -eq 'openai') { $curPlat = 'chatgpt' }
         $viewProf = $script:profilesState.Profiles | Where-Object { $_.Id -eq $script:viewingProfileId } | Select-Object -First 1
         $delName = if ($viewProf) { $viewProf.Name } else { $script:viewingProfileId }
         $script:profilesState = Remove-ConnectionProfile -Context $script:context -Settings $script:settings -ProfileId $script:viewingProfileId
-        $script:viewingProfileId = $script:profilesState.ActiveProfileId
+        $nextActiveId = if ($curPlat -eq 'chatgpt') {
+            [string]$script:profilesState.ActiveProfileId
+        } elseif ($script:profilesState.PSObject.Properties['ActiveProfileByPlatform'] -and $script:profilesState.ActiveProfileByPlatform[$curPlat]) {
+            [string]$script:profilesState.ActiveProfileByPlatform[$curPlat]
+        } else {
+            $remProf = $script:profilesState.Profiles | Where-Object { ([string]$_.Platform).ToLowerInvariant() -eq $curPlat } | Select-Object -First 1
+            if ($remProf) { [string]$remProf.Id } else { '' }
+        }
+        $script:viewingProfileId = $nextActiveId
         $script:popoverExpandedProfileId = ''
         $script:popoverEditMode = $false
         $script:activeTab = 'Live'
@@ -2547,6 +2592,21 @@ function Invoke-DeleteCurrentProfile {
     } catch {
         Show-Feedback $_.Exception.Message $true
     }
+}
+
+function Resolve-ProfileTunnelModeLabel($Prof, $TunnelState = $null) {
+    if (-not $Prof) { return '本地 MCP 隧道' }
+    $plat = if ($Prof.PSObject.Properties['Platform'] -and $Prof.Platform) { ([string]$Prof.Platform).ToLowerInvariant() } else { 'chatgpt' }
+    if ($plat -in @('chatgpt', 'openai')) { return '本地 MCP 隧道' }
+    if ($TunnelState -and $TunnelState.PSObject.Properties['ModeLabel'] -and $TunnelState.ModeLabel) {
+        return [string]$TunnelState.ModeLabel
+    }
+    $fDom = if ($Prof.PSObject.Properties['BaseUrl'] -and $Prof.BaseUrl) { ([string]$Prof.BaseUrl).Trim() } else { '' }
+    $fTok = if ($Prof.PSObject.Properties['PlainKey'] -and $Prof.PlainKey) { ([string]$Prof.PlainKey).Trim() } else { '' }
+    if ($fDom -match '\.ts\.net(/|$)') { return 'Tailscale 固定域名' }
+    if ($fDom -and $fTok) { return 'Cloudflare 固定域名' }
+    if ($fDom) { return '固定域名隧道' }
+    return 'Cloudflare 临时隧道'
 }
 
 function Invoke-PopoverQuickConnect {
@@ -2562,12 +2622,12 @@ function Invoke-PopoverQuickConnect {
         $script:popoverExpandedProfileId = ''
         $script:popoverEditMode = $false
         if ($curPlat -ne 'chatgpt') {
-            $prof = $script:profilesState.Profiles | Where-Object Id -eq $script:viewingProfileId | Select-Object -First 1
-            $current = Get-PublicMcpTunnelState $script:context
-            if ($current.Running) {
-                [Windows.Clipboard]::SetText($current.Url)
-                Show-QuickToast '已复制公网 MCP 网址'
-                return
+            $selRes = Select-ConnectionProfile -Context $script:context -Settings $script:settings -ProfileId $script:viewingProfileId
+            $script:profilesState = $selRes.ProfilesState
+            $prof = if ($selRes.ActiveProfile) {
+                $selRes.ActiveProfile
+            } else {
+                $script:profilesState.Profiles | Where-Object Id -eq $script:viewingProfileId | Select-Object -First 1
             }
             if (-not $script:context.Isolated) {
                 $port = [int]$script:settings.shield_port
@@ -2577,10 +2637,17 @@ function Invoke-PopoverQuickConnect {
                     [void](Start-ReadOnlyShield $script:context $script:settings (Get-OfficialCoreEndpoint $script:settings))
                 }
             }
-            $state = Start-PublicMcpTunnel -Context $script:context -FixedDomain $prof.BaseUrl -Token $prof.PlainKey -Port $script:settings.shield_port
-            if ($state.Running -and $state.Url) { [Windows.Clipboard]::SetText($state.Url) }
+            Stop-PublicMcpTunnel $script:context
+            $state = Start-PublicMcpTunnel -Context $script:context -FixedDomain ([string]$prof.BaseUrl) -Token ([string]$prof.PlainKey) -Port $script:settings.shield_port -ProfileId ([string]$prof.Id)
+            $modeLbl = Resolve-ProfileTunnelModeLabel $prof $state
             Refresh-ProfilePopoverState
-            Show-QuickToast $(if ($state.Running) { '已复制公网 MCP 网址' } else { '隧道正在连接，再次点击查看状态' })
+            $fbMsg = if ($state.Running) {
+                "已启动「$($prof.Name)」隧道（$modeLbl）"
+            } else {
+                "已切换至「$($prof.Name)」，正在建立 $modeLbl 连接…"
+            }
+            Show-Feedback $fbMsg
+            Show-QuickToast ($(if ($state.Running) { "✓ 已启动「$($prof.Name)」隧道 ($modeLbl)" } else { "正在启动「$($prof.Name)」隧道 ($modeLbl)…" }))
             return
         }
         $res = Select-ConnectionProfile -Context $script:context -Settings $script:settings -ProfileId $script:viewingProfileId -AutoReconnect:(-not $script:context.Isolated)
@@ -2590,7 +2657,7 @@ function Invoke-PopoverQuickConnect {
         Refresh-ProfilePopoverState
         Refresh-FormState
         Show-Feedback $res.Message
-        Show-QuickToast "✓ 已启动「$($res.ActiveProfile.Name)」隧道"
+        Show-QuickToast "✓ 已启动「$($res.ActiveProfile.Name)」隧道 (本地 MCP 隧道)"
     } catch {
         $script:lastTestedApiKeyProfileId = ''
         $script:lastTestedApiKeyProfileSig = ''
@@ -7807,12 +7874,17 @@ if ($script:controls.AppCloseButton) {
 }
 
 foreach ($name in @('TunnelInput','KeyInput','BaseInput','RootInput','ClientInput')) {
-    $script:controls[$name].Add_TextChanged({ if (-not $script:initializing) { $script:dirty = $true } })
+    $script:controls[$name].Add_TextChanged({
+        if (-not $script:initializing) { $script:dirty = $true }
+        Update-ProfileFormPlaceholders
+    })
 }
 $script:controls.ShieldCheck.Add_Checked({ if (-not $script:initializing) { $script:dirty = $true } })
 $script:controls.ShieldCheck.Add_Unchecked({ if (-not $script:initializing) { $script:dirty = $true } })
 $script:controls.TunnelInput.Add_LostFocus({
-    try { $script:controls.TunnelInput.Text = ConvertTo-TunnelId $script:controls.TunnelInput.Text } catch { }
+    if ($script:activeCapsulePlatform -in @('', 'openai', 'chatgpt')) {
+        try { $script:controls.TunnelInput.Text = ConvertTo-TunnelId $script:controls.TunnelInput.Text } catch { }
+    }
 })
 
 # Left Rail Collapse & Drag-to-Auto-Hide (< 145px) Events
@@ -8512,7 +8584,8 @@ if (-not $script:context.Isolated) {
                         if (-not $pubState.Running) {
                             $fDom = if ($pubProf -and $pubProf.BaseUrl) { [string]$pubProf.BaseUrl } else { '' }
                             $fTok = if ($pubProf -and $pubProf.PlainKey) { [string]$pubProf.PlainKey } else { '' }
-                            [void](Start-PublicMcpTunnel -Context $ctx -FixedDomain $fDom -Token $fTok -Port $port)
+                            $fPid = if ($pubProf -and $pubProf.Id) { [string]$pubProf.Id } else { '' }
+                            [void](Start-PublicMcpTunnel -Context $ctx -FixedDomain $fDom -Token $fTok -Port $port -ProfileId $fPid -PreferTailscale:([bool]$hasTailscaleReady))
                         }
                     }
                 }

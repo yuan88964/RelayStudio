@@ -1190,6 +1190,11 @@ function Save-ConnectionProfile {
             }
             if ($cleanKey) {
                 Write-AtomicConnectionText (Join-Path $Context.DataRoot $keyFile) (Protect-ConnectionSecret $cleanKey)
+            } elseif ($effPlatform -ne 'chatgpt' -and $PSBoundParameters.ContainsKey('ApiKey')) {
+                $existingKeyPath = Join-Path $Context.DataRoot $keyFile
+                if (Test-Path -LiteralPath $existingKeyPath) {
+                    Remove-Item -LiteralPath $existingKeyPath -Force -ErrorAction SilentlyContinue
+                }
             }
             $updatedList.Add([pscustomobject]@{
                 id = $p.Id
@@ -6521,19 +6526,36 @@ function Get-TailscaleFunnelSelfUrl {
     return ''
 }
 
+function Get-PublicMcpTunnelModeLabel {
+    param([string]$Mode = '')
+    switch ($Mode.Trim().ToLowerInvariant()) {
+        'tailscale'         { return 'Tailscale 固定域名' }
+        'cloudflared_named' { return 'Cloudflare 固定域名' }
+        'cloudflared_quick' { return 'Cloudflare 临时隧道' }
+        'cloudflared'       { return 'Cloudflare 隧道' }
+        'external_fixed'    { return '固定域名隧道' }
+        default             { return '公网隧道' }
+    }
+}
+
 function Get-PublicMcpTunnelState {
     param($Context)
     $path = Join-Path $Context.DataRoot 'public-mcp-tunnel.json'
-    $result = [pscustomobject]@{ Running = $false; Url = ''; ProcessId = 0; StartedAt = ''; Status = '未启动' }
+    $result = [pscustomobject]@{ Running = $false; Url = ''; ProcessId = 0; StartedAt = ''; Status = '未启动'; Mode = ''; ModeLabel = ''; ProfileId = '' }
     if (Test-Path -LiteralPath $path) {
         try {
             $saved = [IO.File]::ReadAllText($path) | ConvertFrom-Json
-            $mode = if ($saved.PSObject.Properties['Mode'] -and $saved.Mode) { [string]$saved.Mode } else { 'cloudflared' }
+            $rawMode = if ($saved.PSObject.Properties['Mode'] -and $saved.Mode) { [string]$saved.Mode } else { 'cloudflared' }
+            $mode = if ($rawMode -eq 'cloudflared') {
+                if ($saved.PSObject.Properties['FixedUrl'] -and $saved.FixedUrl) { 'cloudflared_named' } else { 'cloudflared_quick' }
+            } else { $rawMode }
+            $modeLabel = Get-PublicMcpTunnelModeLabel $mode
+            $profId = if ($saved.PSObject.Properties['ProfileId'] -and $saved.ProfileId) { [string]$saved.ProfileId } else { '' }
             if ($mode -in @('tailscale', 'external_fixed')) {
                 $fixedUrl = if ($saved.PSObject.Properties['FixedUrl'] -and $saved.FixedUrl) { [string]$saved.FixedUrl } else { '' }
                 if (-not $fixedUrl) { return $result }
                 $stateSig = Get-FileStatToken $path
-                $cacheKey = "$($Context.DataRoot)|mode=$mode|$fixedUrl"
+                $cacheKey = "$($Context.DataRoot)|mode=$mode|$fixedUrl|$profId"
                 $cachedEntry = if ($script:PublicMcpTunnelLogCache.ContainsKey($cacheKey)) { $script:PublicMcpTunnelLogCache[$cacheKey] } else { $null }
                 if ($cachedEntry -and $cachedEntry.LogSignature -eq $stateSig) {
                     $script:PublicMcpTunnelLogCacheStats.Hits++
@@ -6544,6 +6566,8 @@ function Get-PublicMcpTunnelState {
                         StartedAt = $saved.StartTicks
                         Status = [string]$cachedEntry.Status
                         Mode = $mode
+                        ModeLabel = $modeLabel
+                        ProfileId = $profId
                     }
                 }
                 $script:PublicMcpTunnelLogCacheStats.Misses++
@@ -6564,6 +6588,8 @@ function Get-PublicMcpTunnelState {
                     StartedAt = $saved.StartTicks
                     Status = '在线'
                     Mode = $mode
+                    ModeLabel = $modeLabel
+                    ProfileId = $profId
                 }
             }
             $proc = Get-Process -Id $saved.ProcessId -ErrorAction Stop
@@ -6571,9 +6597,12 @@ function Get-PublicMcpTunnelState {
             $result.ProcessId = $proc.Id
             $result.StartedAt = $saved.StartTicks
             $result.Status = '连接中'
+            $result.Mode = $mode
+            $result.ModeLabel = $modeLabel
+            $result.ProfileId = $profId
             $logPath = Join-Path $Context.DataRoot 'public-mcp-tunnel.log'
             $logSig = Get-FileStatToken $logPath
-            $cacheKey = "$($Context.DataRoot)|$($proc.Id)|$($saved.StartTicks)|$([string]$saved.FixedUrl)"
+            $cacheKey = "$($Context.DataRoot)|$($proc.Id)|$($saved.StartTicks)|$([string]$saved.FixedUrl)|$profId"
             $cachedEntry = if ($script:PublicMcpTunnelLogCache.ContainsKey($cacheKey)) { $script:PublicMcpTunnelLogCache[$cacheKey] } else { $null }
             if ($cachedEntry -and $cachedEntry.LogSignature -eq $logSig) {
                 $script:PublicMcpTunnelLogCacheStats.Hits++
@@ -6583,6 +6612,9 @@ function Get-PublicMcpTunnelState {
                     ProcessId = [int]$proc.Id
                     StartedAt = $saved.StartTicks
                     Status = [string]$cachedEntry.Status
+                    Mode = $mode
+                    ModeLabel = $modeLabel
+                    ProfileId = $profId
                 }
             }
             $script:PublicMcpTunnelLogCacheStats.Misses++
@@ -6644,7 +6676,7 @@ function Get-PublicMcpTunnelState {
 }
 
 function Start-PublicMcpTunnel {
-    param($Context, [string]$FixedDomain = '', [string]$Token = '', [string]$ClientPath = '', [string]$TailscalePath = '', [int]$Port = 8766)
+    param($Context, [string]$FixedDomain = '', [string]$Token = '', [string]$ClientPath = '', [string]$TailscalePath = '', [int]$Port = 8766, [string]$ProfileId = '', [switch]$PreferTailscale)
     $lockPath = Join-Path $Context.DataRoot 'public-mcp-tunnel.lock'
     $lock = $null
     try {
@@ -6681,12 +6713,24 @@ function Start-PublicMcpTunnel {
                 FixedUrl = $fixedUrl
                 TailscalePath = $tsExe
                 Port = $Port
+                ProfileId = $ProfileId
             } | ConvertTo-Json)
             return (Get-PublicMcpTunnelState $Context)
         }
 
-        # Mode 2: Auto-discover Tailscale Funnel permanent URL when FixedDomain/Token are blank and no explicit cloudflared ClientPath override was passed
-        if ((-not $fixedUrl) -and (-not $cleanToken) -and ((-not $ClientPath) -or $TailscalePath)) {
+        if (-not $ClientPath) {
+            $cmd = Get-Command cloudflared.exe -ErrorAction SilentlyContinue
+            if ($cmd) { $ClientPath = $cmd.Source }
+            else {
+                foreach ($folder in @(${env:ProgramFiles}, ${env:ProgramFiles(x86)})) {
+                    if ($folder -and (Test-Path (Join-Path $folder 'cloudflared/cloudflared.exe'))) { $ClientPath = Join-Path $folder 'cloudflared/cloudflared.exe'; break }
+                }
+            }
+        }
+        $hasCloudflared = [bool]($ClientPath -and (Test-Path -LiteralPath $ClientPath))
+
+        # Mode 2: Auto-discover Tailscale Funnel permanent URL when FixedDomain/Token are blank and either Tailscale is preferred or cloudflared is absent
+        if ((-not $fixedUrl) -and (-not $cleanToken) -and ($TailscalePath -or $PreferTailscale -or (-not $hasCloudflared))) {
             $tsExe = Resolve-TailscaleClientPath $TailscalePath
             if ($tsExe) {
                 $autoTsUrl = Get-TailscaleFunnelSelfUrl $tsExe
@@ -6709,6 +6753,7 @@ function Start-PublicMcpTunnel {
                             FixedUrl = $autoTsUrl
                             TailscalePath = $tsExe
                             Port = $Port
+                            ProfileId = $ProfileId
                         } | ConvertTo-Json)
                         return (Get-PublicMcpTunnelState $Context)
                     }
@@ -6716,23 +6761,15 @@ function Start-PublicMcpTunnel {
             }
         }
 
-        # Mode 3: Cloudflare Tunnel (Named Tunnel with FixedDomain + Token, or Quick Tunnel fallback)
-        if (-not $ClientPath) {
-            $cmd = Get-Command cloudflared.exe -ErrorAction SilentlyContinue
-            if ($cmd) { $ClientPath = $cmd.Source }
-            else {
-                foreach ($folder in @(${env:ProgramFiles}, ${env:ProgramFiles(x86)})) {
-                    if ($folder -and (Test-Path (Join-Path $folder 'cloudflared/cloudflared.exe'))) { $ClientPath = Join-Path $folder 'cloudflared/cloudflared.exe'; break }
-                }
-            }
-        }
-        if (-not $ClientPath -or -not (Test-Path -LiteralPath $ClientPath)) { throw '未找到 cloudflared.exe，请先安装 Cloudflare Tunnel 或启用 Tailscale Funnel。' }
+        # Mode 3: Cloudflare Tunnel (Named Tunnel with FixedDomain + Token, or Quick Tunnel when blank)
+        if (-not $hasCloudflared) { throw '未找到 cloudflared.exe，请先安装 Cloudflare Tunnel 或启用 Tailscale Funnel。' }
         $info = New-Object Diagnostics.ProcessStartInfo
         $info.FileName = $ClientPath
         $info.UseShellExecute = $false; $info.CreateNoWindow = $true
         # cloudflared writes its own logfile, avoiding pipe-buffer deadlocks.
         $logPath = Join-Path $Context.DataRoot 'public-mcp-tunnel.log'
         [IO.File]::WriteAllText($logPath, '')
+        $cfMode = if ($fixedUrl -and $cleanToken) { 'cloudflared_named' } else { 'cloudflared_quick' }
         if ($fixedUrl -and $cleanToken) {
             $info.Arguments = 'tunnel --no-autoupdate --logfile "' + $logPath + '" run'
             $info.EnvironmentVariables['TUNNEL_TOKEN'] = $cleanToken
@@ -6740,7 +6777,7 @@ function Start-PublicMcpTunnel {
             $info.Arguments = 'tunnel --no-autoupdate --logfile "' + $logPath + '" --url http://127.0.0.1:' + $Port
         }
         $proc = [Diagnostics.Process]::Start($info)
-        Write-AtomicConnectionText (Join-Path $Context.DataRoot 'public-mcp-tunnel.json') (@{ Mode = 'cloudflared'; ProcessId = $proc.Id; StartTicks = $proc.StartTime.ToUniversalTime().Ticks; FixedUrl = $fixedUrl } | ConvertTo-Json)
+        Write-AtomicConnectionText (Join-Path $Context.DataRoot 'public-mcp-tunnel.json') (@{ Mode = $cfMode; ProcessId = $proc.Id; StartTicks = $proc.StartTime.ToUniversalTime().Ticks; FixedUrl = $fixedUrl; ProfileId = $ProfileId } | ConvertTo-Json)
         $deadline = [DateTime]::UtcNow.AddSeconds(12)
         do {
             Start-Sleep -Milliseconds 150
@@ -6763,7 +6800,14 @@ function Stop-PublicMcpTunnel {
                 if ($mode -eq 'tailscale') {
                     $tsExe = Resolve-TailscaleClientPath $(if ($saved.PSObject.Properties['TailscalePath']) { [string]$saved.TailscalePath } else { '' })
                     if ($tsExe) {
-                        try { & $tsExe funnel --https=443 off 2>&1 | Out-Null } catch { }
+                        try {
+                            if ($tsExe -match '\.(cmd|bat)$') {
+                                & $tsExe funnel --https=443 off 2>&1 | Out-Null
+                            } else {
+                                $tsOffProc = Start-Process -FilePath $tsExe -ArgumentList @('funnel', '--https=443', 'off') -WindowStyle Hidden -PassThru -ErrorAction SilentlyContinue
+                                if ($tsOffProc) { [void]$tsOffProc.WaitForExit(2500) }
+                            }
+                        } catch { }
                     }
                 }
             } catch { }
