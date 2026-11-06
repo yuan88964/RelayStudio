@@ -6665,7 +6665,14 @@ function Start-PublicMcpTunnel {
             $tsExe = Resolve-TailscaleClientPath $TailscalePath
             $tunMode = if ($hostName -like '*.ts.net' -or $TailscalePath) { 'tailscale' } else { 'external_fixed' }
             if ($tunMode -eq 'tailscale' -and $tsExe) {
-                try { & $tsExe funnel --bg $Port 2>&1 | Out-Null } catch { }
+                try {
+                    if ($tsExe -match '\.(cmd|bat)$') {
+                        & $tsExe funnel --bg $Port 2>&1 | Out-Null
+                    } else {
+                        $tsProc = Start-Process -FilePath $tsExe -ArgumentList @('funnel', '--bg', "$Port") -WindowStyle Hidden -PassThru -ErrorAction SilentlyContinue
+                        if ($tsProc) { [void]$tsProc.WaitForExit(2500) }
+                    }
+                } catch { }
             }
             Write-AtomicConnectionText (Join-Path $Context.DataRoot 'public-mcp-tunnel.json') (@{
                 Mode = $tunMode
@@ -6686,8 +6693,13 @@ function Start-PublicMcpTunnel {
                 if ($autoTsUrl) {
                     $tsOk = $false
                     try {
-                        & $tsExe funnel --bg $Port 2>&1 | Out-Null
-                        if ($LASTEXITCODE -eq 0) { $tsOk = $true }
+                        if ($tsExe -match '\.(cmd|bat)$') {
+                            & $tsExe funnel --bg $Port 2>&1 | Out-Null
+                            if ($LASTEXITCODE -eq 0) { $tsOk = $true }
+                        } else {
+                            $tsProc = Start-Process -FilePath $tsExe -ArgumentList @('funnel', '--bg', "$Port") -WindowStyle Hidden -PassThru -ErrorAction SilentlyContinue
+                            if ($tsProc -and $tsProc.WaitForExit(2500) -and $tsProc.ExitCode -eq 0) { $tsOk = $true }
+                        }
                     } catch { }
                     if ($tsOk) {
                         Write-AtomicConnectionText (Join-Path $Context.DataRoot 'public-mcp-tunnel.json') (@{
