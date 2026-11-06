@@ -1,4 +1,4 @@
-﻿param(
+param(
     [string]$Version = '1.3.0'
 )
 $ErrorActionPreference = 'Stop'
@@ -51,17 +51,25 @@ try {
         Copy-Item -LiteralPath $bSrc -Destination (Join-Path $binStage $binFile) -Force
     }
 
-    # 3. Copy directories (browser-bridge, docs, fonts, scripts)
-    foreach ($dirName in @('browser-bridge', 'builtin-skills', 'docs', 'fonts', 'scripts')) {
+    # 3. Copy runtime directories without builtin-skills first (for Pure Routing Edition)
+    foreach ($dirName in @('browser-bridge', 'docs', 'fonts', 'scripts')) {
         $dSrc = Join-Path $repoRoot $dirName
         if (Test-Path -LiteralPath $dSrc) {
             Copy-Item -LiteralPath $dSrc -Destination (Join-Path $appStage $dirName) -Recurse -Force
         }
     }
-
-    # 4. Create clean runtime directories and pre-mount default AGENTS.md + builtin-skills into engine-data
     foreach ($emptyDir in @('data', 'data\logs', 'engine-data', 'engine-data\tasks', 'engine-data\skills', 'engine-data\mcp', 'workspace')) {
         [IO.Directory]::CreateDirectory((Join-Path $appStage $emptyDir)) | Out-Null
+    }
+
+    # 4. Create Pure Routing Portable ZIP (no builtin-skills or default AGENTS.md; ready for pure gateway or AgentVault soft-routing)
+    $pureZip = Join-Path $distRoot "RelayStudio-v$cleanVer-win-x64-pure-portable.zip"
+    Compress-Archive -Path $appStage -DestinationPath $pureZip -CompressionLevel Optimal -Force
+
+    # 5. Mount builtin-skills + default AGENTS.md and create Full Portable ZIP + Browser Bridge ZIP
+    $builtinSrc = Join-Path $repoRoot 'builtin-skills'
+    if (Test-Path -LiteralPath $builtinSrc) {
+        Copy-Item -LiteralPath $builtinSrc -Destination (Join-Path $appStage 'builtin-skills') -Recurse -Force
     }
     $builtinAgents = Join-Path $repoRoot 'builtin-skills\AGENTS.md'
     if (Test-Path -LiteralPath $builtinAgents) {
@@ -72,7 +80,6 @@ try {
         Copy-Item -Path (Join-Path $builtinSkills '*') -Destination (Join-Path $appStage 'engine-data\skills') -Recurse -Force
     }
 
-    # 5. Create Portable Release ZIP and Browser Bridge Extension ZIP
     $portableZip = Join-Path $distRoot "RelayStudio-v$cleanVer-win-x64-portable.zip"
     $bridgeZip = Join-Path $distRoot "relaystudio-browser-bridge-v$cleanVer.zip"
 
@@ -83,6 +90,7 @@ try {
     $hashLines = New-Object 'System.Collections.Generic.List[string]'
     foreach ($target in @(
         $portableZip,
+        $pureZip,
         $bridgeZip,
         (Join-Path $repoRoot 'RelayStudio.exe'),
         (Join-Path $repoRoot 'bin\relaystudio-core.exe'),
@@ -101,6 +109,8 @@ try {
         Version = "v$cleanVer"
         PortableZip = $portableZip
         PortableSizeMB = [Math]::Round((Get-Item -LiteralPath $portableZip).Length / 1MB, 2)
+        PureZip = $pureZip
+        PureSizeMB = [Math]::Round((Get-Item -LiteralPath $pureZip).Length / 1MB, 2)
         BridgeZip = $bridgeZip
         BridgeSizeKB = [Math]::Round((Get-Item -LiteralPath $bridgeZip).Length / 1KB, 2)
         Sha256Sums = $shaFile

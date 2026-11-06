@@ -82,8 +82,10 @@ RelayStudio 将**会话窗口视为随时可替换的临时执行器，将本地
 - **基础依赖**：
   - **Python 3.11+**（必需，用于运行本地 `:8766` 桥接中枢 `McpReadOnlyShield.py`，仅依赖标准库）。
   - **Node.js 20+**（可选，仅在本地调用 `@agentclientprotocol/codex-acp` 或 `@agentclientprotocol/claude-agent-acp` 子代理时需要）。
-- **下载解压（开箱即用，无需本地编译）**：
-  前往 [**GitHub Releases (v1.3.0 Latest)**](https://github.com/yuan88964/RelayStudio/releases/latest) 直接下载完整绿色便携包 [**`RelayStudio-v1.3.0-win-x64-portable.zip`**](https://github.com/yuan88964/RelayStudio/releases/download/v1.3.0/RelayStudio-v1.3.0-win-x64-portable.zip)（内含已编译好的 `RelayStudio.exe`、`bin/relaystudio-core.exe`、`bin/tunnel-client.exe` 及全套扩展与技能，附带 [`SHA256SUMS.txt`](https://github.com/yuan88964/RelayStudio/releases/download/v1.3.0/SHA256SUMS.txt) 校验单），解压至普通读写权限目录即可双击运行。启动时程序会自动将 [`builtin-skills/`](builtin-skills) 下的 `AGENTS.md` 与 16 项技能同步至 `engine-data/`；如需链接外部 Obsidian 知识库或自定义第三方 MCP，可参考 [`docs/architecture.md`](docs/architecture.md) 配置 `data/settings.json` 与 `engine-data/mcp/`。
+- **下载解压（提供「完整内置版」与「纯净路由版」双版本，无需本地编译）**：
+  前往 [**GitHub Releases (v1.3.0 Latest)**](https://github.com/yuan88964/RelayStudio/releases/latest) 按需选择其一下载解压即可双击 `RelayStudio.exe` 运行（附带 [`SHA256SUMS.txt`](https://github.com/yuan88964/RelayStudio/releases/download/v1.3.0/SHA256SUMS.txt) 校验单）：
+  1. **完整内置版（推荐开箱即用）**：[**`RelayStudio-v1.3.0-win-x64-portable.zip`**](https://github.com/yuan88964/RelayStudio/releases/download/v1.3.0/RelayStudio-v1.3.0-win-x64-portable.zip) — 已内含编译好的 `RelayStudio.exe`、`bin/*.exe`、浏览器扩展，以及预挂载至 `engine-data/` 的默认全局规则 [`AGENTS.md`](builtin-skills/AGENTS.md) 与 16 项工程及图解技能包（[`builtin-skills/`](builtin-skills)）。
+  2. **纯净路由版 + 外部 Obsidian 知识库软路由（推荐多 Agent 共用与深度定制）**：[**`RelayStudio-v1.3.0-win-x64-pure-portable.zip`**](https://github.com/yuan88964/RelayStudio/releases/download/v1.3.0/RelayStudio-v1.3.0-win-x64-pure-portable.zip) — **不内置任何预设全局规则与技能**（纯粹作为 `:8766` 免弹窗网关与多平台停顿守护底座）。你可以搭配配套开源的 Obsidian 规则与深模块技能仓库 **[`yuan88964/AgentVault`](https://github.com/yuan88964/AgentVault)**，运行其中的 `Setup-ObsidianRelay.ps1` 一键将该仓库（或合并进你现有的本地 Obsidian 库）通过 NTFS 软/硬链接挂载至 RelayStudio 的 `data/settings.json`，实现“在 Obsidian 改一处规则或技能，RelayStudio 与本机 Codex / Claude 同步生效”。
 
 ### 2. 配置公网 MCP 隧道（二选一）与外观主题
 
