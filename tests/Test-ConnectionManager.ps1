@@ -1114,9 +1114,20 @@ try {
     $script:controls.AddPlatformCellButton.RaiseEvent((New-Object Windows.RoutedEventArgs([Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
     Assert ($script:controls.KeyPopoverBorder.Visibility -eq 'Visible' -and $script:controls.AddPlatformPanelBorder.Visibility -eq 'Visible' -and $script:controls.AddPlatformListPanel.Children.Count -eq 3 -and $script:controls.PopoverHeaderTitle.Text -eq '添加平台通道' -and $script:controls.ProfilesListScroll.Visibility -eq 'Collapsed' -and $script:controls.PopoverFooterBorder.Visibility -eq 'Collapsed' -and $script:controls.AddProfileButton.Visibility -eq 'Collapsed') 'Clicking AddPlatformCellButton (+) opens standalone 添加平台通道 panel and hides OpenAI profile list, + 新增配置, and footer bar'
     Invoke-SelectOrAddCapsulePlatform 'claude'
-    Assert ($script:activeCapsulePlatform -eq 'claude' -and $script:controls.PopoverHeaderTitle.Text -match '^Claude 接入配置' -and [string]$script:controls.PlatformButton.Content -eq '网页端 Connectors ↗' -and [string]$script:controls.QuickConnectButton.Content -eq '▶ 启动隧道' -and [string]$script:controls.DisconnectButton.Content -eq '断开隧道' -and $script:controls.CapsuleExtraSegmentsPanel.Children.Count -ge 2) 'Selecting Claude from + panel grows capsule segment and switches KeyPopoverBorder to normalized multi-tunnel popover with ▶ 启动隧道 and 断开隧道'
+    Assert ($script:activeCapsulePlatform -eq 'claude' -and $script:controls.PopoverHeaderTitle.Text -match '^Claude 隧道配置' -and [string]$script:controls.PlatformButton.Content -eq '网页端 Connectors ↗' -and [string]$script:controls.QuickConnectButton.Content -eq '▶ 启动隧道' -and [string]$script:controls.DisconnectButton.Content -eq '断开隧道' -and $script:controls.CapsuleExtraSegmentsPanel.Children.Count -ge 2) 'Selecting Claude from + panel grows capsule segment and switches KeyPopoverBorder to normalized multi-tunnel popover with ▶ 启动隧道 and 断开隧道'
     Assert ($script:controls.TunnelInputLabel.Text -eq '隧道' -and $script:controls.KeyInputLabel.Text -eq 'Key') 'Expanded edit form normalizes field labels to 隧道 and Key across all platforms'
+    $segBtnBeforeExpand = $script:capsuleSegmentButtons['claude']
+    $script:window.Content.Measure([Windows.Size]::new(1180, 740))
+    $script:window.Content.Arrange([Windows.Rect]::new(0, 0, 1180, 740))
+    $script:window.Content.UpdateLayout()
+    $collapsedPopH = [double]$script:controls.KeyPopoverBorder.ActualHeight
     Toggle-ProfileInlineEdit 'prof_claude_default'
+    $script:window.Content.Measure([Windows.Size]::new(1180, 740))
+    $script:window.Content.Arrange([Windows.Rect]::new(0, 0, 1180, 740))
+    $script:window.Content.UpdateLayout()
+    $expandedPopH = [double]$script:controls.KeyPopoverBorder.ActualHeight
+    $segBtnAfterExpand = $script:capsuleSegmentButtons['claude']
+    Assert ([object]::ReferenceEquals($segBtnBeforeExpand, $segBtnAfterExpand) -and $expandedPopH -gt ($collapsedPopH + 100) -and $script:controls.PopoverFooterBorder.ActualHeight -gt 20) "Expanding card on Claude/Gemini reuses capsule button instance and expands KeyPopoverBorder height without clipping footer (collapsed=$collapsedPopH, expanded=$expandedPopH)"
     Assert ($script:controls.TunnelInputPlaceholder.Visibility -eq 'Visible' -and $script:controls.KeyInputPlaceholder.Visibility -eq 'Visible') 'Empty TunnelInput and KeyInput display muted watermark placeholders'
     $script:controls.TunnelInput.Text = 'https://claude-box.tail9999.ts.net'
     $script:controls.KeyInput.Text = 'cf-token-123456'
@@ -1127,9 +1138,14 @@ try {
     Toggle-ProfileInlineEdit 'prof_claude_default'
     Start-NewProfileForm
     $secondClaudeProfId = $script:viewingProfileId
+    Assert ($script:controls.ProfileNameInput.Text -match '^新隧道配置 #\d+$') "Start-NewProfileForm uses unified 新隧道配置 #N default name across all platforms (actual=$($script:controls.ProfileNameInput.Text))"
     $script:controls.ProfileNameInput.Text = 'Claude备用号'
     $script:controls.TunnelInput.Text = 'https://claude-alt.tail9999.ts.net'
     Save-Form
+    Toggle-ProfileInlineEdit 'prof_claude_default'
+    Assert ($script:popoverEditMode -and $script:popoverExpandedProfileId -eq 'prof_claude_default') 'Card 1 inline edit form is expanded'
+    Select-ProfileCard $secondClaudeProfId
+    Assert ((-not $script:popoverEditMode) -and $script:controls.FormScroll.Visibility -eq 'Collapsed' -and $script:controls.ProfileNameInput.Text -eq 'Claude备用号') 'Clicking Card 2 body while Card 1 is expanded automatically collapses Card 1 edit form and syncs Card 2 form fields'
     Select-ProfileCard 'prof_claude_default'
     Assert ([string]$script:controls.QuickConnectButton.Content -eq '▶ 启动隧道') 'Selecting active profile shows ▶ 启动隧道 when tunnel is offline'
     Select-ProfileCard $secondClaudeProfId

@@ -1603,12 +1603,14 @@ function Select-WindowTab([string]$TabName) {
         $script:controls.TabLiveButton.BorderBrush = ConvertTo-Brush 'Transparent'
         $script:controls.TabLiveButton.Foreground = ConvertTo-Brush '#71717A'
         Refresh-ProfilePopoverState
-        $trig = if ($script:activeCapsulePlatform -and $script:activeCapsulePlatform -notin @('openai', 'chatgpt') -and $script:capsuleSegmentButtons[$script:activeCapsulePlatform]) {
-            $script:capsuleSegmentButtons[$script:activeCapsulePlatform]
-        } else {
-            $script:controls.ConnIconBadgeButton
+        if (-not $wasOpen) {
+            $trig = if ($script:activeCapsulePlatform -and $script:activeCapsulePlatform -notin @('openai', 'chatgpt') -and $script:capsuleSegmentButtons[$script:activeCapsulePlatform]) {
+                $script:capsuleSegmentButtons[$script:activeCapsulePlatform]
+            } else {
+                $script:controls.ConnIconBadgeButton
+            }
+            Sync-PopoverAnchorAndAnimate -PopoverBorder $script:controls.KeyPopoverBorder -TriggerElement $trig -WasAlreadyOpen $false
         }
-        Sync-PopoverAnchorAndAnimate -PopoverBorder $script:controls.KeyPopoverBorder -TriggerElement $trig -WasAlreadyOpen $wasOpen
     }
 }
 
@@ -1897,52 +1899,85 @@ function Refresh-ProfilePopoverState {
     $script:controls.ConnProfileMiniTagText.Text = $(if ($enabledPlats.Count -gt 1) { "ChatGPT · $activeShortName ▾" } else { "$activeShortName ▾" })
 
     if ($script:controls.CapsuleExtraSegmentsPanel) {
-        $script:controls.CapsuleExtraSegmentsPanel.Children.Clear()
-        $script:capsuleSegmentButtons = @{}
-        foreach ($ep in @($enabledPlats | Where-Object { $_ -notin @('openai', 'chatgpt') })) {
-            $div = New-Object Windows.Controls.Border
-            $div.Width = 1
-            $div.Background = ConvertTo-Brush '#E4E4E7'
-            $div.Margin = [Windows.Thickness]::new(0, 3, 0, 3)
-            [void]$script:controls.CapsuleExtraSegmentsPanel.Children.Add($div)
-
-            $epMeta = Get-CapsulePlatformMeta $ep
-            $epAct = $allProfs | Where-Object { ([string]$_.Platform).ToLowerInvariant() -eq $ep -and $_.IsActive } | Select-Object -First 1
-            if (-not $epAct) {
-                $epAct = $allProfs | Where-Object { ([string]$_.Platform).ToLowerInvariant() -eq $ep } | Select-Object -First 1
+        $extraPlats = @($enabledPlats | Where-Object { $_ -notin @('openai', 'chatgpt') })
+        $canReuseSegs = ($script:capsuleSegmentButtons -and $script:controls.CapsuleExtraSegmentsPanel.Children.Count -eq ($extraPlats.Count * 2))
+        if ($canReuseSegs) {
+            foreach ($ep in $extraPlats) {
+                if (-not $script:capsuleSegmentButtons.ContainsKey($ep) -or -not $script:capsuleSegmentButtons[$ep]) {
+                    $canReuseSegs = $false
+                    break
+                }
             }
-            $epShort = if ($epAct -and $epAct.Name) { [string]$epAct.Name } else { '默认' }
-            $epReady = [bool](Get-PublicMcpTunnelState $script:context).Running
-            $segBtn = New-Object Windows.Controls.Button
-            $segBtn.Padding = [Windows.Thickness]::new(8, 2, 8, 2)
-            $segBtn.MinHeight = 24
-            $segBtn.Background = ConvertTo-Brush 'Transparent'
-            $segBtn.BorderBrush = ConvertTo-Brush 'Transparent'
-            $segBtn.BorderThickness = [Windows.Thickness]::new(0)
-            $segBtn.Tag = $ep
-            $segStack = New-Object Windows.Controls.StackPanel
-            $segStack.Orientation = 'Horizontal'
-            $segStack.VerticalAlignment = 'Center'
-            $segDot = New-Object Windows.Shapes.Ellipse
-            $segDot.Width = 7; $segDot.Height = 7
-            $segDot.Fill = ConvertTo-Brush $(if ($epReady) { '#16A34A' } else { '#A1A1AA' })
-            $segDot.VerticalAlignment = 'Center'
-            $segDot.Margin = [Windows.Thickness]::new(0, 0, 6, 0)
-            [void]$segStack.Children.Add($segDot)
-            $segTxt = New-Object Windows.Controls.TextBlock
-            $segTxt.Text = "$($epMeta.Title) · $epShort ▾"
-            $segTxt.FontSize = 11.5
-            $segTxt.FontWeight = 'SemiBold'
-            $segTxt.Foreground = ConvertTo-Brush '#18181B'
-            $segTxt.VerticalAlignment = 'Center'
-            [void]$segStack.Children.Add($segTxt)
-            $segBtn.Content = $segStack
-            $segBtn.Add_Click({
-                param($s, $e)
-                if ($s.Tag) { Select-CapsulePlatform ([string]$s.Tag) $s }
-            })
-            $script:capsuleSegmentButtons[$ep] = $segBtn
-            [void]$script:controls.CapsuleExtraSegmentsPanel.Children.Add($segBtn)
+        }
+        if (-not $canReuseSegs) {
+            $script:controls.CapsuleExtraSegmentsPanel.Children.Clear()
+            $script:capsuleSegmentButtons = @{}
+            foreach ($ep in $extraPlats) {
+                $div = New-Object Windows.Controls.Border
+                $div.Width = 1
+                $div.Background = ConvertTo-Brush '#E4E4E7'
+                $div.Margin = [Windows.Thickness]::new(0, 3, 0, 3)
+                [void]$script:controls.CapsuleExtraSegmentsPanel.Children.Add($div)
+
+                $epMeta = Get-CapsulePlatformMeta $ep
+                $epAct = $allProfs | Where-Object { ([string]$_.Platform).ToLowerInvariant() -eq $ep -and $_.IsActive } | Select-Object -First 1
+                if (-not $epAct) {
+                    $epAct = $allProfs | Where-Object { ([string]$_.Platform).ToLowerInvariant() -eq $ep } | Select-Object -First 1
+                }
+                $epShort = if ($epAct -and $epAct.Name) { [string]$epAct.Name } else { '默认' }
+                $epReady = [bool]$publicTunnel.Running
+                $segBtn = New-Object Windows.Controls.Button
+                $segBtn.Padding = [Windows.Thickness]::new(8, 2, 8, 2)
+                $segBtn.MinHeight = 24
+                $segBtn.Background = ConvertTo-Brush 'Transparent'
+                $segBtn.BorderBrush = ConvertTo-Brush 'Transparent'
+                $segBtn.BorderThickness = [Windows.Thickness]::new(0)
+                $segBtn.Tag = $ep
+                $segStack = New-Object Windows.Controls.StackPanel
+                $segStack.Orientation = 'Horizontal'
+                $segStack.VerticalAlignment = 'Center'
+                $segDot = New-Object Windows.Shapes.Ellipse
+                $segDot.Width = 7; $segDot.Height = 7
+                $segDot.Fill = ConvertTo-Brush $(if ($epReady) { '#16A34A' } else { '#A1A1AA' })
+                $segDot.VerticalAlignment = 'Center'
+                $segDot.Margin = [Windows.Thickness]::new(0, 0, 6, 0)
+                [void]$segStack.Children.Add($segDot)
+                $segTxt = New-Object Windows.Controls.TextBlock
+                $segTxt.Text = "$($epMeta.Title) · $epShort ▾"
+                $segTxt.FontSize = 11.5
+                $segTxt.FontWeight = 'SemiBold'
+                $segTxt.Foreground = ConvertTo-Brush '#18181B'
+                $segTxt.VerticalAlignment = 'Center'
+                [void]$segStack.Children.Add($segTxt)
+                $segBtn.Content = $segStack
+                $segBtn.Add_Click({
+                    param($s, $e)
+                    if ($s.Tag) { Select-CapsulePlatform ([string]$s.Tag) $s }
+                })
+                $script:capsuleSegmentButtons[$ep] = $segBtn
+                [void]$script:controls.CapsuleExtraSegmentsPanel.Children.Add($segBtn)
+            }
+        } else {
+            foreach ($ep in $extraPlats) {
+                $epMeta = Get-CapsulePlatformMeta $ep
+                $epAct = $allProfs | Where-Object { ([string]$_.Platform).ToLowerInvariant() -eq $ep -and $_.IsActive } | Select-Object -First 1
+                if (-not $epAct) {
+                    $epAct = $allProfs | Where-Object { ([string]$_.Platform).ToLowerInvariant() -eq $ep } | Select-Object -First 1
+                }
+                $epShort = if ($epAct -and $epAct.Name) { [string]$epAct.Name } else { '默认' }
+                $epReady = [bool]$publicTunnel.Running
+                $segBtn = $script:capsuleSegmentButtons[$ep]
+                if ($segBtn -and $segBtn.Content -is [Windows.Controls.StackPanel] -and $segBtn.Content.Children.Count -ge 2) {
+                    $segDot = $segBtn.Content.Children[0]
+                    $segTxt = $segBtn.Content.Children[1]
+                    if ($segDot -is [Windows.Shapes.Ellipse]) {
+                        $segDot.Fill = ConvertTo-Brush $(if ($epReady) { '#16A34A' } else { '#A1A1AA' })
+                    }
+                    if ($segTxt -is [Windows.Controls.TextBlock]) {
+                        $segTxt.Text = "$($epMeta.Title) · $epShort ▾"
+                    }
+                }
+            }
         }
     }
 
@@ -2008,11 +2043,7 @@ function Refresh-ProfilePopoverState {
         if ($script:controls.PopoverFooterBorder) { $script:controls.PopoverFooterBorder.Visibility = 'Collapsed' }
     } else {
         if ($script:controls.PopoverHeaderTitle) {
-            $script:controls.PopoverHeaderTitle.Text = if ($curPlat -in @('openai', 'chatgpt')) {
-                "ChatGPT 隧道配置 ($($platProfs.Count))"
-            } else {
-                "$($platMeta.Title) 接入配置 ($($platProfs.Count))"
-            }
+            $script:controls.PopoverHeaderTitle.Text = "$($platMeta.Title) 隧道配置 ($($platProfs.Count))"
         }
         if ($script:controls.RemoveCapsulePlatformButton) {
             $script:controls.RemoveCapsulePlatformButton.Visibility = $(if ($curPlat -in @('openai', 'chatgpt')) { 'Collapsed' } else { 'Visible' })
@@ -2484,6 +2515,15 @@ function Refresh-ProfilePopoverState {
         @{ Btn = $script:controls.StartupOffButton; Val = 'off' }
     ) $coreCfg.StartupMode
     Apply-WindowTheme
+    if ($script:controls.KeyPopoverBorder -and $script:controls.KeyPopoverBorder.Visibility -eq 'Visible') {
+        try { $script:controls.KeyPopoverBorder.CacheMode = New-Object Windows.Media.BitmapCache } catch { }
+        foreach ($el in @($script:controls.FormScroll, $script:controls.ProfilesListPanel, $script:controls.ProfilesListScroll, $script:controls.PopoverFooterBorder, $script:controls.KeyPopoverBorder.Child, $script:controls.KeyPopoverBorder)) {
+            if ($null -ne $el -and $el -is [Windows.UIElement]) {
+                $el.InvalidateMeasure()
+                $el.InvalidateArrange()
+            }
+        }
+    }
 }
 
 function Enter-ProfileEditMode([string]$ProfileId = '') {
@@ -2523,7 +2563,14 @@ function Toggle-ProfileInlineEdit([string]$ProfileId) {
 }
 
 function Select-ProfileCard([string]$ProfileId) {
-    # Clicking the tunnel strip body ONLY selects this profile (never auto-connects, never opens edit drawer)
+    # Clicking the tunnel strip body ONLY selects this profile (and collapses any other card's inline edit drawer to prevent cross-card overwrite)
+    if ($script:popoverEditMode -and $script:popoverExpandedProfileId -ne $ProfileId) {
+        $script:dirty = $false
+        $script:popoverExpandedProfileId = ''
+        $script:popoverEditMode = $false
+        $script:activeTab = 'Live'
+        if ($script:controls.FormScroll) { $script:controls.FormScroll.Visibility = 'Collapsed' }
+    }
     $script:viewingProfileId = $ProfileId
     $script:profilesState = Get-ConnectionProfiles $script:context $script:settings
     $viewProf = $script:profilesState.Profiles | Where-Object { $_.Id -eq $ProfileId } | Select-Object -First 1
@@ -2553,7 +2600,7 @@ function Start-NewProfileForm {
         $pl -eq $curPlat
     })
     $countNext = $platProfs.Count + 1
-    $defName = if ($curPlat -eq 'chatgpt') { "新隧道配置 #$countNext" } else { "新配置 #$countNext" }
+    $defName = "新隧道配置 #$countNext"
     $savedState = Save-ConnectionProfile -Context $script:context -Settings $script:settings -ProfileId 'new' -Name $defName -TunnelId '' -ApiKey '' -Platform $curPlat -SetActive:$false
     $newId = if ($savedState -and $savedState.PSObject.Properties['LastSavedProfileId'] -and $savedState.LastSavedProfileId) {
         [string]$savedState.LastSavedProfileId
@@ -7787,7 +7834,6 @@ function Refresh-FormState {
     $script:controls.EndpointText.Text = '本地内核地址  ' + $script:display.Endpoint
     $script:controls.DetailText.Text = $script:display.Detail
     $script:controls.StatusButton.IsEnabled = [bool]$script:display.UiUrl
-    $script:controls.DisconnectButton.IsEnabled = $script:display.Running
     if ($script:display.Running -and $script:controls.FeedbackBox.Visibility -eq 'Visible' -and $script:controls.FeedbackText.Text -match '已断开') {
         $script:controls.FeedbackBox.Visibility = 'Collapsed'
     }
@@ -7795,12 +7841,30 @@ function Refresh-FormState {
     $legacy = $script:display.Tunnel -eq '旧脚本连接仍在运行'
     $script:controls.ConnectButton.Content = if ($legacy) { '断开旧隧道' } else { '保存并连接' }
     $script:controls.OfficialButton.Visibility = 'Collapsed'
-    $script:controls.DisconnectButton.Visibility = if ($coreReady -and $legacy) { 'Collapsed' } else { 'Visible' }
+    $curCapPlat = if ($script:activeCapsulePlatform) { $script:activeCapsulePlatform.Trim().ToLowerInvariant() } else { 'chatgpt' }
+    $pubTunPoll = Get-PublicMcpTunnelState $script:context
+    if ($curCapPlat -in @('', 'openai', 'chatgpt')) {
+        $script:controls.DisconnectButton.IsEnabled = [bool]$script:display.Running
+        $script:controls.DisconnectButton.Visibility = if ($coreReady -and $legacy) { 'Collapsed' } else { 'Visible' }
+    } else {
+        $script:controls.DisconnectButton.IsEnabled = [bool]($pubTunPoll.Running -or $pubTunPoll.ProcessId)
+        $script:controls.DisconnectButton.Visibility = 'Visible'
+    }
     if ($coreReady -and $legacy) { $script:controls.DetailText.Text = '旧连接通向 8787。准备切换时，点击右上角“断开旧隧道”，再按新配置连接。' }
     if ($script:popoverOpen -or $script:globalSettingsOpen) {
         if ($script:controls.ConnIconStatusDot -and $script:display) {
             $capDotColor = if ($script:display.IsFault) { '#EF4444' } elseif ($script:display.Running) { '#16A34A' } elseif ($script:display.Core -eq '已准备好') { '#F59E0B' } else { '#A1A1AA' }
             $script:controls.ConnIconStatusDot.Fill = ConvertTo-Brush $capDotColor
+        }
+        if ($script:capsuleSegmentButtons) {
+            foreach ($segBtn in $script:capsuleSegmentButtons.Values) {
+                if ($segBtn -and $segBtn.Content -is [Windows.Controls.StackPanel] -and $segBtn.Content.Children.Count -ge 1) {
+                    $segDot = $segBtn.Content.Children[0]
+                    if ($segDot -is [Windows.Shapes.Ellipse]) {
+                        $segDot.Fill = ConvertTo-Brush $(if ($pubTunPoll.Running) { '#16A34A' } else { '#A1A1AA' })
+                    }
+                }
+            }
         }
     } else {
         Refresh-ProfilePopoverState
