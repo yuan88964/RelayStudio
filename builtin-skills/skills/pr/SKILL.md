@@ -9,7 +9,19 @@ metadata:
     url: "https://github.com/humanlayer/skills/blob/main/plugins/show-me/skills/show-me/SKILL.md"
 ---
 
-Use this template for writing the PR body:
+# Pull Request Body Authoring (`pr`)
+
+Focused delivery worker that synthesizes a verified branch diff into a high-signal Pull Request body (`Summary`, `Evidence`, `Merge Danger`) using the project's domain vocabulary (`GLOSSARY.md`).
+
+- **`Standard` (Committed branch diff + verification evidence ready)**: Select the smallest visual representation that makes the change clear (`§2`), attach `Before / After` evidence (`§3`), and assess `Door` & `Blast Radius` (`§4`).
+- **`Normalize` (Multi-architecture or cross-module interaction PR)**: When the PR introduces a new cross-module protocol or state lifecycle that requires a standalone diagram artifact in the vault/repo, invoke [`../mermaid-diagrams/SKILL.md`](../mermaid-diagrams/SKILL.md) as a bounded subroutine, or embed a compact sequence/diff sketch directly in `## Summary`.
+- **`Bailout` (Empty branch diff or unverified broken build)**: Abort PR creation and emit `Error: <empty diff or failing verification>` + `Route: use develop | tdd`.
+
+---
+
+## 1. PR Body Template
+
+Use this structure with zero preamble and concise prose grounded in `GLOSSARY.md`:
 
 ```markdown
 ## Summary
@@ -32,145 +44,91 @@ Use this template for writing the PR body:
 <optional: potential ramifications of merge>
 ```
 
-## Sections
+---
 
-Skip all preambles and keep prose brief. Use the user's domain language from `GLOSSARY.md`.
+## 2. `Summary` Visual Menu (Pick the Smallest Clear View)
 
-### Summary
+Place each visual immediately next to the short sentence it supports, keeping only the calls, files, props, states, and module boundaries that explain the change:
 
-Pick the smallest view that makes the key point clear.
+- **Logic or algorithm $\to$ Pseudocode**:
+  ```text
+  on(save)
+    if content is unchanged
+      return cached result
+    write new content
+    return fresh result
+  ```
+- **Runtime control flow $\to$ Call tree**:
+  ```text
+  submitForm
+    createSession
+      persistPrompt
+      launchAgent
+    navigateToSession
+  ```
+- **UI structure & state ownership $\to$ Component tree**:
+  ```text
+  <SessionPage> (apps/example/src/routes/session.tsx)
+    useSessionEvents()
+    <SessionToolbar>
+      <RunSkillButton> (packages/ui)
+  ```
+- **Broad refactor or package layout $\to$ Shallow file tree**:
+  ```text
+  src/
+  ├── commands/       # parses user actions
+  ├── sessions/       # owns session state
+  └── transport/      # sends API requests
+  ```
+- **Cross-module interaction $\to$ Mermaid sequence diagram**:
+  ```mermaid
+  sequenceDiagram
+      autonumber
+      box rgb(235, 248, 255) Client Layer
+          participant User as User
+          participant UI as SessionToolbar
+      end
+      box rgb(240, 255, 244) Runtime Layer
+          participant Daemon as SkillDaemon
+      end
+      User->>+UI: Trigger RunSkillButton
+      UI->>+Daemon: Dispatch expanded prompt & session context
+      Daemon-->>-UI: Stream structured SkillResultCard events
+      UI-->>-User: Render timeline update
+  ```
+- **Delta against an existing structure $\to$ Structural `diff`** (match the diff shape to a component tree, file tree, call tree, or pseudocode block):
+  ```diff
+   submitForm
+     createSession
+       persistPrompt
+  +    expandSkillMention
+       launchAgent
+  -  navigateToSession
+  +  navigateToSession
+  +    subscribeToEvents
+  ```
+- **New self-contained contract $\to$ Short code block** when the reader needs the exact copyable target signature:
+  ```ts
+  function expandSkill(command: string): string {
+    const skillName = command.slice(1);
+    return `use the ${skillName} skill`;
+  }
+  ```
 
-- Show logic or an algorithm as pseudocode:
+---
 
-```text
-on(save)
-  if content is unchanged
-    return cached result
-  write new content
-  return fresh result
-```
+## 3. `Evidence` & `Merge Danger` Rules
 
-- Show runtime control flow as a call tree:
+- **Evidence (`Before` / `After`)**: Provide concrete proof that the change works—screenshots for visual UI changes (S-tier) or exact test/CLI outputs showing the prior failure mode and passing post-change run (A-tier).
+- **Merge Danger (`Door` & `Blast Radius`)**:
+  - **Door**: Mark **`two-way`** when cheap and safe to roll back; mark **`one-way`** when involving destructive data migrations, public contract breaks, or irreversible external side effects.
+  - **Blast Radius**: Summarize the impact scope in one word (`Isolated`, `Package-local`, `Cross-module`, `System-wide`) followed by any concrete operational caveats.
 
-```text
-submitForm
-  createSession
-    persistPrompt
-    launchAgent
-  navigateToSession
-```
+---
 
-- Show UI structure as a component tree, including state and module boundaries that matter:
+## 4. Completion & Caller Return Gate (`Recency Peak`)
 
-```text
-<SessionPage> (apps/example/src/routes/session.tsx)
-  useSessionEvents()
-  <SessionToolbar>
-    <RunSkillButton> (packages/ui)
-```
-
-- Show file responsibility or a broad refactor as a shallow file tree:
-
-```text
-src/
-├── commands/       # parses user actions
-├── sessions/       # owns session state
-└── transport/      # sends API requests
-```
-
-- Show component interaction, control flow, or data flow with Mermaid:
-
-```mermaid
-sequenceDiagram
-    autonumber
-    box rgb(235, 248, 255) Client Layer
-        participant User as User
-        participant UI as SessionToolbar
-    end
-    box rgb(240, 255, 244) Runtime Layer
-        participant Daemon as SkillDaemon
-    end
-    User->>+UI: Trigger RunSkillButton
-    UI->>+Daemon: Dispatch expanded prompt & session context
-    Daemon-->>-UI: Stream structured SkillResultCard events
-    UI-->>-User: Render timeline update
-```
-
-- Use `diff` when the point is what changes and the surrounding shape already exists. Match the diff shape to the topic.
-
-For a component change:
-
-```diff
- <SessionPage>
-   useSessionEvents()
-   <SessionToolbar>
-+    <RunSkillButton />
-   <SessionTimeline>
-+    <SkillResultCard />
-```
-
-For a file-layout change:
-
-```diff
- src/
- ├── commands/
-+│   └── show-me.ts       # expands the slash command
- ├── sessions/
--└── transport.ts
-+└── transport/
-+    ├── client.ts
-+    └── stream.ts
-```
-
-For a call-tree or call-stack change:
-
-```diff
- submitForm
-   createSession
-     persistPrompt
-+    expandSkillMention
-     launchAgent
--  navigateToSession
-+  navigateToSession
-+    subscribeToEvents
-```
-
-For a state or control-flow change:
-
-```diff
- on(save)
--  write content
-+  if content is unchanged
-+    return cached result
-+  write new content
-+  invalidate cache
-```
-
-- Show the whole block when most of it is new, when omitted context would hide ownership or order, or when the user needs a copyable target shape:
-
-```ts
-function expandSkill(command: string): string {
-  const skillName = command.slice(1);
-  return `use the ${skillName} skill`;
-}
-```
-
-#### Guidance
-
-Place each visual next to the short text it supports. Keep only the calls, files, props, states, and boundaries needed to answer the user's current question or the options to resolve the current discussion point.
-
-You may use one of these, you may use several, it is unlikely you will use all of them. Use your judgement and don't overwhelm the user.
-
-### Evidence
-
-Concrete evidence that the change works. Show a before and after.
-
-Screenshots are S-tier - when the environment is set up for it and the change is visual.
-
-Execution-based evidence is A-tier. Test results, console output. Show the exact test that now fails and passes, using pseudocode.
-
-### Merge Danger
-
-Describe whether it's a one-way or two-way door. You can walk back through two-way doors, but not one-way doors. A PR that is cheap to roll back is lower risk. Changes that involve destructive actions or hard-to-reverse decisions are one-way doors.
-
-The blast radius is the potential impact or scope of the changes introduced by this PR. Consider all possibilities. Examples are layout shift, breakages for consumers, mobile responsiveness, etc.
+The PR body is complete when:
+1. All three sections (`## Summary`, `## Evidence`, `## Merge Danger`) are populated using `GLOSSARY.md` domain terms;
+2. The PR is created/updated on the tracker (or returned as Markdown when offline);
+3. **Immediate Caller Return**: When invoked at the closeout of `develop`, immediately return the PR URL / body to `develop` (`§3`) to complete final verification reporting.

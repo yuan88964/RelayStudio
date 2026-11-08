@@ -1,5 +1,7 @@
 # Sequence Diagrams (`sequenceDiagram`)
 
+> **Unified Rules**: See [SKILL.md](../SKILL.md) (§2.2) for scale discipline (`3–5` swimlanes) and **Template 2 (Stripe PaymentIntent & Webhook Sequence)** for the full end-to-end runtime exemplar.
+
 Use `sequenceDiagram` for **arc42 Section 6 (Runtime View)** and **Stripe-style Cross-Actor Interaction Flows** where chronological request/response order, asynchronous callbacks (Webhooks), and conditional fallback branches (`alt / else`) across 3–5 participants matter.
 
 ## 1. Core Syntax & Industry Conventions
@@ -13,41 +15,37 @@ Use `sequenceDiagram` for **arc42 Section 6 (Runtime View)** and **Stripe-style 
 | **Async Webhook / Event** | `B--)A: 异步推送事件通知` | Open arrow for non-blocking webhooks or message queue events. |
 | **Branching & Fallback** | `alt 正常直通 ... else 异常降级 ... end` | Explicitly show both the Happy Path and the timeout/error recovery path. |
 
-## 2. Canonical Example: Stripe PaymentIntent & Webhook Consistency Flow
+## 2. Advanced Control Flow Patterns (`box`, `loop`, `opt`, `par`)
+
+Combine container grouping (`box`), retry loops (`loop`), optional cache hits (`opt`), and parallel fan-out (`par`) when extending [SKILL.md Template 2](../SKILL.md):
 
 ```mermaid
 sequenceDiagram
     autonumber
-    actor Customer as 👤 终端客户 (Browser / App)
-    participant Merchant as ⚙️ 商户后端 (Order Service)
-    participant DB as 🗄️ 订单数据库 (PostgreSQL)
-    participant Stripe as 🌐 支付网关 (Stripe API)
+    box rgb(239, 246, 255) 核心交易容器边界
+        participant API as ⚙️ 订单编排网关
+        participant Worker as 🔄 异步补偿节点
+    end
+    participant Gateway as 🌐 外部清算渠道
 
-    Note over Customer,Stripe: 阶段一：同步创建支付意图（幂等防重）
-    Customer->>+Merchant: 提交结账请求 (携带购物车ID与幂等键)
-    Merchant->>+DB: 创建待支付订单记录 (status = PENDING)
-    DB-->>-Merchant: 返回唯一订单号 order_id
-    Merchant->>+Stripe: 创建 PaymentIntent (金额, 币种, 关联 order_id)
-    Stripe-->>-Merchant: 返回 intent_id 与客户端密钥 client_secret
-    Merchant-->>-Customer: 返回 client_secret 唤起前端支付组件
-
-    Note over Customer,Stripe: 阶段二：客户端确认扣款与 3DS 风控分支
-    Customer->>+Stripe: 提交支付方式并确认扣款 (confirmPayment)
-    alt 免密风控直通 (Frictionless Flow)
-        Stripe-->>Customer: 授权扣款成功 (status = succeeded)
-    else 触发发卡行 3DS 强验证 (requires_action)
-        Stripe-->>Customer: 返回 requires_action 与银行验证挑战页
-        Customer->>Stripe: 完成短信验证码 / 生物识别挑战
-        Stripe-->>-Customer: 验证通过并完成扣款 (status = succeeded)
+    opt 命中幂等缓存 (Idempotency Hit)
+        API-->>API: 直接返回已锁定流水凭据
     end
 
-    Note over Customer,Stripe: 阶段三：异步 Webhook 最终一致性闭环（防客户端掉线）
-    Stripe--)Merchant: 异步推送 payment_intent.succeeded 事件 [Webhook]
-    activate Merchant
-    Merchant->>Merchant: 核验签名并检查事件 ID 幂等去重
-    Merchant->>DB: 更新订单状态为已支付 (status = PAID)
-    Merchant-->>Stripe: 返回 200 OK 确认签收（停止重试）
-    deactivate Merchant
+    par 并行风控与额度预审
+        API->>Gateway: ① 发起实时反欺诈评分
+    and
+        API->>Worker: ② 写入本地事务外发箱 (Outbox)
+    end
+
+    loop 指数退避轮询 (最多 3 次)
+        Worker->>+Gateway: ③ 查询最终清算回执
+        Gateway-->>-Worker: 返回清算终态 (SETTLED)
+    end
 ```
 
 ![Stripe PaymentIntent Cross-Actor Sequence Diagram](../assets/04_stripe_payment_sequence.png)
+
+---
+
+**Return to Caller**: Return with the selected `sequenceDiagram` pattern to [SKILL.md](../SKILL.md) (§2 & §5) to complete single-track artifact delivery, then resume the calling host workflow.

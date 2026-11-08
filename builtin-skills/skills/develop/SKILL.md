@@ -1,96 +1,95 @@
 ---
 name: develop
-description: End-to-end software development and testing orchestrator. Use for any coding, feature implementation, bug fix, refactoring, or test execution task, from a single direct change to a multi-ticket spec graph.
+description: End-to-end software development and concurrency orchestrator. Use for any coding, feature implementation, bug fix, refactoring, or test execution task, from a single direct slice to a multi-ticket concurrent spec graph.
 disable-model-invocation: true
 ---
 
-# Software Development & Testing Module
+# Software Development & Concurrency Orchestrator (`develop`)
 
-Single entry point for software implementation, refactoring, bug fixing, and verification. Callers provide a request, settled conversation decisions, a bug report, or a `SPEC.md` + ticket graph; this module sizes the work, drives its reusable execution parts (`tdd`, `code-review`, `codebase-design`, `diagnosing-bugs`, `resolving-merge-conflicts`, `pr`) across either a single slice or a multi-ticket graph, and returns the resulting branch, three-tier verification report, and any quarantined decisions requiring user input.
-
-Once invoked after user go-ahead, execution runs **unattended without stopping to ask mid-flight**: non-breaking internal adaptations (Category 1) and approved blast-radius test syncs (Category 2) are decided autonomously and logged under `## Accepted Amendments & Internal Adaptations`; issues that would alter user-visible behavior or weaken acceptance assertions (Category 3) or exceed 1 clean-room relay (`two_strike_stop`) are marked `quarantined` while all remaining unblocked work continues, then surfaced together at the end ([protocol.md](protocol.md)).
-
-## Three-State Interface Contract (`Standard / Normalize / Bailout`)
-
-1. **`Standard` (handle directly)**:
-   - **Small / single-slice change**: a single localized ticket or small feature/fix with settled decisions, without a multi-ticket dependency graph.
-   - **Multi-ticket spec graph**: a `SPEC.md` and associated tickets with blocking relationships (`Blocked by`).
-2. **`Normalize` (normalize $M \to 1$ at entry, then handle)**:
-   - **Homogeneous bulk scan or mechanical transform ($\ge 20$ independent files)**: normalize into a local worker script (`max_workers=4`) and dispatch subagents only for flagged exceptions.
-   - **Module seam, state ledger, or interface redesign**: normalize interface seams, flatten case-by-case branching, and design concurrency isolation first using the [`codebase-design`](../codebase-design/SKILL.md) skill before writing code.
-   - **Hard bug without a reproduction loop**: normalize via the `diagnosing-bugs` skill to establish a single red command before attempting fixes.
-3. **`Bailout` (abort main path and emit `Error` + `Route`)**:
-   - Unattended execution never blocks on the user. When a step hits two consecutive same-root-cause failures (`two_strike_stop`), misses a required capability, or encounters a spec/credential conflict, it triggers a **Bailout**: halts cleanly and outputs a one-line `Error` and structured `Route` (`use`, `need`, `drop`, `amend-spec`, or `ask-user`) per [protocol.md](protocol.md).
-
-## Internal Reference Files (Load on Demand by Branch)
-
-- **[testing.md](testing.md)**: Three-tier test cadence (`Tight Loop` + static typecheck vs `Blast Radius` vs single `Integration` run), isolated fixtures, `>45s` background session observation via the **Long-Command Session Seam**, and the slow-test acceleration toolbox.
-- **[protocol.md](protocol.md)**: Unattended execution rule, unified lowercase status vocabulary, 6-line handoff schema, `Route` transfer actions, clean-room relay brief rules, three-category change digestion, single-writer `## Accepted Amendments`, failure signal classification, and the **Task Progress Ledger Seam**.
-- **[hosts.md](hosts.md)**: Concrete host adapter matrix for the three abstract host capability seams (**Subagent Dispatch Seam**, **Long-Command Session Seam**, **Task Progress Ledger Seam**) and single-tunnel snapshot/patch contention offloading.
+Top-level orchestrator for software implementation, refactoring, bug fixing, and verification. It sizes incoming requests, calls [`module-design`](../module-design/SKILL.md) to lock module seams and partition concurrency, drives atomic execution parts (`tdd`, `code-review`, `diagnosing-bugs`, `resolving-merge-conflicts`, `pr`) across either a single slice or a concurrent multi-ticket graph, and returns the verified branch, three-tier verification report, and any quarantined decisions.
 
 ---
 
-## Workflow
+## 0. Why Orchestrate: Seam-First Concurrency & Unattended Flow
 
-### 1. Size the Request
+Running a small localized edit through a heavy multi-ticket ledger wastes time; running a large multi-module build serially in one context window is slow and causes context rot; but dispatching parallel subagents without first cutting clean module boundaries causes **file collisions, mid-flight interface drift, redundant $N \times$ full-suite test timeouts, and one wedged task halting the entire build**.
 
-Inspect the prompt and workspace:
-
-- **Single localized ticket or small agreed change (no multi-ticket dependency graph)** → run **Branch A (Small / Single-Slice Flow)**.
-- **Multi-ticket task graph (`SPEC.md` + tickets with blocking edges)** → run **Branch B (Multi-Ticket Task Graph Flow)**.
-
----
-
-### Branch A: Small / Single-Slice Flow
-
-1. **Anchor decisions in a local ticket file**:
-   - If a ticket file already exists, read it and set `Status: in_progress` via the **Task Progress Ledger Seam** ([hosts.md](hosts.md)).
-   - If the request comes directly from settled conversation decisions without a written ticket, write a concise local ticket file first (under `.scratch/<slug>/issues/01-<slug>.md`, using the template in `to-tickets`) so test seams, acceptance criteria, `Accepted Amendments`, and `Attempt Log` have a persistent on-disk ledger.
-2. **Explore and lock the test seam**:
-   - Read `GLOSSARY.md` and relevant ADRs if present; consult `codebase-design` when designing or adjusting a module interface.
-   - Use the test seam specified in the ticket/conversation, or select the highest existing public seam and record it under `## Accepted Amendments & Internal Adaptations` without stopping to ask the user.
-3. **Drive red-green slices with `tdd` (Single-Slice Verification Scope)**:
-   - Call the `tdd` skill on the current branch with `Verification Scope = Single-Slice Mode` ([testing.md](testing.md)):
-     - Run **only** the single 1:1 target test file (`Tight Loop`, `1–3s`) on each red → green cycle, plus the project's static typechecker (if configured) once the slice is green;
-     - Once all slices are green, run direct caller tests (`Blast Radius`) and a single closeout test run (using the **Long-Command Session Seam** in [hosts.md](hosts.md) if `> 45s`);
-   - Record any Category 1 internal adaptation or Category 2 blast-radius test sync under `## Accepted Amendments & Internal Adaptations`.
-   - If implementation hits `two_strike_stop` ([testing.md](testing.md)): revert to the last green commit (`git reset --hard`), record the 3-line entry in `Attempt Log`, and relay at most once (`N_relay <= 1`) with a clean-room brief rewritten from `Route` ([protocol.md](protocol.md)); if still blocked or hitting a Category 3 user-visible conflict, mark `Status: quarantined` with `Error` and `Route`.
-4. **Commit candidate snapshot and run `code-review`**:
-   - Commit all modified and newly created files on the branch, verify `git status --porcelain` is clean, and run the `code-review` skill against the base commit and Effective Spec (`Original Ticket/Spec ⊕ Accepted Amendments`).
-   - Address any hard Standards or Spec findings with another `tdd` slice and re-verify.
-5. **Close out and report**:
-   - If the tracker or user workflow uses GitHub PRs, invoke the [`pr`](../pr/SKILL.md) skill to write the PR body and open or update the PR.
-   - Mark the ticket `completed` (or `quarantined` if halted) via the **Task Progress Ledger Seam** ([hosts.md](hosts.md)) and report the branch/commit, three-tier verification status ([testing.md](testing.md)), `Accepted Amendments`, and any `quarantined` decision items.
+This orchestrator solves all four failure modes through four governing rules:
+1. **Seam-First Concurrency (via [`module-design`](../module-design/SKILL.md))**: Safe concurrency requires orthogonal module boundaries. Before dispatching parallel work—or whenever an interface is shallow or tangled—invoke [`module-design`](../module-design/SKILL.md) to obtain a **5-Line Module Blueprint**, lock shared interfaces on the `integration` baseline first, run **disjoint modules in parallel**, and queue **overlapping modules serially**.
+2. **Local Tight Loop (`1–3s`), Single Global Gate**: Individual slices and worktree subagents run only their 1:1 `1–3s` test file plus static typecheck (`Tight Loop`); cross-module `Blast Radius` and the full test suite run **once** at branch or `integration` closeout ([testing.md](testing.md)).
+3. **Unattended Bulkhead & Single-Writer Ledger**: Once the user gives go-ahead ("开工 / 执行" or `/develop`), execution runs **unattended without stopping mid-flight**. Non-breaking internal adaptations (Category 1) and approved blast-radius test syncs (Category 2) are decided autonomously and logged by the orchestrator (single writer) under `## Accepted Amendments & Internal Adaptations`; user-visible conflicts (Category 3) or branches still blocked after 1 clean-room relay (`two_strike_stop`) are isolated as `quarantined` while all unblocked work continues ([protocol.md](protocol.md)).
+4. **Stage-Gated Internal Disclosure**: Read private sibling files strictly at the stage that needs them:
+   - **[hosts.md](hosts.md)** — read **before dispatching subagents, launching `>45s` commands, or recording ledger checkpoints**;
+   - **[testing.md](testing.md)** — read **when configuring test scope (`Worktree` vs. `Single-Slice` vs. `Integration Gate`) or accelerating slow suites**;
+   - **[protocol.md](protocol.md)** — read **when processing 6-line subagent handoffs, recording amendments, or relaying `two_strike_stop` / `quarantined` branches**.
 
 ---
 
-### Branch B: Multi-Ticket Task Graph Flow (`SPEC.md` + Ticket Graph)
+## 1. Three-State Entry Contract & Request Sizing (`Normalize / Standard / Bailout`)
 
-1. **Read the task graph and initialize ledger**:
-   - Read `SPEC.md` and all tickets to determine blocking edges and the initial ready **frontier**.
-   - Initialize step tracking via the **Task Progress Ledger Seam** ([protocol.md](protocol.md), [hosts.md](hosts.md)).
-2. **Optional upfront exploration**:
-   - If tickets require codebase-wide or external doc discovery, dispatch a read-only exploration subagent via the **Subagent Dispatch Seam** ([hosts.md](hosts.md)) to write a shared markdown note outside the repo so implementers stay focused on code.
-3. **Create the `integration` branch and lock shared seams**:
-   - Create or switch to the `integration` branch.
-   - Land any shared interface definitions, types, or prefactoring blockers directly on `integration` first (consulting `codebase-design` if needed) so parallel frontier tickets branch from a locked seam.
-4. **Dispatch across the ready frontier**:
-   - Select ready tickets whose touched files and shared contracts do not overlap. Tickets touching the same files or the same shared contract must run serially.
-   - Dispatch each ticket through the **Subagent Dispatch Seam** ([hosts.md](hosts.md)) with a sparse pointer brief (`SPEC.md`, ticket path, `integration` base SHA, target file paths, and 1:1 `Tight Loop` test command).
-   - Require each worktree subagent to follow this exact lifecycle:
-     1. **Worktree baseline check**: before editing, verify the worktree branch is based on the latest `integration` branch (resetting onto `integration` if not) and that `git status --porcelain` is clean.
-     2. **Worktree `tdd` & static typecheck**: execute `tdd` in **Worktree Mode** (`Verification Scope = 1:1 Tight Loop test file in 1–3s + static typecheck if configured`, skipping cross-module `Blast Radius` and full-suite runs inside the worktree; see [testing.md](testing.md)), then commit its branch snapshot.
-     3. **Pre-report merge of `integration` tip**: before returning `Status: completed`, merge the latest `integration` branch tip into the ticket branch. If merge conflicts arise, invoke the [`resolving-merge-conflicts`](../resolving-merge-conflicts/SKILL.md) skill inside the worktree and re-run the 1:1 `Tight Loop` test file and static typecheck before emitting the 6-line handoff ([protocol.md](protocol.md)).
-5. **Process handoffs, digest amendments, and advance the frontier**:
-   - Read [protocol.md](protocol.md) for the exact transition rules on each 6-line handoff:
-     - **`Status: completed`**: merge the ticket branch into `integration` (fast-forward or clean merge since `integration` was already merged into the ticket branch). After the first ticket merges into `integration`, open a GitHub Draft PR against the base branch if the tracker or user workflow uses PRs. If `Route` or the ticket logs non-breaking adaptations (`amend-spec`), append them to `SPEC.md` under `## Accepted Amendments & Internal Adaptations` as the **single writer**. If an amendment alters a shared seam depended on by other tickets, pause unstarted downstream tickets to update their dispatch briefs, and instruct in-flight affected tickets to merge the latest `integration` tip before continuing. Record a checkpoint via the **Task Progress Ledger Seam** ([hosts.md](hosts.md)).
-     - **`Status: two_strike_stop`**: if the ticket has not been relayed yet (`N_relay == 0`), translate its `Route` (`use`, `need`, `drop`) into a positive instruction in a fresh clean-room brief (omitting failed diffs and stack traces) and dispatch **1** relay attempt. If `N_relay == 1` or the required capability is unavailable, mark the ticket `quarantined`.
-     - **`Status: quarantined` (or `Route: ask-user`)**: mark the ticket `quarantined` in the **Task Progress Ledger Seam**, blocking only its direct and transitive downstream dependents. Never halt the overall run: immediately continue dispatching all remaining unblocked frontier tickets.
-6. **Single integration full-suite gate & two-axis `code-review`**:
-   - Once every unblocked ticket has merged into `integration`, run the full test suite and static typecheck **once** on `integration` using the 4-worker LPT runner and **Long-Command Session Seam** in [testing.md](testing.md) and [hosts.md](hosts.md).
-   - Run `code-review` across the `integration` diff against the base branch and Effective Spec (`Original Spec ⊕ Accepted Amendments`). If cross-ticket regressions or review violations appear, fix them via an implementer subagent (or a `tdd` slice) and re-verify.
-7. **Close out and report**:
-   - Clean up all temporary worktrees.
-   - If a Draft PR is open (or PRs are used), invoke the [`pr`](../pr/SKILL.md) skill to update the PR body and mark the PR ready for review.
-   - Resolve completed tickets in the **Task Progress Ledger Seam** ([hosts.md](hosts.md)).
-   - Deliver the final report: `integration` branch and head SHA, three-tier verification summary (synthetic automated tests, live external APIs, real-machine UI, explicitly noting any unrun tier), `Accepted Amendments`, and a consolidated decision table for any `quarantined` tickets (`Error` + `Route`).
+1. **`Normalize` (establish clean boundaries at entry before coding)**:
+   - **1-Line Baseline (80% routine runs)**: When `SPEC.md` or the conversation has already locked the public interface, 3-state contract (`Standard / Normalize / Bailout`), dependency stand-in, and orthogonal file set, proceed directly to `Standard`.
+   - **Unsettled requirements or missing multi-ticket breakdown**: run the upfront specification chain ([`grilling`](../grilling/SKILL.md) $\to$ [`to-spec`](../to-spec/SKILL.md) $\to$ [`to-tickets`](../to-tickets/SKILL.md)) to crystallize `SPEC.md` and vertical-slice tickets.
+   - **Unsettled module seams, interface redesign, or concurrency partitioning**: invoke [`../module-design/SKILL.md`](../module-design/SKILL.md) (`Branch A`, `Operation A1/A2`) as a bounded subroutine to emit a **5-Line Module Blueprint** (`1. Modules & Scope`, `2. Public Interface & 3-State Seam`, `3. Hidden Internals & Adapters`, `4. Orthogonality & Concurrency`, `5. Tight Verification Gate (1–3s)`), then immediately resume here and consume Lines 1–3 & 5 for test seams and Line 4 for frontier partitioning.
+   - **Hard bug without a fast reproduction loop**: invoke [`diagnosing-bugs`](../diagnosing-bugs/SKILL.md) first to establish a `1–3s` red-capable command before attempting code fixes.
+   - **Homogeneous mechanical transform ($\ge 20$ independent files)**: normalize into a local worker script (`max_workers=4`) and dispatch subagents only for flagged exceptions.
+2. **`Standard` (route by module concurrency topology)**:
+   - **Single localized slice or small agreed change (no multi-ticket dependency graph)** $\to$ run **Branch A (Single-Slice Direct Flow)**.
+   - **Multi-ticket task graph (`SPEC.md` + tickets with blocking edges)** $\to$ run **Branch B (Seam-Locked Concurrent Flow)**.
+3. **`Bailout` (abort blocked slice cleanly with `Error` + `Route`)**:
+   - When a slice hits `two_strike_stop` (after 1 clean-room relay), misses a required capability, or hits a Category 3 user-visible conflict, halt that slice cleanly and emit a one-line `Error` and structured `Route` (`use | need | drop | amend-spec | ask-user`) per [protocol.md](protocol.md).
+
+---
+
+## 2. Execution Workflows
+
+### Branch A: Single-Slice Direct Flow (Fast Path, Zero Ticket Ceremony)
+
+1. **Lock the test seam**:
+   - Read `GLOSSARY.md` and relevant ADRs if present (if an existing ticket file was passed, mark it `in_progress`, otherwise work directly on the current branch without creating a temporary `.scratch/` ticket file).
+   - **1-Line Baseline**: When the public interface, 3-state contract, dependency stand-in, and `1–3s` test command are already locked in conversation or ticket, proceed directly to Step 2. When unsettled, invoke [`../module-design/SKILL.md`](../module-design/SKILL.md) (`Branch A`, `Operation A1/A2`) as a bounded subroutine returning a **5-Line Module Blueprint**, consume Lines 1–3 & 5 inline to lock the seam, and immediately continue here.
+2. **Drive red-green slices with [`tdd`](../tdd/SKILL.md) (`Single-Slice Mode`)**:
+   - Invoke [`tdd`](../tdd/SKILL.md) with `Caller Override: Verification Scope = Single-Slice Mode` ([testing.md](testing.md)):
+     - Run **only** the single 1:1 target test file (`1–3s` `Tight Loop`) during red-green cycles, plus static typecheck once green;
+     - Once all slices are green, run direct caller tests (`Blast Radius`) and a single closeout suite (using the **Long-Command Session Seam** in [hosts.md](hosts.md) if `> 45s`).
+   - **Mid-flight architectural deepening**: If implementation or test setup exposes pass-through layers, parameter threading, or sprawling `if/else` cascades (`Route: use module-design`), pause coding, invoke [`../module-design/SKILL.md`](../module-design/SKILL.md) (`Branch A`) as a bounded subroutine to deepen the seam first, and resume `tdd` inline.
+   - If implementation hits `two_strike_stop`, revert to the last green commit (`git reset --hard`) and follow the 1-relay / `quarantined` protocol in [protocol.md](protocol.md).
+3. **Commit candidate snapshot and run two-axis [`code-review`](../code-review/SKILL.md)**:
+   - Commit all modified and newly created files (`git status --porcelain` clean) and run [`code-review`](../code-review/SKILL.md) against the base commit and `Effective Spec` (`Original Request/Spec ⊕ Accepted Amendments`).
+   - Fix any hard Standards or Spec findings with another `tdd` slice (calling [`../module-design/SKILL.md`](../module-design/SKILL.md) (`Branch A`) if a finding requires structural deepening) and re-verify.
+4. **Close out and report**:
+   - If the workflow uses GitHub PRs, invoke [`pr`](../pr/SKILL.md) to write or update the PR, then complete the verification gate in `§3`.
+
+---
+
+### Branch B: Seam-Locked Concurrent Flow (`SPEC.md` + Multi-Ticket Graph)
+
+1. **Read task graph & lock shared seams**:
+   - Read `SPEC.md` and all tickets to determine blocking edges and the initial ready **frontier**; initialize tracking via the **Task Progress Ledger Seam** ([hosts.md](hosts.md)). If codebase-wide discovery is needed first, dispatch a read-only exploration subagent ([hosts.md](hosts.md)) to write a shared note outside the repo.
+   - Create or switch to the `integration` branch. **1-Line Baseline**: When `SPEC.md` and ticket boundaries already lock shared interfaces and disjoint file sets, proceed directly to Step 2. When shared seams or module orthogonality are unsettled, invoke [`../module-design/SKILL.md`](../module-design/SKILL.md) (`Branch A`, `Operation A1/A2`) as a bounded subroutine returning a **5-Line Module Blueprint**, consume Lines 1–3 inline to land shared interface definitions on `integration` first, and consume Line 4 (`Orthogonality & Concurrency`) in Step 2 to partition the frontier.
+2. **Dispatch across the non-overlapping frontier ([hosts.md](hosts.md))**:
+   - Partition ready frontier tickets using Line 4 (`Orthogonality & Concurrency`): dispatch tickets with **disjoint files and seams in parallel**, and queue tickets touching the **same files or shared contract serially**.
+   - Read [hosts.md](hosts.md) and dispatch each ready ticket through the **Subagent Dispatch Seam** with a sparse pointer brief (`SPEC.md`, ticket path, `integration` base SHA, target files, and `Caller Override: Verification Scope = Worktree Mode [1–3s Tight Loop + static typecheck only], Return = 6-line handoff`).
+   - Require each worktree subagent to follow this exact 3-step lifecycle:
+     1. **Baseline check**: confirm the worktree branch is based on the latest `integration` tip and `git status --porcelain` is clean.
+     2. **Worktree `tdd` & static typecheck**: execute [`tdd`](../tdd/SKILL.md) in **Worktree Mode** ([testing.md](testing.md): run only the 1:1 `1–3s` test file + static typecheck, skipping cross-module `Blast Radius` and full-suite runs; call [`../module-design/SKILL.md`](../module-design/SKILL.md) (`Branch A`) if local interface deepening is needed), then commit its branch snapshot.
+     3. **Pre-report merge of `integration` tip**: merge the latest `integration` tip into the ticket branch (invoking [`resolving-merge-conflicts`](../resolving-merge-conflicts/SKILL.md) if conflicts arise, then re-running the 1:1 `Tight Loop` test and static typecheck) and emit the 6-line handoff ([protocol.md](protocol.md)).
+3. **Process handoffs, digest amendments & advance frontier ([protocol.md](protocol.md))**:
+   - Read [protocol.md](protocol.md) to handle each 6-line handoff:
+     - **`Status: completed`**: merge the ticket branch into `integration` (open a Draft PR after the first merge if PRs are used), append any `Route: amend-spec` rows to `SPEC.md` under `## Accepted Amendments & Internal Adaptations` as **single writer**, propagate shared-seam updates if any, record a ledger checkpoint ([hosts.md](hosts.md)), and dispatch newly unblocked frontier tickets.
+     - **`Status: two_strike_stop`** (including `Route: use module-design`): if `N_relay == 0`, rewrite `Route` as a positive instruction in a fresh clean-room brief (omitting failed diffs/stack traces) and dispatch **1** relay attempt; if `N_relay == 1` or missing a capability, mark `quarantined`.
+     - **`Status: quarantined` (`Route: ask-user`)**: mark `quarantined` in the ledger, block only its direct/transitive dependents, and immediately continue dispatching all remaining unblocked frontier tickets.
+4. **Single integration gate, two-axis `code-review` & closeout ([testing.md](testing.md))**:
+   - Once all unblocked tickets merge into `integration`, read [testing.md](testing.md) and run the full test suite and static typecheck **once** on `integration` (using the 4-worker LPT runner and **Long-Command Session Seam** in [hosts.md](hosts.md) if `> 45s`).
+   - Run [`code-review`](../code-review/SKILL.md) across the `integration` diff against the base branch and `Effective Spec` (`Original Spec ⊕ Accepted Amendments`). Fix any cross-ticket regressions or review violations via a `tdd` slice (calling [`../module-design/SKILL.md`](../module-design/SKILL.md) (`Branch A`) if structural deepening is needed) and re-verify.
+   - Clean up temporary worktrees, update the PR via [`pr`](../pr/SKILL.md) if used, resolve completed tickets in the **Task Progress Ledger Seam** ([hosts.md](hosts.md)), and complete the verification gate in `§3`.
+
+---
+
+## 3. Completion Criterion & Verification Gate (`Recency Peak`)
+
+Before declaring `develop` (Branch A or Branch B) complete and presenting the final report to the user, verify all 4 completion gates:
+1. **Clean Git & Committed Snapshot**: `git status --porcelain` is empty, temporary worktrees are cleaned up, and the target branch or `integration` head commit SHA is recorded.
+2. **Three-Tier Verification Summary ([testing.md](testing.md))**: Report exact outcomes across `Tier 1 (Synthetic / Automated Tests + Static Typecheck)`, `Tier 2 (Live External API / Tunnel Integration)`, and `Tier 3 (Real-Machine UI / Desktop Interaction)`, marking any unrun tier explicitly as `Not run (<reason>)`.
+3. **Two-Axis `code-review` Clean**: Both `Standards` and `Spec` review axes report zero unresolved violations against `Effective Spec` (`Original Spec ⊕ Accepted Amendments`).
+4. **Consolidated Ledger & Decision Tables ([protocol.md](protocol.md))**: Include the `Accepted Amendments & Internal Adaptations` table (Categories 1 & 2) and, if any slice or ticket was quarantined, a consolidated `Quarantined Decisions` table (`Ticket/Slice`, `Error`, `Route: ask-user <decision>`) for user resolution.

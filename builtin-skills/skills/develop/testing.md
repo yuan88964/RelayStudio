@@ -1,6 +1,6 @@
 # Testing Cadence, Long-Command Sessions, and Slow-Test Acceleration
 
-Internal testing reference for the `develop` module. It defines how `develop` fills the **Verification Scope** and **Tight-Loop Command** seams of the `tdd` skill across single-slice and multi-ticket execution.
+> **Unified Rules**: See [SKILL.md](SKILL.md) for the top-level `develop` orchestration spine (`Branch A / B`) and completion gates. Internal testing reference defining how `develop` fills the **Verification Scope** and **Tight-Loop Command** seams across single-slice and multi-ticket execution.
 
 ## 1. Three-Tier Test Cadence (Eliminating Concurrent Redundancy)
 
@@ -26,9 +26,9 @@ To prevent $N$ concurrent worktree subagents from redundantly running the same c
 
 Web hosts and tool bridges enforce a ~60–120s single-call streaming timeout. A transport timeout does **not** mean the local command failed.
 
-1. **Pre-empt the 60s deadline via the Long-Command Session Seam**: Any command or test batch expected to take `> 45s` must be launched asynchronously in a background session via the host's **Long-Command Session Seam** ([hosts.md](hosts.md)), capturing the returned background session ID.
+1. **Pre-empt the 60s deadline via the Long-Command Session Seam**: Any command or test batch expected to take `> 45s` must be launched asynchronously in a background session via the host's **Long-Command Session Seam** (`hosts.md`), capturing the returned background session ID.
 2. **Observe the existing session before retrying**: After any timeout, EOF, or stream disconnect:
-   - Query the existing background session via the host's session observation tool ([hosts.md](hosts.md)) first.
+   - Query the existing background session via the host's session observation tool (`hosts.md`) first.
    - If the command is still running in the background session, wait and poll its status until completion rather than starting a duplicate process.
    - If the session already completed for the current candidate commit, reuse its exit status and output directly.
    - Re-run only after confirming the previous session terminated without completing.
@@ -54,3 +54,5 @@ At the close of `develop` (Branch A or Branch B), report verification explicitly
 2. **Tier 2 (Live External API / Tunnel Integration)**: real network/tunnel verification if applicable.
 3. **Tier 3 (Real-Machine UI / Desktop Interaction)**: live UI or browser verification if applicable.
 Explicitly mark any unrun tier as `Not run (<reason>)` rather than implying full coverage.
+
+**Return to Caller**: Apply the selected test cadence (`Worktree`, `Single-Slice`, or `Integration Gate`) and 3-tier verification reporting and return to [SKILL.md](SKILL.md) (`§2` & `§3`).

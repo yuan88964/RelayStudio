@@ -1,5 +1,7 @@
 # Flowcharts (`flowchart TB` / `LR`)
 
+> **Unified Rules**: See [SKILL.md](../SKILL.md) (§2.2) for node scale (`5–15` core nodes), `subgraph` nesting (`<= 1` level; `0` in Novak/Commutative views), and `style SubgraphID` header formatting.
+
 Use `flowchart TB` (or `LR` for shallow trees) when illustrating **C4 Level 2/3 Architecture Contracts**, **James Reason / SRE Swiss Cheese Fault Barriers**, **Novak Proposition Concept Maps**, or **Mathematical Commutative Diagrams**.
 
 ## 1. Semantic Node Shapes by Role (Organic Granularity)
@@ -23,7 +25,6 @@ Match node syntax and line count to its structural role rather than forcing ever
 | **Highlighted Core Path / Breach** | `A ==>|"关键变换 / 故障穿透"| B` | Dominant derivation path or fault penetration path |
 | **Async Callback / Blocked Intuition / Cross-link** | `A -.->|"异步通知 / 受阻直觉"| B` | Webhook callback, feedback loop, or blocked naive path |
 
-## 3. Scale & Subgraph Discipline (C4 & arc42 Rules)
+---
 
-- Control single-diagram complexity to **5–15 core nodes** and **at most 1 level of `subgraph`** (`Whitebox contains Blackboxes`); use **0 `subgraph` boxes** in Novak concept maps and mathematical commutative diagrams.
-- Keep `style SubgraphID` free of `font-weight:bold` so SVG header text width is measured accurately without right-edge clipping.
+**Return to Caller**: Return with the selected `flowchart` node and edge conventions to [SKILL.md](../SKILL.md) (§2 & §5) to complete single-track artifact delivery, then resume the calling host workflow.

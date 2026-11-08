@@ -1,74 +1,63 @@
 ---
 name: domain-modeling
 description: Build and sharpen a project's domain model. Use when discussing codebase terminology, writing or editing a GLOSSARY.md, or recording or editing an ADR.
+metadata:
+  upstream: mattpocock/skills
+  upstream-path: skills/engineering/domain-modeling/SKILL.md
+  upstream-commit: 4ae2317ddb22b046e26455e4f9c9b3aaaf62212d
+  local-adaptation: "2026-11-07"
 ---
 
-# Domain Modeling
+# Domain Modeling (`domain-modeling`)
 
-Actively build and sharpen the project's domain model as you design. This is the *active* discipline: challenging terms, inventing edge-case scenarios, and writing the glossary and decisions down the moment they crystallise. (Merely *reading* `GLOSSARY.md` for vocabulary is not this skill: that's a one-line habit any skill can do. This skill is for when you're changing the model, not just consuming it.)
+Shared domain-modeling subroutine for sharpening codebase vocabulary, maintaining `GLOSSARY.md`, and recording load-bearing Architecture Decision Records (`docs/adr/`). Merely reading `GLOSSARY.md` is a 1-line baseline habit inside every skill; invoke `domain-modeling` when creating, challenging, or updating domain terms or ADRs during design (`wayfinder`, `improve-codebase-architecture`, `to-spec`, `teach`, or direct user invocation).
 
-## File structure
+- **`Standard` (Single-context repo with resolved domain term or trade-off)**: Update `/GLOSSARY.md` inline via [GLOSSARY-FORMAT.md](GLOSSARY-FORMAT.md) or record an ADR under `/docs/adr/` via [ADR-FORMAT.md](ADR-FORMAT.md), then emit the **Glossary / ADR Delta** (`§3`).
+- **`Normalize` (Missing files or multi-context repo)**: Create `GLOSSARY.md` or `docs/adr/` lazily only when the first term or ADR is ready to write; if `/GLOSSARY-MAP.md` exists at the root, route the update to the matching bounded context (`src/<context>/GLOSSARY.md` and `src/<context>/docs/adr/`).
+- **`Bailout` (General programming concept or easily reversible implementation detail)**: Skip writing to `GLOSSARY.md` or `docs/adr/` and return `No domain-model write needed (<reason>)` to the calling workflow.
 
-Most repos have a single context:
+---
 
-```
-/
-├── GLOSSARY.md
-├── docs/
-│   └── adr/
-│       ├── 0001-event-sourced-orders.md
-│       └── 0002-postgres-for-write-model.md
-└── src/
-```
+## 1. Repository Layout (Single-Context vs. Multi-Context)
 
-If a `GLOSSARY-MAP.md` exists at the root, the repo has multiple contexts. The map points to where each one lives:
-
-```
-/
-├── GLOSSARY-MAP.md
-├── docs/
-│   └── adr/                          ← system-wide decisions
-├── src/
-│   ├── ordering/
-│   │   ├── GLOSSARY.md
-│   │   └── docs/adr/                 ← context-specific decisions
-│   └── billing/
-│       ├── GLOSSARY.md
-│       └── docs/adr/
+```text
+Single-Context Repo (Default):          Multi-Context Repo (When GLOSSARY-MAP.md Exists):
+/                                       /
+├── GLOSSARY.md                         ├── GLOSSARY-MAP.md
+├── docs/adr/                           ├── docs/adr/                     ← system-wide ADRs
+│   ├── 0001-event-sourced-orders.md    └── src/
+│   └── 0002-postgres-write-model.md        ├── ordering/
+└── src/                                    │   ├── GLOSSARY.md
+                                            │   └── docs/adr/             ← context-local ADRs
+                                            └── billing/
+                                                ├── GLOSSARY.md
+                                                └── docs/adr/
 ```
 
-Create files lazily: only when you have something to write. If no `GLOSSARY.md` exists, create one when the first term is resolved. If no `docs/adr/` exists, create it when the first ADR is needed.
+---
 
-## During the session
+## 2. Five-Step Domain Modeling Operator
 
-### Challenge against the glossary
+Apply these five moves inline as concepts crystallize during conversation or architecture review:
 
-When the user uses a term that conflicts with the existing language in `GLOSSARY.md`, call it out immediately. "Your glossary defines 'cancellation' as X, but you seem to mean Y. Which is it?"
+1. **Challenge conflicts against `GLOSSARY.md`**: When a term contradicts an existing definition in `GLOSSARY.md`, surface the conflict immediately (*"Your glossary defines `Cancellation` as X, whereas here it means Y—which should be canonical?"*).
+2. **Sharpen overloaded language**: When a vague term (`account`, `item`, `record`, `manager`) covers distinct domain concepts, propose distinct canonical names and list the rejected synonyms under `_Avoid_`.
+3. **Stress-test boundaries with concrete edge scenarios**: Invent specific boundary scenarios (e.g., partial order cancellation after shipment dispatch) and cross-reference against current code so concept boundaries are exact.
+4. **Update `GLOSSARY.md` inline ([GLOSSARY-FORMAT.md](GLOSSARY-FORMAT.md))**: Write resolved domain definitions immediately using pure domain language (what the concept *is* in the business domain, keeping implementation details, schemas, and file paths out of `GLOSSARY.md`).
+5. **Offer ADRs selectively ([ADR-FORMAT.md](ADR-FORMAT.md))**: Propose an ADR in `docs/adr/NNNN-slug.md` **only when all 3 criteria hold**:
+   - **Hard to reverse**: changing course later carries high migration cost;
+   - **Surprising without context**: a future reader would wonder *"why did they do it this way?"*;
+   - **Result of a real trade-off**: genuine alternatives existed and one was chosen for load-bearing reasons.
 
-### Sharpen fuzzy language
+---
 
-When the user uses vague or overloaded terms, propose a precise canonical term. "You're saying 'account': do you mean the Customer or the User? Those are different things."
+## 3. Subroutine Output & Return Contract (`Recency Peak`)
 
-### Discuss concrete scenarios
+Complete the domain-modeling pass by emitting a concise **Glossary / ADR Delta**:
 
-When domain relationships are being discussed, stress-test them with specific scenarios. Invent scenarios that probe edge cases and force the user to be precise about the boundaries between concepts.
+```text
+1. Glossary Updates: <path to GLOSSARY.md + added/updated canonical terms and _Avoid_ aliases, or "none">
+2. ADR Updates: <path to docs/adr/NNNN-slug.md + 1-line decision summary, or "none (criteria not met)">
+```
 
-### Cross-reference with code
-
-When the user states how something works, check whether the code agrees. If you find a contradiction, surface it: "Your code cancels entire Orders, but you just said partial cancellation is possible. Which is right?"
-
-### Update GLOSSARY.md inline
-
-When a term is resolved, update `GLOSSARY.md` right there. Don't batch these up: capture them as they happen. Use the format in [GLOSSARY-FORMAT.md](./GLOSSARY-FORMAT.md).
-
-`GLOSSARY.md` should be totally devoid of implementation details. Do not treat `GLOSSARY.md` as a spec, a scratch pad, or a repository for implementation decisions. It is a glossary and nothing else.
-
-### Offer ADRs sparingly
-
-Only offer to create an ADR when all three are true:
-
-1. **Hard to reverse**: the cost of changing your mind later is meaningful
-2. **Surprising without context**: a future reader will wonder "why did they do it this way?"
-3. **The result of a real trade-off**: there were genuine alternatives and you picked one for specific reasons
-
-If any of the three is missing, skip the ADR. Use the format in [ADR-FORMAT.md](./ADR-FORMAT.md).
+**Immediate Return Rule**: Once the **Glossary / ADR Delta** is written to disk and summarized above, **this subroutine is complete**—immediately return control to the calling container (`wayfinder`, `improve-codebase-architecture`, `to-spec`, `teach`, or the active design session) at the exact step that invoked `domain-modeling`.

@@ -1,59 +1,28 @@
-# When to Mock
+# Boundary Port & Mocking Exemplars
 
-Mock at **system boundaries** only:
+> **Unified Rules**: See [SKILL.md](SKILL.md) (`§1`) and `module-design` (`Branch A, Operation A1`) for the 4-category dependency stand-in matrix (`In-process` real objects, `Local-substitutable` temp/in-memory adapters, `Remote but owned` ports & adapters, and `True external` boundary mocks) and constructor/parameter dependency injection.
 
-- External APIs (payment, email, etc.)
-- Databases (sometimes - prefer test DB)
-- Time/randomness
-- File system (sometimes)
+## Prefer SDK-Style Boundary Ports Over Generic Fetchers
 
-Don't mock:
-
-- Your own classes/modules
-- Internal collaborators
-- Anything you control
-
-## Designing for Mockability
-
-At system boundaries, design interfaces that are easy to mock:
-
-**1. Use dependency injection**
-
-Pass external dependencies in rather than creating them internally:
+At true external system boundaries (payment gateways, email providers, third-party HTTP APIs), define specific port functions for each domain operation rather than mocking a generic `fetch(endpoint, options)` client:
 
 ```typescript
-// Easy to mock
-function processPayment(order, paymentClient) {
-  return paymentClient.charge(order.total);
-}
-
-// Hard to mock
-function processPayment(order) {
-  const client = new StripeClient(process.env.STRIPE_KEY);
-  return client.charge(order.total);
-}
-```
-
-**2. Prefer SDK-style interfaces over generic fetchers**
-
-Create specific functions for each external operation instead of one generic function with conditional logic:
-
-```typescript
-// GOOD: Each function is independently mockable
+// GOOD: Each boundary operation is an explicit, independently mockable port method
 const api = {
-  getUser: (id) => fetch(`/users/${id}`),
-  getOrders: (userId) => fetch(`/users/${userId}/orders`),
-  createOrder: (data) => fetch('/orders', { method: 'POST', body: data }),
+  getUser: (id: string) => fetch(`/users/${id}`),
+  getOrders: (userId: string) => fetch(`/users/${userId}/orders`),
+  createOrder: (data: OrderInput) => fetch('/orders', { method: 'POST', body: JSON.stringify(data) }),
 };
 
-// BAD: Mocking requires conditional logic inside the mock
+// BAD: Mocking requires URL-matching conditional logic inside test setup
 const api = {
-  fetch: (endpoint, options) => fetch(endpoint, options),
+  fetch: (endpoint: string, options?: RequestInit) => fetch(endpoint, options),
 };
 ```
 
-The SDK approach means:
-- Each mock returns one specific shape
-- No conditional logic in test setup
-- Easier to see which endpoints a test exercises
-- Type safety per endpoint
+Why the SDK-style port keeps tests deep and maintainable:
+- Each test stub returns one deterministic shape with zero conditional `if (url === ...)` branching in test setup;
+- Call sites declare exactly which external capabilities they exercise;
+- Static typechecking enforces input/output contracts per operation at the seam.
+
+**Return to Caller**: Apply the SDK-style port pattern at true external boundaries and return to [SKILL.md](SKILL.md) (`§2`) to write the next vertical `RED → GREEN → REFACTOR` slice.

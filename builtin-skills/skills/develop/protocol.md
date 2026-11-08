@@ -1,12 +1,12 @@
 # Handoff Protocol, Change Digestion, and Ledger Seam
 
-Internal protocol reference for the `develop` module and its execution parts (`tdd`, `code-review`, `diagnosing-bugs`). All host adapters ([hosts.md](hosts.md)) consume this single canonical symbol set so models never translate between multiple vocabularies.
+> **Unified Rules**: See [SKILL.md](SKILL.md) for the top-level `develop` orchestration spine (`Branch A / B`) and completion gates. Internal protocol reference for `develop` and its execution parts (`tdd`, `code-review`, `diagnosing-bugs`); all host adapters (`hosts.md`) consume this single canonical symbol set.
 
 ## 1. Unattended Execution Rule & Canonical Status Vocabulary (Lowercase Only)
 
 Once the user authorizes execution ("开工 / 执行" or invokes `/develop`), execution runs **unattended without stopping to ask mid-flight** across both Branch A (single-slice) and Branch B (multi-ticket). Any question that would alter user-visible behavior or require missing credentials is recorded as `Status: quarantined` (`Route: ask-user <decision>`) so unblocked work continues to completion and all pending user decisions are presented together at the very end.
 
-Use these exact lowercase tokens across 6-line handoffs, ticket files, and the **Task Progress Ledger Seam** ([hosts.md](hosts.md)):
+Use these exact lowercase tokens across 6-line handoffs, ticket files, and the **Task Progress Ledger Seam** (`hosts.md`):
 
 | Token | Meaning | Where Used |
 | :--- | :--- | :--- |
@@ -96,14 +96,14 @@ When a tool call or command fails during execution, classify the signal before t
 | **Explicit safety, permission, or scope refusal** | Action is outside authorized bounds, not a code bug. | Stop the refused action immediately; diagnose within authorized scope or return `Route: ask-user <decision>`. |
 | **Missing parameter, syntax error, or non-unique target** | Local call typo or stale line context. | Fix the parameter or re-read surrounding lines; never widen permissions to force a write. |
 | **File content or version hash changed since read** | Write basis is stale due to concurrent edit. | Re-read current file state and merge cleanly; never overwrite blindly. |
-| **Transport timeout / EOF / stream disconnect (60–120s)** | Local process may still be running or already finished. | Inspect the active background session via the host's **Long-Command Session Seam** ([testing.md](testing.md), [hosts.md](hosts.md)); never immediately re-submit the same command. |
+| **Transport timeout / EOF / stream disconnect (60–120s)** | Local process may still be running or already finished. | Inspect the active background session via the host's **Long-Command Session Seam** (`testing.md`, `hosts.md`); never immediately re-submit the same command. |
 | **Exit code `0` but output violates target behavior** | Process exited cleanly without achieving the business goal. | Read the actual output artifact or test assertion and fix the logic. |
 
 ---
 
 ## 5. Task Progress Ledger Seam
 
-Progress tracking sits behind the **Task Progress Ledger Seam** owned exclusively by `develop` and mapped to concrete host adapters in [hosts.md](hosts.md):
+Progress tracking sits behind the **Task Progress Ledger Seam** owned exclusively by `develop` and mapped to concrete host adapters in `hosts.md`:
 
 1. **Lifecycle Synchronization**:
    - Register planned ticket steps at the start of `develop` (`pending` / `in_progress`).
@@ -113,3 +113,5 @@ Progress tracking sits behind the **Task Progress Ledger Seam** owned exclusivel
      `<中文阶段进展（含 7 位短 SHA）> || <正斜杠文件或提交指针>`
 3. **On-Disk Ticket Artifact**:
    - Regardless of whether the host provides an external ledger tool, always record `Accepted Amendments & Internal Adaptations` and the 3-line `Attempt Log` (`[1] tried`, `[2] error`, `[3] Route`) in each ticket markdown file so clean-room relays and `code-review` have a self-contained workspace record.
+
+**Return to Caller**: Apply the 6-line handoff, change digestion (`Categories 1–3`), and ledger rules and return to [SKILL.md](SKILL.md) (`§2` & `§3`) to advance the frontier or complete final verification.

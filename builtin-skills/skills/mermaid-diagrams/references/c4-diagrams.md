@@ -1,6 +1,6 @@
-# C4 Architecture Diagrams (C1 System Context, C2 Container, C3 Component)
+# C4 Macro Architecture Diagrams (C1 System Context & C2 Container Views)
 
-> **Unified Rules**: See [SKILL.md](../SKILL.md) for C4 zoom discipline (`C1`–`C3` stop at deep modules), arc42 blackbox/whitebox seam rules (`Whitebox contains Blackboxes`), and **Template 1 (C4 Level 3 Component / Deep Module View)**.
+> **Unified Rules**: See [SKILL.md](../SKILL.md) for C4 zoom discipline (`C1`–`C3` stop at deep modules), arc42 blackbox/whitebox seam rules (`Whitebox contains Blackboxes`), and **Template 1 (C4 Level 3 Component / Deep Module View)** inlined in `SKILL.md`.
 
 ---
 
@@ -27,13 +27,18 @@ flowchart TB
     EmailSys -.->|"④ 投递电子邮件通知至客户收件箱"| Customer
 ```
 
-![Simon Brown C4 Official Level 1 System Context Diagram](../../../参考资料/调研笔记/Diagram_Skills_Research/assets/01_C4_Official_L1_SystemContext.png)
+![Simon Brown C4 Official Level 1 System Context Diagram](../../../../参考资料/Diagram_Skills_Research/assets/01_C4_Official_L1_SystemContext.png)
 
 ---
 
 ## 2. Canonical C4 Level 2: Container View (Simon Brown's *Big Bank plc*)
 
-Open the target system as **1 single system boundary (`subgraph`)** to reveal its independently deployable runtime containers (Web UI, Mobile App, Backend API, Database), keeping each container's internal code hidden as a blackbox:
+Open the target system as **1 single system boundary (`subgraph`)** to reveal its independently deployable runtime containers (Web UI, Mobile App, Backend API, Database), keeping each container's internal code hidden as a blackbox.
+
+- **Container (`C2`) vs. Component (`C3`) & When a Shared Module Upgrades to a Container**:
+  1. **Shared root (`Module`)**: Both containers (`C2`) and components (`C3`) are modules (`Module`) that encapsulate an external interface and an internal implementation.
+  2. **Control-flow boundary (`Container` vs. `Component`)**: A **component (`C3`)** is an internal gear invoked on demand that finishes its job as soon as it returns an output to its caller; a **container (`C2`)** owns the main process control loop and routing rules (or an independent deployment boundary), invoking internal components, taking their outputs back, and continuing along its own main flow.
+  3. **When a general module becomes a container**: Extracting a general sub-module for reuse across multiple callers keeps it a **shared subroutine or internal adapter component (`C3`)** as long as it remains stateless and terminates upon returning its result (such as a shared library/skill or an on-demand helper CLI subprocess); it upgrades to an independent **shared container (`C2`)** only when it owns a long-running process or an independent persistent source of truth (`Single Source of Truth`) that other containers interact with across a boundary.
 
 ```mermaid
 flowchart TB
@@ -70,4 +75,8 @@ flowchart TB
     style SysBoundary fill:#FFFFFF,stroke:#2B6CB0,stroke-width:2px,stroke-dasharray: 6 4,color:#1E3A8A
 ```
 
-![Simon Brown C4 Official Level 2 Container Diagram](../../../参考资料/调研笔记/Diagram_Skills_Research/assets/02_C4_Official_L2_Containers.png)
+![Simon Brown C4 Official Level 2 Container Diagram](../../../../参考资料/Diagram_Skills_Research/assets/02_C4_Official_L2_Containers.png)
+
+---
+
+**Return to Caller**: Return with the selected C1/C2 macro view to [SKILL.md](../SKILL.md) (§2 & §5) to complete single-track artifact delivery, then resume the calling host workflow.

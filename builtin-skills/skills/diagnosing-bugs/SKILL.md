@@ -5,148 +5,100 @@ metadata:
   upstream: mattpocock/skills
   upstream-path: skills/engineering/diagnosing-bugs/SKILL.md
   upstream-commit: 4ae2317ddb22b046e26455e4f9c9b3aaaf62212d
-  local-adaptation: "2026-11-06"
+  local-adaptation: "2026-11-07"
 ---
 
-# Diagnosing Bugs
+# Diagnosing Bugs (`diagnosing-bugs`)
 
-A discipline for hard bugs. Skip phases only when explicitly justified.
+Six-phase diagnosis worker for hard bugs and performance regressions. Explore `GLOSSARY.md` and local ADRs first, and redact every secret (`<REDACTED>`) in commands, logs, and captured traces before quoting them.
 
-When exploring the codebase, read `GLOSSARY.md` (if it exists) to get a clear mental model of the relevant modules, and check ADRs in the area you're touching.
+- **`Standard` (Reproducible symptom in local environment)**: Execute Phases 1–6 sequentially, advancing to the next phase only after the current phase's observable completion gate passes.
+- **`Normalize` (Auth-bearing traces or flaky / non-deterministic bugs)**: Strip credentials into environment variables (`<REDACTED>` in outputs) and quote only signal-bearing lines; for intermittent bugs (`1%` flake), loop the trigger `100×` with parallel stress or narrowed timing windows until the reproduction rate is high enough (`>= 50%`) to debug deterministically.
+- **`Bailout` (Unable to build a red-capable loop or missing unredacted access)**: Halt before Phase 2/3 hypothesis generation and emit `Error: unable to construct red-capable loop after trying <approaches>` + `Route: need <environment|artifact|instrumentation>: <specific access, HAR/log dump, or permission needed>` (or `Route: ask-user <question>`).
 
-## Redact
+---
 
-This skill has you show commands, outputs and captured artifacts. **Redact every secret first**: write `<REDACTED>` in its place. Build loops against env vars, so the credential stays in the environment rather than in what you show. Captured artifacts carry auth headers: quote only the lines that carry the signal.
+## Phase 1: Build a Tight, Red-Capable Feedback Loop
 
-If the redacted output is not enough to diagnose the bug, emit `Error` and `Route: need <artifact|credential>: <what unredacted signal is needed>` (or ask the user if interactive).
+**This is the core skill.** A **tight** (`1–3s`), **red-capable** pass/fail command that reliably goes red on _this specific bug_ makes bisection, hypothesis testing, and verification mechanical.
 
-## Phase 1: Build a feedback loop
+### 10 Loop Construction Patterns (Try from Fastest to Broadest)
 
-**This is the skill.** Everything else is mechanical. If you have a **tight** pass/fail signal for the bug (one that goes red on _this_ bug), you will find the cause; bisection, hypothesis-testing, and instrumentation all just consume it. If you don't have one, no amount of staring at code will save you.
-
-Spend disproportionate effort here. **Be aggressive. Be creative. Refuse to give up.**
-
-### Ways to construct one, in roughly this order
-
-1. **Failing test** at whatever seam reaches the bug: unit, integration, e2e.
+1. **Failing test** at the closest public seam that reaches the bug (unit, integration, e2e).
 2. **Curl / HTTP script** against a running dev server.
-3. **CLI invocation** with a fixture input, diffing stdout against a known-good snapshot.
-4. **Headless browser script** (Playwright / Puppeteer) that drives the UI and asserts on DOM/console/network.
-5. **Replay a captured trace.** Save a real network request / payload / event log to disk; replay it through the code path in isolation.
-6. **Throwaway harness.** Spin up a minimal subset of the system (one service, mocked deps) that exercises the bug code path with a single function call.
-7. **Property / fuzz loop.** If the bug is "sometimes wrong output", run 1000 random inputs and look for the failure mode.
-8. **Bisection harness.** If the bug appeared between two known states (commit, dataset, version), automate "boot at state X, check, repeat" so you can `git bisect run` it.
-9. **Differential loop.** Run the same input through old-version vs new-version (or two configs) and diff outputs.
-10. **HITL bash script.** Last resort. If a human must click, drive _them_ with `scripts/hitl-loop.template.sh` so the loop is still structured. Captured output feeds back to you.
+3. **CLI invocation** with fixture input, diffing stdout against a known-good snapshot.
+4. **Headless browser script** (Playwright) driving UI and asserting on DOM/console/network.
+5. **Captured trace replay** feeding a saved network payload or event log into the code path in isolation.
+6. **Throwaway minimal harness** spinning up one module with boundary stand-ins via a single call.
+7. **Property / fuzz loop** running `1000` seeded inputs to trigger intermittent wrong output.
+8. **Automated bisection harness** (`git bisect run <script>`) between a known-good and known-bad state.
+9. **Differential loop** running identical inputs through old vs. new versions and diffing outputs.
+10. **Structured HITL script** (`scripts/hitl-loop.template.sh`) when human UI interaction is unavoidable.
 
-Build the right feedback loop, and the bug is 90% fixed.
+### Tighten the Loop (`1–3s` Target)
+Once a raw loop exists, sharpen it before moving on:
+- **Speed**: Cache setup, skip unrelated initialization, and run only the single target check (`1–3s`).
+- **Determinism**: Pin time, seed RNG, isolate `tmp_path`, freeze network, or stress-loop flaky triggers (`100×`).
+- **Signal**: Assert on the user's exact symptom rather than generic exit status.
 
-### Tighten the loop
+### Phase 1 Gate (Required Before Phase 2)
+Phase 1 is complete only when you have **already run one command** (shown with redacted output) that is:
+- [ ] **Red-capable**: drives the bug path and fails on the user's exact symptom;
+- [ ] **Deterministic**: produces a consistent verdict (or pinned high flake rate);
+- [ ] **Fast (`1–3s`)** and **Agent-runnable** unattended.
+*(If no red-capable command can be constructed, trigger the `Bailout` contract above and stop.)*
 
-Treat the loop as a product. Once you have _a_ loop, **tighten** it:
+---
 
-- Can I make it faster? (Cache setup, skip unrelated init, narrow the test scope.)
-- Can I make it more deterministic? (Pin time, seed RNG, isolate filesystem, freeze network.)
-- Can I make the signal sharper? (Assert on the specific symptom, not "didn't crash".)
+## Phase 2: Reproduce & Minimise
 
-A 30-second flaky loop is barely better than no loop; a 2-second deterministic one is tight, a debugging superpower.
+Run the Phase 1 command, watch it go red, and shrink the reproduction to the **smallest load-bearing scenario** by cutting inputs, callers, config, and steps **one at a time** (re-running the loop after each cut).
 
-### Non-deterministic bugs
+### Phase 2 Gate (Required Before Phase 3)
+- [ ] The loop reproduces the exact failure mode the user reported across runs;
+- [ ] **Every remaining element is load-bearing**: removing any single remaining input or step makes the loop go green.
 
-The goal is not a clean repro but a **higher reproduction rate**. Loop the trigger 100×, parallelise, add stress, narrow timing windows, inject sleeps. A 50%-flake bug is debuggable; 1% is not, so keep raising the rate until it's debuggable.
+---
 
-### When you genuinely cannot build a loop (Stop & Transfer Contract)
+## Phase 3: Hypothesise (`3–5` Falsifiable Predictions)
 
-Stop and emit an explicit stop note (`Error`) and transfer suggestion (`Route`):
-- List what you tried (`Error: unable to construct red-capable loop after trying <approaches>`).
-- Emit `Route: need <environment|artifact|instrumentation>: <specific access, HAR/log dump, or permission needed>` or `Route: ask-user <question>`. Do **not** proceed to hypothesise without a loop.
+Generate **3–5 ranked hypotheses** before testing any single idea so attention stays unanchored. Express every hypothesis as a falsifiable prediction:
 
-### Completion criterion: a tight loop that goes red
+> **Format**: `"If <X> is the cause, then <changing Y> will make the Phase 1 loop go green / <changing Z> will shift the symptom to <W>."`
 
-Phase 1 is done when the loop is **tight** and **red-capable**: you can name **one command** (a script path, a test invocation, a curl) that you have **already run at least once** (show the invocation and its output, redacted), and that is:
+Share the ranked list briefly with the user when interactive (continuing immediately with the top-ranked hypothesis when running unattended).
 
-- [ ] **Red-capable**: it drives the actual bug code path and asserts the **user's exact symptom**, so it can go red on this bug and green once fixed. Not "runs without erroring"; it must be able to _catch this specific bug_.
-- [ ] **Deterministic**: same verdict every run (flaky bugs: a pinned, high reproduction rate, per above).
-- [ ] **Fast**: seconds, not minutes.
-- [ ] **Agent-runnable**: you can run it unattended; a human in the loop only via `scripts/hitl-loop.template.sh`.
+---
 
-If you catch yourself reading code to build a theory before this command exists, **stop: jumping straight to a hypothesis is the exact failure this skill prevents.** No red-capable command, no Phase 2.
+## Phase 4: Instrument One Variable at a Time
 
-## Phase 2: Reproduce + minimise
+Map each probe to a specific Phase 3 prediction and change **one variable at a time**:
+1. **Debugger / REPL inspection** at the boundary when supported.
+2. **Targeted boundary logs** tagged with a unique prefix (`[DEBUG-a4f2]`) at the exact seam that distinguishes hypotheses so cleanup is a single `grep`.
+3. **Performance regression branch**: Establish a baseline timing/profiler/query-plan measurement first, then bisect.
 
-Run the loop. Watch it go red as the bug appears.
+---
 
-Confirm:
+## Phase 5: Fix + Regression Test at a Deep Seam (`1-Line Baseline` vs. `module-design`)
 
-- [ ] The loop produces the failure mode the **user** described, not a different failure that happens to be nearby. Wrong bug = wrong fix.
-- [ ] The failure is reproducible across multiple runs (or, for non-deterministic bugs, reproducible at a high enough rate to debug against).
-- [ ] You have captured the exact symptom (error message, wrong output, slow timing) so later phases can verify the fix actually addresses it.
+Write the regression test from the minimised Phase 2 repro **before applying the fix**:
+- **1-Line Baseline (Existing deep seam)**: When the existing public interface already exercises the real multi-caller or stateful bug pattern in `1–3s`, turn the minimised repro directly into a failing test at that seam.
+- **Bounded Subroutine Call to [`../module-design/SKILL.md`](../module-design/SKILL.md) (`Branch A, Operation A1`)**: When the available seam is too shallow to reproduce the real call chain (or requires mocking internal collaborators), invoke [`../module-design/SKILL.md`](../module-design/SKILL.md) (`Branch A, Operation A1`) as a subroutine (or emit `Route: use module-design: deepen seam so bug pattern is testable`), consume Lines 2, 3, and 5 of the returned **5-Line Module Blueprint** inline to deepen the seam, and immediately resume Step 1 below:
+  1. Write the minimised repro as a failing test at the seam and watch it fail (`diff` against pristine state if you mutated code/fixtures to verify the test catches the bug).
+  2. Apply the minimal production fix and watch the test go green.
+  3. Re-run the Phase 1 feedback loop against the original un-minimised scenario.
 
-### Minimise
+---
 
-Once it's red, shrink the repro to the **smallest scenario that still goes red**. Cut inputs, callers, config, data, and steps **one at a time**, re-running the loop after each cut, and keep only what's load-bearing for the failure.
+## Phase 6: Cleanup Gate & Caller Override Seam (`Recency Peak`)
 
-Why bother: a minimal repro shrinks the hypothesis space in Phase 3 (fewer moving parts left to suspect) and becomes the clean regression test in Phase 5.
+### Phase 6 Completion Gate
+Verify all 5 checks before declaring diagnosis and fix complete:
+- [ ] Original un-minimised Phase 1 reproduction loop passes green;
+- [ ] Minimised regression test passes at the public seam (`1–3s`);
+- [ ] All `[DEBUG-...]` logs and throwaway harnesses are removed (`grep` verified clean);
+- [ ] Every secret in the diagnostic report/commit is replaced with `<REDACTED>`;
+- [ ] The confirmed root-cause hypothesis and falsifying evidence are stated concisely in the commit/PR or diagnostic report.
 
-Done when **every remaining element is load-bearing**: removing any one of them makes the loop go green.
-
-Do not proceed until you have reproduced **and** minimised.
-
-## Phase 3: Hypothesise
-
-Generate **3–5 ranked hypotheses** before testing any of them. Single-hypothesis generation anchors on the first plausible idea.
-
-Each hypothesis must be **falsifiable**: state the prediction it makes.
-
-> Format: "If <X> is the cause, then <changing Y> will make the bug disappear / <changing Z> will make it worse."
-
-If you cannot state the prediction, the hypothesis is a vibe: discard or sharpen it.
-
-**Show the ranked list to the user before testing.** They often have domain knowledge that re-ranks instantly ("we just deployed a change to #3"), or know hypotheses they've already ruled out. Cheap checkpoint, big time saver. Don't block on it; proceed with your ranking if the user is AFK or when running unattended.
-
-## Phase 4: Instrument
-
-Each probe must map to a specific prediction from Phase 3. **Change one variable at a time.**
-
-Tool preference:
-
-1. **Debugger / REPL inspection** if the env supports it. One breakpoint beats ten logs.
-2. **Targeted logs** at the boundaries that distinguish hypotheses.
-3. Never "log everything and grep".
-
-**Tag every debug log** with a unique prefix, e.g. `[DEBUG-a4f2]`. Cleanup at the end becomes a single grep. Untagged logs survive; tagged logs die.
-
-**Perf branch.** For performance regressions, logs are usually wrong. Instead: establish a baseline measurement (timing harness, `performance.now()`, profiler, query plan), then bisect. Measure first, fix second.
-
-## Phase 5: Fix + regression test
-
-Write the regression test **before the fix**, but only if there is a **correct seam** for it.
-
-A correct seam is one where the test exercises the **real bug pattern** as it occurs at the call site. If the only available seam is too shallow (single-caller test when the bug needs multiple callers, unit test that can't replicate the chain that triggered the bug), a regression test there gives false confidence.
-
-**If no correct seam exists, that itself is the finding.** Note it (`Route: use codebase-design: deepen seam so multi-caller bug pattern is testable`). The codebase architecture is preventing the bug from being locked down. Flag this for the next phase.
-
-If a correct seam exists:
-
-1. Turn the minimised repro into a failing test at that seam.
-2. Watch it fail. If you forced the red by mutating code or a fixture, `diff` against a pristine copy to prove the mutation landed before you trust it.
-3. Apply the fix.
-4. Watch it pass.
-5. Re-run the Phase 1 feedback loop against the original (un-minimised) scenario.
-
-## Phase 6: Cleanup
-
-Required before declaring done:
-
-- [ ] Original repro no longer reproduces (re-run the Phase 1 loop)
-- [ ] Regression test passes (or absence of seam is documented)
-- [ ] All `[DEBUG-...]` instrumentation removed (`grep` the prefix)
-- [ ] Throwaway prototypes deleted (or moved to a clearly-marked debug location)
-- [ ] The hypothesis that turned out correct is stated in the commit / PR message, so the next debugger learns
-
-## Container Seams (Unattended & Orchestrated Execution)
-
-| Seam | Caller Override (When Orchestrated) | Unattended Default (When Unspecified) |
-| :--- | :--- | :--- |
-| **1. Blocked / Missing Loop Exit** | Emit `Status: quarantined` (or `two_strike_stop`) with `Error` and `Route: need <environment\|artifact\|instrumentation>: <details>`. | Halt at Phase 1 and output `Error` + `Route` without guessing or hypothesising. |
-| **2. Diagnostic Evidence Destination** | Record exact file paths, line numbers, and falsified hypotheses in a dedicated diagnostic note or the ticket's `Attempt Log` (referenced by pointer). | Keep file/line diagnostic evidence in the diagnostic note or commit message; **never** paste source paths or code hunks into `SPEC.md`. |
+### Caller Override Seam
+When invoked by an upper orchestrator (such as `develop`), report blocked loops via the caller's 6-line handoff contract (`Error` + `Route`), keep file-path and line-number root-cause evidence in the ticket's `Attempt Log` or diagnostic note rather than `SPEC.md`, and immediately return control to the caller once the Phase 1 loop or Phase 6 fix is complete.

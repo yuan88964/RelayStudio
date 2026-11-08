@@ -32,3 +32,7 @@ flowchart TB
 ```
 
 ![Edge-to-Database Cloud Deployment Topology](../assets/11_cloud_deployment_topology.png)
+
+---
+
+**Return to Caller**: Return with the selected cloud topology template to [SKILL.md](../SKILL.md) (§2 & §5) to complete single-track artifact delivery, then resume the calling host workflow.

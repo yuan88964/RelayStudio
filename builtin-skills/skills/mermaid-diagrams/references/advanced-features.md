@@ -1,8 +1,8 @@
 # Semantic Styling & Tufte De-Boxing Syntax
 
-> **Unified Rules**: See [SKILL.md](../SKILL.md) for official node scale (`5–15` core nodes per diagram) and `subgraph` nesting boundaries.
+> **Unified Rules**: See [SKILL.md](../SKILL.md) (§2.2) for official node scale (`5–15` core nodes per diagram) and `subgraph` nesting boundaries.
 
-## 1. Semantic Color Palettes (`classDef`)
+## Semantic Color Palettes (`classDef`)
 
 Pair soft pastel backgrounds with saturated `1.5px–2px` borders and dark high-contrast text (`#1E3A8A` / `#14532D` / `#7F1D1D` / `#1A202C`) so roles and states are distinguishable at a glance without excessive outer `subgraph` boxes (Edward Tufte's *Layering & Separation*):
 
@@ -17,8 +17,11 @@ classDef extSys fill:#F8FAFC,stroke:#64748B,stroke-width:1.5px,stroke-dasharray:
 %% Swiss Cheese Fault Breach vs. Defense Barrier
 classDef hole fill:#FEE2E2,stroke:#DC2626,stroke-width:2px,color:#7F1D1D
 classDef barrier fill:#DCFCE7,stroke:#16A34A,stroke-width:2px,color:#14532D
+
+%% Subgraph boundary styling (keep free of font-weight:bold to prevent header label clipping):
+%% style SubgraphID fill:#FFFFFF,stroke:#2B6CB0,stroke-width:2px,stroke-dasharray: 6 4,color:#1E3A8A
 ```
 
-## 2. Subgraph Title Styling Note
+---
 
-When styling a `subgraph` boundary (`style SubgraphID fill:#FFFFFF,stroke:#2B6CB0,stroke-width:2px,color:#1E3A8A`), omit `font-weight:bold` so Mermaid's pre-measured `<foreignObject>` label box never clips the rightmost character.
+**Return to Caller**: Return with the selected semantic `classDef` palette to [SKILL.md](../SKILL.md) (§2 & §5) to complete single-track artifact delivery, then resume the calling host workflow.
