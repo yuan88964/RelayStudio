@@ -7013,6 +7013,7 @@ function Resolve-PublicMcpDohIpv4List {
         $proxyCandidates = if ($proxyRes -and $proxyRes.ProxyUrl) { @([string]$proxyRes.ProxyUrl, '') } else { @('') }
         $escapedHost = [Uri]::EscapeDataString($cleanHost)
         $dohEndpoints = @(
+            "https://dns.alidns.com/resolve?name=$escapedHost&type=A",
             "https://dns.google/resolve?name=$escapedHost&type=A",
             "https://cloudflare-dns.com/dns-query?name=$escapedHost&type=A"
         )
