@@ -13,7 +13,42 @@ if (-not (Test-Path -LiteralPath $cscPath)) {
     throw "未找到 .NET Framework 4.x C# 编译器: $cscPath"
 }
 if (-not (Test-Path -LiteralPath $wvCoreDll) -or -not (Test-Path -LiteralPath $wvWinFormsDll)) {
-    throw "未找到 WebView2 程序集: $webviewDir"
+    Write-Host "未检测到本地 WebView2 程序集，正在从 NuGet 自动下载 Microsoft.Web.WebView2..."
+    [IO.Directory]::CreateDirectory($webviewDir) | Out-Null
+    $tempZip = Join-Path ([IO.Path]::GetTempPath()) ('webview2-nuget-' + [Guid]::NewGuid().ToString('N') + '.zip')
+    try {
+        try {
+            [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+        } catch { }
+        Invoke-WebRequest -Uri 'https://www.nuget.org/api/v2/package/Microsoft.Web.WebView2' -OutFile $tempZip -UseBasicParsing
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        $zip = [IO.Compression.ZipFile]::OpenRead($tempZip)
+        try {
+            $wantedMap = @{
+                'lib/net462/Microsoft.Web.WebView2.Core.dll'     = (Join-Path $webviewDir 'Microsoft.Web.WebView2.Core.dll')
+                'lib/net462/Microsoft.Web.WebView2.WinForms.dll' = (Join-Path $webviewDir 'Microsoft.Web.WebView2.WinForms.dll')
+                'lib/net462/Microsoft.Web.WebView2.Wpf.dll'      = (Join-Path $webviewDir 'Microsoft.Web.WebView2.Wpf.dll')
+                'runtimes/win-x64/native/WebView2Loader.dll'     = (Join-Path $webviewDir 'WebView2Loader.dll')
+            }
+            foreach ($entry in $zip.Entries) {
+                $normEntry = ($entry.FullName -replace '\\', '/')
+                foreach ($wantedKey in $wantedMap.Keys) {
+                    if ([string]::Equals($normEntry, $wantedKey, [StringComparison]::OrdinalIgnoreCase)) {
+                        [IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $wantedMap[$wantedKey], $true)
+                    }
+                }
+            }
+        } finally {
+            $zip.Dispose()
+        }
+    } finally {
+        if (Test-Path -LiteralPath $tempZip) {
+            Remove-Item -LiteralPath $tempZip -Force -ErrorAction SilentlyContinue
+        }
+    }
+    if (-not (Test-Path -LiteralPath $wvCoreDll) -or -not (Test-Path -LiteralPath $wvWinFormsDll)) {
+        throw "未找到 WebView2 程序集: $webviewDir"
+    }
 }
 
 $smaAssembly = [System.Management.Automation.PowerShell].Assembly.Location
@@ -44,8 +79,8 @@ using Microsoft.Web.WebView2.WinForms;
 [assembly: AssemblyDescription("RelayStudio Desktop Workbench")]
 [assembly: AssemblyCompany("RelayStudio")]
 [assembly: AssemblyProduct("RelayStudio")]
-[assembly: AssemblyVersion("1.3.0.0")]
-[assembly: AssemblyFileVersion("1.3.0.0")]
+[assembly: AssemblyVersion("1.4.0.0")]
+[assembly: AssemblyFileVersion("1.4.0.0")]
 
 namespace RelayStudioLauncher
 {

@@ -79,8 +79,12 @@ try {
 
     $releaseText = [IO.File]::ReadAllText($buildReleasePath, [Text.Encoding]::UTF8)
     Assert-True ($releaseText -match 'HostBridge\.ps1') 'build-release.ps1 stages HostBridge.ps1'
+    Assert-True ($releaseText -match 'cloudflared\.exe') 'build-release.ps1 stages bin\cloudflared.exe'
     Assert-True ($releaseText -match 'webview2') 'build-release.ps1 stages bin\webview2\*.dll'
     Assert-True ($releaseText -match "'ui'") 'build-release.ps1 stages ui directory'
+
+    $launcherText = [IO.File]::ReadAllText($buildLauncherPath, [Text.Encoding]::UTF8)
+    Assert-True ($launcherText -match 'nuget\.org/api/v2/package/Microsoft\.Web\.WebView2') 'build-launcher.ps1 includes NuGet WebView2 auto-download fallback'
 
     $exePath = Join-Path $repoRoot 'RelayStudio.exe'
     Assert-True (Test-Path -LiteralPath $exePath) 'RelayStudio.exe exists in repository root'
@@ -440,6 +444,170 @@ try {
     Assert-Equal ([bool]$unknownRpc.Envelope.ok) $false 'Unknown RPC method returns ok=false cleanly'
     Assert-Equal $unknownRpc.Envelope.id 'err_check_1' 'Unknown RPC error preserves request id'
     Assert-True ([string]$unknownRpc.Envelope.error -match 'non_existent_rpc_method') 'Unknown RPC error includes method name'
+
+    # 7b. Unified Public Tunnel Pool RPCs, Simultaneous Runtime, Platform Binding & open_handover_window carrier
+    $expectedPubKeys = @(
+        'Id', 'Name', 'IsBuiltin', 'BaseUrl', 'EffectiveUrl', 'HasKey', 'MaskedKey',
+        'Mode', 'ModeLabel', 'Running', 'Status', 'HealthPhase', 'PublicRttMs',
+        'ErrorReason', 'ProcessId', 'UsedByPlatforms'
+    )
+    $initPubBundle = (Invoke-TestRpc -Method 'get_infra_bundle').Envelope.result
+    Assert-True ($initPubBundle.PSObject.Properties.Name -contains 'publicTunnels') 'InfraBundle includes publicTunnels array'
+    Assert-True ($initPubBundle.PSObject.Properties.Name -contains 'selectedPublicTunnelByPlatform') 'InfraBundle includes selectedPublicTunnelByPlatform'
+    Assert-True (@($initPubBundle.publicTunnels).Count -ge 1) 'publicTunnels contains built-in quick tunnel'
+    $builtinItem = $initPubBundle.publicTunnels[0]
+    Assert-Equal $builtinItem.Id 'pub_builtin_quick' 'First publicTunnels item is pub_builtin_quick'
+    Assert-Equal $builtinItem.Name '免费临时隧道' 'Built-in item Name is 免费临时隧道'
+    Assert-Equal ([bool]$builtinItem.IsBuiltin) $true 'Built-in item IsBuiltin=true'
+    foreach ($reqKey in $expectedPubKeys) {
+        Assert-True ($builtinItem.PSObject.Properties.Name -contains $reqKey) "PublicTunnelItem exposes exact PascalCase key: $reqKey"
+    }
+
+    # Built-in item cannot be removed
+    $remBuiltinRpc = Invoke-TestRpc -Method 'public_tunnel_item_remove' -Params @{ tunnelId = 'pub_builtin_quick' }
+    Assert-Equal ([bool]$remBuiltinRpc.Envelope.ok) $false 'public_tunnel_item_remove refuses built-in pub_builtin_quick'
+
+    # Save custom Cloudflare Named Tunnel item & custom Tailscale item (MUST NOT auto-start or leak PlainKey)
+    $pubSecretKey = 'eyJh SuperSecretNamedTunnelKey_NoSpaces' -replace '\s+', ''
+    $savePubCf = Invoke-TestRpc -Method 'public_tunnel_item_save' -Params @{
+        tunnelId   = ''
+        name       = '工作室专线'
+        baseUrl    = 'https://studio-cf.example.com'
+        startupKey = $pubSecretKey
+    }
+    Assert-True ([bool]$savePubCf.Envelope.ok) 'public_tunnel_item_save Cloudflare专线 ok=true'
+    Assert-True ($savePubCf.RawJson -notmatch '(?i)PlainKey') 'public_tunnel_item_save raw JSON contains NO PlainKey'
+    Assert-True (-not $savePubCf.RawJson.Contains($pubSecretKey)) 'public_tunnel_item_save redacts startupKey from bundle JSON'
+    $cfPubObj = @($savePubCf.Envelope.result.publicTunnels | Where-Object { $_.Name -eq '工作室专线' }) | Select-Object -First 1
+    Assert-True ($null -ne $cfPubObj) 'Custom Cloudflare专线 item created'
+    Assert-Equal ([bool]$cfPubObj.Running) $false 'public_tunnel_item_save NEVER auto-starts tunnel'
+    Assert-Equal $cfPubObj.Mode 'cloudflare_key' 'Mode inferred as cloudflare_key'
+    Assert-Equal $cfPubObj.ModeLabel 'Cloudflare 专线' 'ModeLabel is Cloudflare 专线'
+    Assert-Equal ([bool]$cfPubObj.HasKey) $true 'HasKey=true on saved Cloudflare专线'
+    Assert-Equal $cfPubObj.BaseUrl 'https://studio-cf.example.com/mcp' 'BaseUrl normalized with /mcp'
+
+    $getPubSec = Invoke-TestRpc -Method 'public_tunnel_item_get_secret' -Params @{ tunnelId = $cfPubObj.Id }
+    Assert-True ([bool]$getPubSec.Envelope.ok) 'public_tunnel_item_get_secret ok=true'
+    Assert-Equal $getPubSec.Envelope.result.secret $pubSecretKey 'public_tunnel_item_get_secret decrypts exact DPAPI startupKey'
+
+    $savePubTs = Invoke-TestRpc -Method 'public_tunnel_item_save' -Params @{
+        name    = 'Tailscale节点'
+        baseUrl = 'https://workstation.tail29988f.ts.net'
+    }
+    Assert-True ([bool]$savePubTs.Envelope.ok) 'public_tunnel_item_save Tailscale item ok=true'
+    $tsPubObj = @($savePubTs.Envelope.result.publicTunnels | Where-Object { $_.Name -eq 'Tailscale节点' }) | Select-Object -First 1
+    Assert-Equal $tsPubObj.Mode 'tailscale' 'Mode inferred as tailscale for *.ts.net without key'
+
+    # public_tunnel_detect_tailscale discovers *.ts.net from pool fallback in isolated mode
+    $detectTsRpc = Invoke-TestRpc -Method 'public_tunnel_detect_tailscale' -Params @{}
+    Assert-True ([bool]$detectTsRpc.Envelope.ok) 'public_tunnel_detect_tailscale envelope ok=true'
+    Assert-True ([bool]$detectTsRpc.Envelope.result.ok) 'public_tunnel_detect_tailscale result.ok=true'
+    Assert-Equal $detectTsRpc.Envelope.result.url 'https://workstation.tail29988f.ts.net/mcp' 'public_tunnel_detect_tailscale returns normalized *.ts.net/mcp URL'
+
+    # Platform binding & UsedByPlatforms filtered by EnabledPlatforms
+    [void](Invoke-TestRpc -Method 'capsule_add_platform' -Params @{ platform = 'gemini' })
+    $bindGemRpc = Invoke-TestRpc -Method 'platform_bind_public_tunnel' -Params @{
+        platform = 'gemini'
+        tunnelId = $cfPubObj.Id
+    }
+    Assert-True ([bool]$bindGemRpc.Envelope.ok) 'platform_bind_public_tunnel gemini ok=true'
+    Assert-Equal $bindGemRpc.Envelope.result.selectedPublicTunnelByPlatform.gemini $cfPubObj.Id 'selectedPublicTunnelByPlatform.gemini updated'
+    $cfAfterBind = @($bindGemRpc.Envelope.result.publicTunnels | Where-Object { $_.Id -eq $cfPubObj.Id }) | Select-Object -First 1
+    Assert-Equal ([bool]$cfAfterBind.Running) $false 'platform_bind_public_tunnel does NOT start tunnel'
+    Assert-True (@($cfAfterBind.UsedByPlatforms) -contains 'gemini') 'UsedByPlatforms includes enabled gemini'
+    Assert-True (@($cfAfterBind.UsedByPlatforms) -notcontains 'claude') 'UsedByPlatforms excludes disabled claude'
+
+    # Bind disabled claude to cfPubObj.Id -> still excluded from UsedByPlatforms until claude is added to EnabledPlatforms
+    $bindClaDisabled = Invoke-TestRpc -Method 'platform_bind_public_tunnel' -Params @{
+        platform = 'claude'
+        tunnelId = $cfPubObj.Id
+    }
+    $cfWhileClaDisabled = @($bindClaDisabled.Envelope.result.publicTunnels | Where-Object { $_.Id -eq $cfPubObj.Id }) | Select-Object -First 1
+    Assert-True (@($cfWhileClaDisabled.UsedByPlatforms) -notcontains 'claude') 'UsedByPlatforms excludes claude while claude is not in EnabledPlatforms'
+    $afterAddCla = Invoke-TestRpc -Method 'capsule_add_platform' -Params @{ platform = 'claude' }
+    $cfAfterAddCla = @($afterAddCla.Envelope.result.publicTunnels | Where-Object { $_.Id -eq $cfPubObj.Id }) | Select-Object -First 1
+    Assert-True ((@($cfAfterAddCla.UsedByPlatforms) -contains 'gemini') -and (@($cfAfterAddCla.UsedByPlatforms) -contains 'claude')) 'UsedByPlatforms includes both gemini and claude once both are enabled'
+
+    # Simultaneous connect of pub_builtin_quick AND cfPubObj.Id + legacy publicTunnel sync
+    $connBuiltinRpc = Invoke-TestRpc -Method 'public_tunnel_item_connect' -Params @{ tunnelId = 'pub_builtin_quick' }
+    Assert-True ([bool]$connBuiltinRpc.Envelope.ok) 'public_tunnel_item_connect pub_builtin_quick ok=true'
+    $connCfRpc = Invoke-TestRpc -Method 'public_tunnel_item_connect' -Params @{ tunnelId = $cfPubObj.Id }
+    Assert-True ([bool]$connCfRpc.Envelope.ok) 'public_tunnel_item_connect custom cloudflare_key ok=true'
+
+    $bothRunningBundle = $connCfRpc.Envelope.result
+    $runBuiltin = @($bothRunningBundle.publicTunnels | Where-Object { $_.Id -eq 'pub_builtin_quick' }) | Select-Object -First 1
+    $runCf = @($bothRunningBundle.publicTunnels | Where-Object { $_.Id -eq $cfPubObj.Id }) | Select-Object -First 1
+    $runTs = @($bothRunningBundle.publicTunnels | Where-Object { $_.Id -eq $tsPubObj.Id }) | Select-Object -First 1
+    Assert-True ([bool]$runBuiltin.Running -and $runBuiltin.EffectiveUrl -match '\.trycloudflare\.com/mcp$') 'pub_builtin_quick is Running simultaneously'
+    Assert-True ([bool]$runCf.Running -and $runCf.EffectiveUrl -eq 'https://studio-cf.example.com/mcp') 'Custom Cloudflare专线 is Running simultaneously'
+    Assert-Equal ([bool]$runTs.Running) $false 'Unstarted Tailscale item remains stopped'
+    Assert-Equal ([bool]$bothRunningBundle.publicTunnel.Running) $true 'Legacy publicTunnel.Running synced to true'
+    Assert-Equal $bothRunningBundle.publicTunnel.Url 'https://studio-cf.example.com/mcp' 'Legacy publicTunnel.Url prefers tunnel bound to enabled gemini/claude'
+
+    # one_click_reconnect respects desired_running == true (keeps pub_builtin_quick & cfPubObj running, leaves tsPubObj stopped)
+    $oneClickRpc = Invoke-TestRpc -Method 'one_click_reconnect' -Params @{}
+    Assert-True ([bool]$oneClickRpc.Envelope.ok) 'one_click_reconnect ok=true'
+    $tsAfterOneClick = @($oneClickRpc.Envelope.result.publicTunnels | Where-Object { $_.Id -eq $tsPubObj.Id }) | Select-Object -First 1
+    $cfAfterOneClick = @($oneClickRpc.Envelope.result.publicTunnels | Where-Object { $_.Id -eq $cfPubObj.Id }) | Select-Object -First 1
+    Assert-Equal ([bool]$cfAfterOneClick.Running) $true 'one_click_reconnect keeps desired_running=true item running'
+    Assert-Equal ([bool]$tsAfterOneClick.Running) $false 'one_click_reconnect respects desired_running=false and does not start tsPubObj'
+
+    # Disconnect pub_builtin_quick -> ONLY stops pub_builtin_quick, leaving cfPubObj running
+    $discBuiltinRpc = Invoke-TestRpc -Method 'public_tunnel_item_disconnect' -Params @{ tunnelId = 'pub_builtin_quick' }
+    Assert-True ([bool]$discBuiltinRpc.Envelope.ok) 'public_tunnel_item_disconnect pub_builtin_quick ok=true'
+    $bAfterDisc = @($discBuiltinRpc.Envelope.result.publicTunnels | Where-Object { $_.Id -eq 'pub_builtin_quick' }) | Select-Object -First 1
+    $cfAfterDisc = @($discBuiltinRpc.Envelope.result.publicTunnels | Where-Object { $_.Id -eq $cfPubObj.Id }) | Select-Object -First 1
+    Assert-Equal ([bool]$bAfterDisc.Running) $false 'pub_builtin_quick stopped after disconnect'
+    Assert-Equal ([bool]$cfAfterDisc.Running) $true 'cfPubObj remains running when pub_builtin_quick is disconnected'
+
+    # Remove cfPubObj -> stops it and rebinds gemini & claude back to pub_builtin_quick
+    $remCfRpc = Invoke-TestRpc -Method 'public_tunnel_item_remove' -Params @{ tunnelId = $cfPubObj.Id }
+    Assert-True ([bool]$remCfRpc.Envelope.ok) 'public_tunnel_item_remove custom tunnel ok=true'
+    Assert-Equal $remCfRpc.Envelope.result.selectedPublicTunnelByPlatform.gemini 'pub_builtin_quick' 'Removing bound tunnel rebinds gemini to pub_builtin_quick'
+    Assert-Equal $remCfRpc.Envelope.result.selectedPublicTunnelByPlatform.claude 'pub_builtin_quick' 'Removing bound tunnel rebinds claude to pub_builtin_quick'
+
+    # open_handover_window accepts carrier parameter and forwards it as BrowserProfile to Open-BridgeHandoverWindow
+    $capturedHandoverCarrier = ''
+    $capturedHandoverUrl = ''
+    function global:Open-BridgeHandoverWindow {
+        param([string]$Url, [string]$BrowserProfile = '', $Context = $null)
+        $script:capturedHandoverUrl = $Url
+        $script:capturedHandoverCarrier = $BrowserProfile
+    }
+    $prevIsoHandover = $script:HostContext.Isolated
+    try {
+        $script:HostContext.Isolated = $false
+        $handoverRpc = Invoke-TestRpc -Method 'open_handover_window' -Params @{
+            url     = 'https://gemini.google.com/app'
+            carrier = 'Edge:Profile 2'
+        }
+        Assert-True ([bool]$handoverRpc.Envelope.ok) 'open_handover_window with carrier ok=true'
+        Assert-Equal $script:capturedHandoverUrl 'https://gemini.google.com/app' 'open_handover_window forwards url'
+        Assert-Equal $script:capturedHandoverCarrier 'Edge:Profile 2' 'open_handover_window maps carrier parameter to BrowserProfile'
+    } finally {
+        $script:HostContext.Isolated = $prevIsoHandover
+        Remove-Item Function:\global:Open-BridgeHandoverWindow -ErrorAction SilentlyContinue
+    }
+
+    # Verify automatic migration through HostBridge on legacy DataRoot with shared *.ts.net across yuanyang & yuan
+    $migDataDir = Join-Path $tempRoot 'legacy-upgrade-data'
+    [IO.Directory]::CreateDirectory($migDataDir) | Out-Null
+    $legacyCtx = New-ConnectionContext -DataRoot $migDataDir -ReleaseRoot $repoRoot -Isolated
+    [void](Add-CapsulePlatform -Context $legacyCtx -Platform 'gemini')
+    [void](Add-CapsulePlatform -Context $legacyCtx -Platform 'claude')
+    $legProfs = Get-ConnectionProfiles $legacyCtx
+    $legGemId = ($legProfs.Profiles | Where-Object { $_.Platform -eq 'gemini' } | Select-Object -First 1).Id
+    $legClaId = ($legProfs.Profiles | Where-Object { $_.Platform -eq 'claude' } | Select-Object -First 1).Id
+    [void](Save-ConnectionProfile -Context $legacyCtx -ProfileId $legGemId -Name 'yuanyang' -Platform 'gemini' -Kind 'public_tunnel' -BaseUrl 'https://thinkbook16pl.tail29988f.ts.net/mcp' -SetActive)
+    [void](Save-ConnectionProfile -Context $legacyCtx -ProfileId $legClaId -Name 'yuan' -Platform 'claude' -Kind 'public_tunnel' -BaseUrl 'https://thinkbook16pl.tail29988f.ts.net/' -SetActive)
+    [void](Initialize-RelayHostBridge -BaseDirectory $repoRoot -DataRoot $migDataDir -Isolated -SkipBootServices)
+    $migBootBundle = (Invoke-TestRpc -Method 'get_fast_bootstrap').Envelope.result
+    Assert-Equal @($migBootBundle.publicTunnels).Count 2 'HostBridge migrates & deduplicates shared legacy Gemini/Claude URL into 1 custom item + builtin'
+    $migSharedItem = $migBootBundle.publicTunnels[1]
+    Assert-Equal $migSharedItem.Name 'yuanyang' 'HostBridge migration preserves custom profile name yuanyang'
+    Assert-Equal $migBootBundle.selectedPublicTunnelByPlatform.gemini $migSharedItem.Id 'Migrated gemini bound to shared item'
+    Assert-Equal $migBootBundle.selectedPublicTunnelByPlatform.claude $migSharedItem.Id 'Migrated claude bound to shared item'
+    [void](Initialize-RelayHostBridge -BaseDirectory $repoRoot -DataRoot $testDataRoot -Isolated -SkipBootServices)
 
     # 8. Isolated End-to-End RelayStudio.exe --smoke-test Verification
     $smokeStage = Join-Path $tempRoot 'smoke-app'

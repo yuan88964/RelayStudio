@@ -20,6 +20,11 @@ export interface AnchoredPopoverProps {
  *   - Initial open: `opacity: 0 -> 1`, `translateY(-7px) -> 0`, `scale(0.975) -> 1` over `180ms cubic-bezier(0.165, 0.84, 0.44, 1)` (`transform-origin: 15% 0%`).
  *   - Switching anchor while open (e.g. `ChatGPT ▾` -> `Gemini ▾` -> `+`): smoothly glides `left` across the top capsule.
  */
+// Cross-instance topbar handoff coordinates so switching between `⚙ 设置` and `TunnelHubPopover` glides smoothly
+let activePopoverOwner: symbol | null = null;
+let activePopoverCoords: { top: number; left: number } | null = null;
+let recentClosedPopover: { coords: { top: number; left: number }; closedAt: number } | null = null;
+
 export function AnchoredPopover({
   open,
   onClose,
@@ -30,6 +35,7 @@ export function AnchoredPopover({
   className = '',
   children,
 }: AnchoredPopoverProps) {
+  const instanceId = useRef<symbol>(Symbol('anchored-popover')).current;
   const panelRef = useRef<HTMLDivElement>(null);
   const wasOpenRef = useRef<boolean>(false);
   const prevAnchorRef = useRef<HTMLElement | null | undefined>(undefined);
@@ -42,7 +48,13 @@ export function AnchoredPopover({
   useLayoutEffect(() => {
     if (!open) {
       if (wasOpenRef.current) {
-        lastClosedAtRef.current = performance.now();
+        const now = performance.now();
+        lastClosedAtRef.current = now;
+        recentClosedPopover = { coords: lastCoordsRef.current, closedAt: now };
+        if (activePopoverOwner === instanceId) {
+          activePopoverOwner = null;
+          activePopoverCoords = null;
+        }
       }
       wasOpenRef.current = false;
       prevAnchorRef.current = undefined;
@@ -93,32 +105,55 @@ export function AnchoredPopover({
     };
 
     const next = computeTargetCoords();
-    const reopenedImmediately =
+    const now = performance.now();
+    const handoffCoords =
       !wasOpenRef.current &&
-      lastClosedAtRef.current > 0 &&
-      performance.now() - lastClosedAtRef.current < 160;
+      activePopoverOwner &&
+      activePopoverOwner !== instanceId &&
+      activePopoverCoords
+        ? activePopoverCoords
+        : !wasOpenRef.current &&
+            recentClosedPopover &&
+            now - recentClosedPopover.closedAt < 220
+          ? recentClosedPopover.coords
+          : !wasOpenRef.current &&
+              lastClosedAtRef.current > 0 &&
+              now - lastClosedAtRef.current < 160
+            ? lastCoordsRef.current
+            : null;
+
+    activePopoverOwner = instanceId;
+    activePopoverCoords = next;
 
     let rafId = 0;
 
     if (wasOpenRef.current) {
       if (anchorEl && prevAnchorRef.current && anchorEl !== prevAnchorRef.current) {
         const prevAnchor = prevAnchorRef.current;
-        const sameParent =
+        const sameHeaderBar =
+          Boolean(
+            prevAnchor.closest('.titlebar-left') &&
+              prevAnchor.closest('.titlebar-left') === anchorEl.closest('.titlebar-left')
+          ) ||
           Boolean(
             prevAnchor.closest('.capsule-bar') &&
               prevAnchor.closest('.capsule-bar') === anchorEl.closest('.capsule-bar')
-          ) || prevAnchor.parentElement === anchorEl.parentElement;
-        setIsGliding(sameParent);
+          ) ||
+          prevAnchor.parentElement === anchorEl.parentElement;
+        setIsGliding(sameHeaderBar);
       }
       setCoords(next);
       lastCoordsRef.current = next;
-    } else if (reopenedImmediately && Math.abs(lastCoordsRef.current.left - next.left) > 4) {
-      // Seamless horizontal glide even if parent toggled false -> true across segment click
+    } else if (handoffCoords && Math.abs(handoffCoords.left - next.left) > 4) {
+      // Seamless horizontal glide across segment clicks or Settings <-> TunnelHub jumps
       setIsGliding(true);
-      setCoords(lastCoordsRef.current);
+      setCoords(handoffCoords);
       rafId = window.requestAnimationFrame(() => {
         setCoords(next);
         lastCoordsRef.current = next;
+        if (activePopoverOwner === instanceId) {
+          activePopoverCoords = next;
+        }
       });
     } else {
       setIsGliding(false);
@@ -133,6 +168,9 @@ export function AnchoredPopover({
       const updated = computeTargetCoords();
       setCoords(updated);
       lastCoordsRef.current = updated;
+      if (activePopoverOwner === instanceId) {
+        activePopoverCoords = updated;
+      }
     };
 
     const ro =
@@ -162,16 +200,12 @@ export function AnchoredPopover({
       if (panelRef.current?.contains(target)) return;
       if (anchorEl && anchorEl.contains(target)) return;
 
-      // Preserve continuous mount & horizontal glide when clicking sibling buttons in the topbar tunnel capsule
+      // Preserve single-render topbar popover switching when clicking between `⚙` and `.capsule-bar` buttons
       if (
-        className.includes('tunnel-hub-popover') &&
+        (className.includes('tunnel-hub-popover') ||
+          className.includes('global-settings-popover')) &&
         target instanceof Element &&
-        Boolean(target.closest('button')) &&
-        Boolean(
-          (anchorEl?.closest('.capsule-bar') &&
-            anchorEl.closest('.capsule-bar') === target.closest('.capsule-bar')) ||
-            (anchorEl?.parentElement && anchorEl.parentElement.contains(target))
-        )
+        Boolean(target.closest('.capsule-bar button, .titlebar-settings-btn'))
       ) {
         return;
       }

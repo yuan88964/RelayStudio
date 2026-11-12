@@ -595,6 +595,91 @@ function Start-InteractiveHiddenCmd {
     return [pscustomobject]@{ ReturnValue = 0; ProcessId = [int]$proc.Id }
 }
 
+function Test-IsUsablePythonBinary {
+    param([string]$CandidatePath)
+    if (-not $CandidatePath -or -not $CandidatePath.Trim()) { return $false }
+    $clean = $CandidatePath.Trim()
+    if ($clean -like '*\Microsoft\WindowsApps\*' -or $clean -like '*/Microsoft/WindowsApps/*') {
+        return $false
+    }
+    try {
+        $fi = [IO.FileInfo]::new($clean)
+        if (-not $fi.Exists) { return $false }
+        if ($fi.Length -le 0) { return $false }
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+function Resolve-PythonExePath {
+    param(
+        $Settings = $null,
+        [string[]]$CandidatePathsOverride = $null,
+        [switch]$NoThrow
+    )
+    if ($null -ne $CandidatePathsOverride) {
+        foreach ($cand in $CandidatePathsOverride) {
+            if (Test-IsUsablePythonBinary $cand) {
+                return [IO.Path]::GetFullPath($cand)
+            }
+        }
+        if ($NoThrow) { return '' }
+        throw '未检测到可用的 Python 3.11+ 环境（已跳过微软商店空壳别名），请先安装官方 Python 3.11+ 并勾选 Add to PATH。'
+    }
+
+    if ($Settings -and $Settings.PSObject.Properties['python_path'] -and $Settings.python_path) {
+        $customPy = ([string]$Settings.python_path).Trim()
+        if (Test-IsUsablePythonBinary $customPy) {
+            return $customPy
+        }
+    }
+
+    foreach ($cmdObj in @(Get-Command python.exe -All -ErrorAction SilentlyContinue)) {
+        $src = if ($cmdObj.PSObject.Properties['Source'] -and $cmdObj.Source) { [string]$cmdObj.Source } elseif ($cmdObj.PSObject.Properties['Path'] -and $cmdObj.Path) { [string]$cmdObj.Path } else { '' }
+        if (Test-IsUsablePythonBinary $src) {
+            return $src
+        }
+    }
+
+    $globPatterns = New-Object 'System.Collections.Generic.List[string]'
+    if ($env:LOCALAPPDATA) {
+        [void]$globPatterns.Add((Join-Path $env:LOCALAPPDATA 'Programs\Python\Python*\python.exe'))
+    }
+    if (${env:ProgramFiles}) {
+        [void]$globPatterns.Add((Join-Path ${env:ProgramFiles} 'Python*\python.exe'))
+    }
+    if (${env:ProgramFiles(x86)}) {
+        [void]$globPatterns.Add((Join-Path ${env:ProgramFiles(x86)} 'Python*\python.exe'))
+    }
+    [void]$globPatterns.Add('C:\Python*\python.exe')
+    [void]$globPatterns.Add('D:\Python*\python.exe')
+
+    foreach ($pat in $globPatterns) {
+        $foundFiles = @(Get-ChildItem -Path $pat -File -ErrorAction SilentlyContinue | Sort-Object FullName -Descending)
+        foreach ($ff in $foundFiles) {
+            if (Test-IsUsablePythonBinary $ff.FullName) {
+                return $ff.FullName
+            }
+        }
+    }
+
+    foreach ($pyCmd in @(Get-Command py.exe -All -ErrorAction SilentlyContinue)) {
+        $src = if ($pyCmd.PSObject.Properties['Source'] -and $pyCmd.Source) { [string]$pyCmd.Source } elseif ($pyCmd.PSObject.Properties['Path'] -and $pyCmd.Path) { [string]$pyCmd.Path } else { '' }
+        if (Test-IsUsablePythonBinary $src) {
+            return $src
+        }
+    }
+
+    if ($NoThrow) { return '' }
+    throw '未检测到可用的 Python 3.11+ 环境（已跳过微软商店空壳别名），请先安装官方 Python 3.11+ 并勾选 Add to PATH。'
+}
+
+function Get-PythonLauncherPath {
+    param($Settings = $null)
+    return (Resolve-PythonExePath -Settings $Settings -NoThrow)
+}
+
 function Start-ReadOnlyShield {
     param($Context, $Settings, [string]$CoreEndpoint, [switch]$ForceRestart)
     if ($Context.Isolated) { throw '隔离检查禁止启动真实桥接内核。' }
@@ -627,12 +712,7 @@ function Start-ReadOnlyShield {
     if (Get-NetTCPConnection -State Listen -LocalPort $shieldPort -ErrorAction SilentlyContinue) {
         throw "本地桥接内核端口 $shieldPort 已被其他程序占用，请检查或关闭冲突进程。"
     }
-    $customPy = if ($Settings -and $Settings.PSObject.Properties['python_path'] -and $Settings.python_path -and (Test-Path -LiteralPath ([string]$Settings.python_path))) { [string]$Settings.python_path } else { '' }
-    $pythonCmd = Get-Command python.exe -ErrorAction SilentlyContinue
-    $pythonExe = if ($customPy) { $customPy } elseif ($pythonCmd) { $pythonCmd.Source } else {
-        $stdPy = Get-ChildItem -Path "$env:LOCALAPPDATA\Programs\Python\Python*\python.exe" -ErrorAction SilentlyContinue | Sort-Object FullName -Descending | Select-Object -First 1
-        if ($stdPy) { $stdPy.FullName } else { throw '找不到 Python 运行环境，无法启动本地桥接内核。' }
-    }
+    $pythonExe = Resolve-PythonExePath -Settings $Settings
     $logs = Join-Path $Context.DataRoot 'logs'
     [IO.Directory]::CreateDirectory($logs) | Out-Null
     $out = Join-Path $logs 'shield.out.log'; $err = Join-Path $logs 'shield.err.log'
@@ -6737,6 +6817,9 @@ function Clear-PublicDohIpCache {
 function Clear-PublicMcpTunnelLogCache {
     $script:PublicMcpTunnelLogCache = @{}
     $script:PublicMcpTunnelJsonCache = @{}
+    if ($null -ne $script:PublicTunnelItemRtCache) {
+        $script:PublicTunnelItemRtCache = @{}
+    }
     $script:PublicMcpTunnelLogCacheStats = [pscustomobject]@{
         Hits = 0
         Misses = 0
@@ -6753,10 +6836,87 @@ function Get-PublicMcpTunnelLogCacheStats {
     }
 }
 
+$script:PublicMcpDohDisableForTest = $false
+$script:PublicMcpSystemDnsOverride = $null
+$script:TailscaleClientPathOverride = $null
+$script:TailscaleControlPlaneIpsOverride = $null
+
+function Set-PublicMcpDnsTestOverrides {
+    param(
+        [bool]$DisableDoh = $false,
+        [scriptblock]$SystemDnsOverride = $null
+    )
+    $script:PublicMcpDohDisableForTest = $DisableDoh
+    $script:PublicMcpSystemDnsOverride = $SystemDnsOverride
+    Clear-PublicDohIpCache
+}
+
+function Set-TailscaleTestOverrides {
+    param(
+        $ClientPathOverride = $null,
+        $ControlPlaneIpsOverride = $null
+    )
+    $script:TailscaleClientPathOverride = $ClientPathOverride
+    $script:TailscaleControlPlaneIpsOverride = $ControlPlaneIpsOverride
+}
+
+function Resolve-CloudflaredClientPath {
+    param(
+        [string]$ClientPath = '',
+        $Context = $null,
+        [switch]$SkipScriptRootFallback
+    )
+    if ($ClientPath -and (Test-Path -LiteralPath $ClientPath)) {
+        return $ClientPath
+    }
+    if ($Context -and $Context.PSObject.Properties['ReleaseRoot'] -and $Context.ReleaseRoot) {
+        $relBin = Join-Path ([string]$Context.ReleaseRoot) 'bin\cloudflared.exe'
+        if (Test-Path -LiteralPath $relBin) {
+            return $relBin
+        }
+    }
+    if ((-not $SkipScriptRootFallback) -and $PSScriptRoot) {
+        $localBin = Join-Path $PSScriptRoot 'bin\cloudflared.exe'
+        if (Test-Path -LiteralPath $localBin) {
+            return $localBin
+        }
+    }
+    $cmd = Get-Command cloudflared.exe -ErrorAction SilentlyContinue
+    if ($cmd -and $cmd.Source -and (Test-Path -LiteralPath $cmd.Source)) {
+        return $cmd.Source
+    }
+    foreach ($folder in @(${env:ProgramFiles}, ${env:ProgramFiles(x86)})) {
+        if ($folder) {
+            $cand = Join-Path $folder 'cloudflared\cloudflared.exe'
+            if (Test-Path -LiteralPath $cand) {
+                return $cand
+            }
+        }
+    }
+    if ($env:LOCALAPPDATA) {
+        foreach ($wgRel in @(
+            'Microsoft\WinGet\Packages\*cloudflared*\cloudflared.exe',
+            'Microsoft\WinGet\Packages\*cloudflared*\*\cloudflared.exe'
+        )) {
+            $wgFullPat = Join-Path $env:LOCALAPPDATA $wgRel
+            $wgFound = Get-ChildItem -Path $wgFullPat -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+            if ($wgFound -and (Test-Path -LiteralPath $wgFound.FullName)) {
+                return $wgFound.FullName
+            }
+        }
+    }
+    return ''
+}
+
 function Resolve-TailscaleClientPath {
     param([string]$TailscalePath = '', $Context = $null)
     if ($TailscalePath -and (Test-Path -LiteralPath $TailscalePath)) {
         return $TailscalePath
+    }
+    if ($null -ne $script:TailscaleClientPathOverride) {
+        $ov = ([string]$script:TailscaleClientPathOverride).Trim()
+        if ($ov -and (Test-Path -LiteralPath $ov)) { return $ov }
+        return ''
     }
     if ($Context -and ($Context.Isolated -or ([string]$Context.DataRoot -match 'connection-test-'))) {
         return ''
@@ -6830,7 +6990,7 @@ function Resolve-PublicMcpDohIpv4List {
     param(
         [string]$HostName,
         $Context = $null,
-        [int]$TimeoutMs = 2000
+        [int]$TimeoutMs = 1200
     )
     if (-not $HostName) { return @() }
     $cleanHost = $HostName.Trim().TrimEnd('.').ToLowerInvariant()
@@ -6848,63 +7008,97 @@ function Resolve-PublicMcpDohIpv4List {
     try {
         [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
     } catch { }
-    $proxyRes = Resolve-EffectiveOutboundProxyEnv -Context $Context
-    $proxyCandidates = if ($proxyRes -and $proxyRes.ProxyUrl) { @([string]$proxyRes.ProxyUrl, '') } else { @('') }
-    $escapedHost = [Uri]::EscapeDataString($cleanHost)
-    $dohEndpoints = @(
-        "https://dns.google/resolve?name=$escapedHost&type=A",
-        "https://cloudflare-dns.com/dns-query?name=$escapedHost&type=A"
-    )
-    foreach ($dohUrl in $dohEndpoints) {
-        foreach ($pUrl in $proxyCandidates) {
-            $resp = $null
-            try {
-                $req = [Net.HttpWebRequest]::Create($dohUrl)
-                $req.Method = 'GET'
-                $req.Accept = 'application/dns-json'
-                $req.Timeout = $TimeoutMs
-                $req.ReadWriteTimeout = $TimeoutMs
-                if ($pUrl) {
-                    $req.Proxy = New-Object System.Net.WebProxy($pUrl)
-                } else {
-                    $req.Proxy = $null
-                }
-                $resp = $req.GetResponse()
-                $stream = $resp.GetResponseStream()
-                $reader = New-Object IO.StreamReader($stream, [Text.Encoding]::UTF8)
+    if (-not $script:PublicMcpDohDisableForTest) {
+        $proxyRes = Resolve-EffectiveOutboundProxyEnv -Context $Context
+        $proxyCandidates = if ($proxyRes -and $proxyRes.ProxyUrl) { @([string]$proxyRes.ProxyUrl, '') } else { @('') }
+        $escapedHost = [Uri]::EscapeDataString($cleanHost)
+        $dohEndpoints = @(
+            "https://dns.google/resolve?name=$escapedHost&type=A",
+            "https://cloudflare-dns.com/dns-query?name=$escapedHost&type=A"
+        )
+        foreach ($dohUrl in $dohEndpoints) {
+            foreach ($pUrl in $proxyCandidates) {
+                $resp = $null
                 try {
-                    $body = $reader.ReadToEnd()
-                } finally {
-                    $reader.Dispose()
-                }
-                if ($body) {
-                    $json = $body | ConvertFrom-Json
-                    if ($json -and $json.PSObject.Properties['Answer'] -and $json.Answer) {
-                        $validIps = New-Object 'System.Collections.Generic.List[string]'
-                        foreach ($ans in @($json.Answer)) {
-                            if ($ans -and $ans.PSObject.Properties['type'] -and [int]$ans.type -eq 1 -and $ans.PSObject.Properties['data'] -and $ans.data) {
-                                $candIp = ([string]$ans.data).Trim()
-                                if ((Test-IsPublicRoutableIpv4 $candIp) -and (-not $validIps.Contains($candIp))) {
-                                    [void]$validIps.Add($candIp)
+                    $req = [Net.HttpWebRequest]::Create($dohUrl)
+                    $req.Method = 'GET'
+                    $req.Accept = 'application/dns-json'
+                    $req.Timeout = $TimeoutMs
+                    $req.ReadWriteTimeout = $TimeoutMs
+                    if ($pUrl) {
+                        $req.Proxy = New-Object System.Net.WebProxy($pUrl)
+                    } else {
+                        $req.Proxy = $null
+                    }
+                    $resp = $req.GetResponse()
+                    $stream = $resp.GetResponseStream()
+                    $reader = New-Object IO.StreamReader($stream, [Text.Encoding]::UTF8)
+                    try {
+                        $body = $reader.ReadToEnd()
+                    } finally {
+                        $reader.Dispose()
+                    }
+                    if ($body) {
+                        $json = $body | ConvertFrom-Json
+                        if ($json -and $json.PSObject.Properties['Answer'] -and $json.Answer) {
+                            $validIps = New-Object 'System.Collections.Generic.List[string]'
+                            foreach ($ans in @($json.Answer)) {
+                                if ($ans -and $ans.PSObject.Properties['type'] -and [int]$ans.type -eq 1 -and $ans.PSObject.Properties['data'] -and $ans.data) {
+                                    $candIp = ([string]$ans.data).Trim()
+                                    if ((Test-IsPublicRoutableIpv4 $candIp) -and (-not $validIps.Contains($candIp))) {
+                                        [void]$validIps.Add($candIp)
+                                    }
                                 }
                             }
-                        }
-                        if ($validIps.Count -gt 0) {
-                            $resolvedArr = @($validIps.ToArray())
-                            $script:PublicDohIpCache[$cleanHost] = @{
-                                CachedAtUtc = [DateTime]::UtcNow
-                                Ips         = $resolvedArr
+                            if ($validIps.Count -gt 0) {
+                                $resolvedArr = @($validIps.ToArray())
+                                $script:PublicDohIpCache[$cleanHost] = @{
+                                    CachedAtUtc = [DateTime]::UtcNow
+                                    Ips         = $resolvedArr
+                                }
+                                return $resolvedArr
                             }
-                            return $resolvedArr
                         }
                     }
+                } catch {
+                } finally {
+                    if ($resp) { try { $resp.Dispose() } catch { } }
                 }
-            } catch {
-            } finally {
-                if ($resp) { try { $resp.Dispose() } catch { } }
             }
         }
     }
+
+    # Fall back to OS DNS filtered through Test-IsPublicRoutableIpv4 (rejects 198.18/15 Fake-IP, 100.64/10 CGNAT, loopback, RFC1918)
+    try {
+        $rawSysIps = @()
+        if ($script:PublicMcpSystemDnsOverride -is [scriptblock]) {
+            $rawSysIps = @(& $script:PublicMcpSystemDnsOverride $cleanHost | ForEach-Object { [string]$_ })
+        } else {
+            $dnsTask = [System.Net.Dns]::GetHostAddressesAsync($cleanHost)
+            if ($dnsTask.Wait([Math]::Max(800, $TimeoutMs))) {
+                foreach ($addr in @($dnsTask.Result)) {
+                    if ($null -ne $addr -and $addr.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork) {
+                        $rawSysIps += $addr.IPAddressToString
+                    }
+                }
+            }
+        }
+        $sysValid = New-Object 'System.Collections.Generic.List[string]'
+        foreach ($candSysIp in $rawSysIps) {
+            $trimmedSysIp = ([string]$candSysIp).Trim()
+            if ((Test-IsPublicRoutableIpv4 $trimmedSysIp) -and (-not $sysValid.Contains($trimmedSysIp))) {
+                [void]$sysValid.Add($trimmedSysIp)
+            }
+        }
+        if ($sysValid.Count -gt 0) {
+            $resolvedSysArr = @($sysValid.ToArray())
+            $script:PublicDohIpCache[$cleanHost] = @{
+                CachedAtUtc = [DateTime]::UtcNow
+                Ips         = $resolvedSysArr
+            }
+            return $resolvedSysArr
+        }
+    } catch { }
     return @()
 }
 
@@ -6929,7 +7123,7 @@ function Test-PublicMcpEdgeHealth {
         $uriObj = [Uri]$Url
         $hostName = $uriObj.Host
         $portNum = if ($uriObj.Port -gt 0) { $uriObj.Port } else { 443 }
-        $dohTimeout = [Math]::Min(2500, [Math]::Max(500, $TimeoutMs))
+        $dohTimeout = [Math]::Min(1200, [Math]::Max(500, $TimeoutMs))
         $ips = @(Resolve-PublicMcpDohIpv4List -HostName $hostName -Context $Context -TimeoutMs $dohTimeout)
         if ($ips.Count -eq 0) {
             return [pscustomobject]@{ Reachable = $false; Phase = 'Offline'; PublicRttMs = 0; IngressIp = '' }
@@ -7281,13 +7475,7 @@ function Start-PublicMcpTunnel {
         }
 
         if (-not $ClientPath -and -not $isIsolatedCtx) {
-            $cmd = Get-Command cloudflared.exe -ErrorAction SilentlyContinue
-            if ($cmd) { $ClientPath = $cmd.Source }
-            else {
-                foreach ($folder in @(${env:ProgramFiles}, ${env:ProgramFiles(x86)})) {
-                    if ($folder -and (Test-Path (Join-Path $folder 'cloudflared/cloudflared.exe'))) { $ClientPath = Join-Path $folder 'cloudflared/cloudflared.exe'; break }
-                }
-            }
+            $ClientPath = Resolve-CloudflaredClientPath -Context $Context
         }
         $hasCloudflared = [bool]($ClientPath -and (Test-Path -LiteralPath $ClientPath))
 
@@ -7569,6 +7757,1707 @@ function Stop-PublicMcpTunnel {
         Clear-PublicMcpTunnelLogCache
     } finally { if ($lock) { $lock.Dispose() } }
     if ($script:ConnectionProfilesCache) { $script:ConnectionProfilesCache.Clear() }
+}
+
+# ======================== Unified Public Tunnel Pool ========================
+
+$script:PublicTunnelsPoolCache = @{}
+$script:PublicTunnelItemRtCache = @{}
+
+function Clear-PublicTunnelsPoolCache {
+    $script:PublicTunnelsPoolCache = @{}
+    $script:PublicTunnelItemRtCache = @{}
+}
+
+function Resolve-PublicTunnelItemMode {
+    param(
+        [string]$BaseUrl = '',
+        [bool]$HasKey = $false
+    )
+    $fixedUrl = ''
+    if ($BaseUrl -and $BaseUrl.Trim()) {
+        try {
+            $fixedUrl = ConvertTo-PublicMcpUrl $BaseUrl
+        } catch {
+            $fixedUrl = $BaseUrl.Trim()
+        }
+    }
+    if ($HasKey) {
+        return [pscustomobject]@{
+            Mode      = 'cloudflare_key'
+            ModeLabel = 'Cloudflare 专线'
+            FixedUrl  = $fixedUrl
+        }
+    }
+    if (-not $fixedUrl) {
+        return [pscustomobject]@{
+            Mode      = 'quick'
+            ModeLabel = '免费临时隧道'
+            FixedUrl  = ''
+        }
+    }
+    $hostName = ''
+    try { $hostName = ([Uri]$fixedUrl).Host.ToLowerInvariant() } catch { $hostName = '' }
+    if ($hostName -like '*.ts.net') {
+        return [pscustomobject]@{
+            Mode      = 'tailscale'
+            ModeLabel = 'Tailscale'
+            FixedUrl  = $fixedUrl
+        }
+    }
+    return [pscustomobject]@{
+        Mode      = 'external_url'
+        ModeLabel = '外部公网隧道'
+        FixedUrl  = $fixedUrl
+    }
+}
+
+function Get-PublicTunnelsPoolCacheSignature {
+    param($Context, [string]$PoolPath)
+    $dataRoot = if ($Context -and $Context.DataRoot) { [string]$Context.DataRoot } else { '' }
+    $dpapiSig = ''
+    if ($dataRoot) {
+        try {
+            $di = [IO.DirectoryInfo]::new($dataRoot)
+            if ($di.Exists) {
+                $keyFiles = @($di.GetFiles('public-tunnel-key-*.dpapi') | Sort-Object Name)
+                $dpapiSig = @(foreach ($kf in $keyFiles) { "$($kf.Name):$($kf.Length):$($kf.LastWriteTimeUtc.Ticks)" }) -join ';'
+            }
+        } catch { }
+    }
+    return "$dataRoot|$(Get-FileStatToken $PoolPath)|$dpapiSig"
+}
+
+function Write-PublicTunnelsPoolPayload {
+    param(
+        $Context,
+        $SelectedByPlatform,
+        $SerializedItems
+    )
+    [IO.Directory]::CreateDirectory($Context.DataRoot) | Out-Null
+    $poolPath = Join-Path $Context.DataRoot 'public-tunnels.json'
+    $selGem = if ($SelectedByPlatform -and $SelectedByPlatform['gemini']) { [string]$SelectedByPlatform['gemini'] } else { 'pub_builtin_quick' }
+    $selCla = if ($SelectedByPlatform -and $SelectedByPlatform['claude']) { [string]$SelectedByPlatform['claude'] } else { 'pub_builtin_quick' }
+    $payloadObj = [pscustomobject]([ordered]@{
+        schema_version       = 1
+        selected_by_platform = [pscustomobject]([ordered]@{
+            gemini = $selGem
+            claude = $selCla
+        })
+        items                = @($SerializedItems)
+    })
+    Write-AtomicConnectionText $poolPath ($payloadObj | ConvertTo-Json -Depth 6)
+    $script:PublicTunnelsPoolCache = @{}
+}
+
+function Copy-PublicTunnelsPoolState {
+    param($State)
+    if ($null -eq $State) { return $null }
+    $clonedItems = @(foreach ($it in @($State.Items)) {
+        [pscustomobject]@{
+            Id             = [string]$it.Id
+            Name           = [string]$it.Name
+            IsBuiltin      = [bool]$it.IsBuiltin
+            BaseUrl        = [string]$it.BaseUrl
+            KeyFile        = [string]$it.KeyFile
+            HasKey         = [bool]$it.HasKey
+            PlainKey       = [string]$it.PlainKey
+            MaskedKey      = [string]$it.MaskedKey
+            DesiredRunning = [bool]$it.DesiredRunning
+            Mode           = [string]$it.Mode
+            ModeLabel      = [string]$it.ModeLabel
+        }
+    })
+    return [pscustomobject]@{
+        SelectedByPlatform = [ordered]@{
+            gemini = [string]$State.SelectedByPlatform['gemini']
+            claude = [string]$State.SelectedByPlatform['claude']
+        }
+        Items              = $clonedItems
+    }
+}
+
+function Get-PublicTunnelsPool {
+    param(
+        $Context,
+        $Settings = $null
+    )
+    [IO.Directory]::CreateDirectory($Context.DataRoot) | Out-Null
+    $poolPath = Join-Path $Context.DataRoot 'public-tunnels.json'
+
+    if (-not (Test-Path -LiteralPath $poolPath)) {
+        # Automatic Non-Destructive Migration from credential-profiles.json
+        $profState = Get-ConnectionProfiles $Context $Settings
+        $migratedItems = New-Object 'System.Collections.Generic.List[object]'
+        [void]$migratedItems.Add([pscustomobject]([ordered]@{
+            id              = 'pub_builtin_quick'
+            name            = '免费临时隧道'
+            is_builtin      = $true
+            base_url        = ''
+            key_file        = ''
+            desired_running = $false
+        }))
+        $selectedByPlat = [ordered]@{
+            gemini = 'pub_builtin_quick'
+            claude = 'pub_builtin_quick'
+        }
+        $pubProfiles = @(
+            @($profState.Profiles | Where-Object { $_ -and $_.Platform -in @('gemini', 'claude') -and $_.IsActive }) +
+            @($profState.Profiles | Where-Object { $_ -and $_.Platform -in @('gemini', 'claude') -and (-not $_.IsActive) })
+        )
+        $dedupMap = @{}
+        $tsSeq = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+        foreach ($p in $pubProfiles) {
+            $rawUrl = if ($p.PSObject.Properties['BaseUrl'] -and $p.BaseUrl) { ([string]$p.BaseUrl).Trim() } else { '' }
+            $normUrl = ''
+            if ($rawUrl) {
+                try { $normUrl = ConvertTo-PublicMcpUrl $rawUrl } catch { $normUrl = $rawUrl }
+            }
+            $plainKey = if ($p.PSObject.Properties['PlainKey'] -and $p.PlainKey) { ([string]$p.PlainKey).Trim() } else { '' }
+            if ((-not $normUrl) -and (-not $plainKey)) { continue }
+
+            $dedupSig = "$($normUrl.ToLowerInvariant())|$plainKey"
+            $targetId = ''
+            if ($dedupMap.ContainsKey($dedupSig)) {
+                $targetId = [string]$dedupMap[$dedupSig]
+            } else {
+                $targetId = "pub_$tsSeq"
+                $tsSeq++
+                $rawName = if ($p.PSObject.Properties['Name'] -and $p.Name) { ([string]$p.Name).Trim() } else { '' }
+                $migratedName = if ($rawName -and $rawName -ne '默认') {
+                    $rawName
+                } elseif ($normUrl) {
+                    $h = try { ([Uri]$normUrl).Host } catch { '' }
+                    if ($h -like '*.ts.net') {
+                        "Tailscale ($(($h -split '\.')[0]))"
+                    } elseif ($h) {
+                        $h
+                    } else {
+                        '自定义公网隧道'
+                    }
+                } else {
+                    'Cloudflare 专线'
+                }
+                $migratedKeyFile = ''
+                if ($plainKey) {
+                    $migratedKeyFile = "public-tunnel-key-$targetId.dpapi"
+                    Write-AtomicConnectionText (Join-Path $Context.DataRoot $migratedKeyFile) (Protect-ConnectionSecret $plainKey)
+                }
+                [void]$migratedItems.Add([pscustomobject]([ordered]@{
+                    id              = $targetId
+                    name            = $migratedName
+                    is_builtin      = $false
+                    base_url        = $normUrl
+                    key_file        = $migratedKeyFile
+                    desired_running = $false
+                }))
+                $dedupMap[$dedupSig] = $targetId
+            }
+
+            $platKey = ([string]$p.Platform).Trim().ToLowerInvariant()
+            if ($platKey -in @('gemini', 'claude')) {
+                if ($p.IsActive -or ($selectedByPlat[$platKey] -eq 'pub_builtin_quick')) {
+                    $selectedByPlat[$platKey] = $targetId
+                }
+            }
+        }
+        Write-PublicTunnelsPoolPayload -Context $Context -SelectedByPlatform $selectedByPlat -SerializedItems ($migratedItems.ToArray())
+    }
+
+    $cacheKey = [IO.Path]::GetFullPath([string]$Context.DataRoot).TrimEnd('\', '/').ToLowerInvariant()
+    $sig = Get-PublicTunnelsPoolCacheSignature -Context $Context -PoolPath $poolPath
+    if ($script:PublicTunnelsPoolCache.ContainsKey($cacheKey)) {
+        $cached = $script:PublicTunnelsPoolCache[$cacheKey]
+        if ($cached -and $cached.Signature -eq $sig) {
+            return (Copy-PublicTunnelsPoolState $cached.State)
+        }
+    }
+
+    $diskObj = $null
+    try {
+        $diskObj = [IO.File]::ReadAllText($poolPath, [Text.Encoding]::UTF8) | ConvertFrom-Json
+    } catch {
+        $diskObj = $null
+    }
+
+    $builtinDesired = $false
+    $rawCustomItems = New-Object 'System.Collections.Generic.List[object]'
+    $seenIds = @{ 'pub_builtin_quick' = $true }
+    if ($diskObj -and $diskObj.PSObject.Properties['items'] -and $diskObj.items) {
+        foreach ($rawIt in @($diskObj.items)) {
+            if ($null -eq $rawIt) { continue }
+            $itId = if ($rawIt.PSObject.Properties['id'] -and $rawIt.id) { ([string]$rawIt.id).Trim() } else { '' }
+            if (-not $itId) { continue }
+            if ($itId -eq 'pub_builtin_quick' -or ($rawIt.PSObject.Properties['is_builtin'] -and [bool]$rawIt.is_builtin)) {
+                if ($rawIt.PSObject.Properties['desired_running'] -and $null -ne $rawIt.desired_running) {
+                    $builtinDesired = [bool]$rawIt.desired_running
+                }
+                continue
+            }
+            if ($seenIds.ContainsKey($itId)) { continue }
+            $seenIds[$itId] = $true
+            [void]$rawCustomItems.Add($rawIt)
+        }
+    }
+
+    $hydratedItems = New-Object 'System.Collections.Generic.List[object]'
+    [void]$hydratedItems.Add([pscustomobject]@{
+        Id             = 'pub_builtin_quick'
+        Name           = '免费临时隧道'
+        IsBuiltin      = $true
+        BaseUrl        = ''
+        KeyFile        = ''
+        HasKey         = $false
+        PlainKey       = ''
+        MaskedKey      = ''
+        DesiredRunning = $builtinDesired
+        Mode           = 'quick'
+        ModeLabel      = '免费临时隧道'
+    })
+
+    foreach ($cIt in $rawCustomItems) {
+        $cId = ([string]$cIt.id).Trim()
+        $cName = if ($cIt.PSObject.Properties['name'] -and ([string]$cIt.name).Trim()) { ([string]$cIt.name).Trim() } else { $cId }
+        $rawBase = if ($cIt.PSObject.Properties['base_url'] -and $cIt.base_url) { ([string]$cIt.base_url).Trim() } else { '' }
+        $normBase = if ($rawBase) {
+            try { ConvertTo-PublicMcpUrl $rawBase } catch { $rawBase }
+        } else { '' }
+        $kFile = if ($cIt.PSObject.Properties['key_file'] -and $cIt.key_file) { ([string]$cIt.key_file).Trim() } else { '' }
+        $plain = ''
+        if ($kFile) {
+            $kFullPath = Join-Path $Context.DataRoot $kFile
+            if (Test-Path -LiteralPath $kFullPath) {
+                try { $plain = Read-ConnectionSecret $kFullPath } catch { $plain = '' }
+            }
+        }
+        $hasKey = [bool]($plain.Length -gt 0)
+        $masked = if ($hasKey) { Format-MaskedApiKey $plain } else { '' }
+        $desired = if ($cIt.PSObject.Properties['desired_running'] -and $null -ne $cIt.desired_running) { [bool]$cIt.desired_running } else { $false }
+        $mInfo = Resolve-PublicTunnelItemMode -BaseUrl $normBase -HasKey $hasKey
+        [void]$hydratedItems.Add([pscustomobject]@{
+            Id             = $cId
+            Name           = $cName
+            IsBuiltin      = $false
+            BaseUrl        = $normBase
+            KeyFile        = $kFile
+            HasKey         = $hasKey
+            PlainKey       = $plain
+            MaskedKey      = $masked
+            DesiredRunning = $desired
+            Mode           = $mInfo.Mode
+            ModeLabel      = $mInfo.ModeLabel
+        })
+    }
+
+    $validIdMap = @{}
+    foreach ($hi in $hydratedItems) { $validIdMap[$hi.Id] = $true }
+
+    $selGem = 'pub_builtin_quick'
+    $selCla = 'pub_builtin_quick'
+    if ($diskObj -and $diskObj.PSObject.Properties['selected_by_platform'] -and $diskObj.selected_by_platform) {
+        $sbp = $diskObj.selected_by_platform
+        if ($sbp.PSObject.Properties['gemini'] -and $sbp.gemini -and $validIdMap.ContainsKey([string]$sbp.gemini)) {
+            $selGem = [string]$sbp.gemini
+        }
+        if ($sbp.PSObject.Properties['claude'] -and $sbp.claude -and $validIdMap.ContainsKey([string]$sbp.claude)) {
+            $selCla = [string]$sbp.claude
+        }
+    }
+
+    $poolState = [pscustomobject]@{
+        SelectedByPlatform = [ordered]@{
+            gemini = $selGem
+            claude = $selCla
+        }
+        Items              = @($hydratedItems.ToArray())
+    }
+    $postSig = Get-PublicTunnelsPoolCacheSignature -Context $Context -PoolPath $poolPath
+    $script:PublicTunnelsPoolCache[$cacheKey] = @{
+        Signature = $postSig
+        State     = (Copy-PublicTunnelsPoolState $poolState)
+    }
+    return $poolState
+}
+
+function ConvertTo-SerializedPublicTunnelPoolItem {
+    param(
+        $Item,
+        [Nullable[bool]]$DesiredRunningOverride = $null
+    )
+    $desiredVal = if ($null -ne $DesiredRunningOverride) {
+        [bool]$DesiredRunningOverride
+    } elseif ($Item.PSObject.Properties['DesiredRunning']) {
+        [bool]$Item.DesiredRunning
+    } elseif ($Item.PSObject.Properties['desired_running']) {
+        [bool]$Item.desired_running
+    } else { $false }
+    $isBuiltinVal = if ($Item.PSObject.Properties['IsBuiltin']) { [bool]$Item.IsBuiltin } elseif ($Item.PSObject.Properties['is_builtin']) { [bool]$Item.is_builtin } else { $false }
+    return [pscustomobject]([ordered]@{
+        id              = $(if ($Item.PSObject.Properties['Id']) { [string]$Item.Id } else { [string]$Item.id })
+        name            = $(if ($isBuiltinVal) { '免费临时隧道' } elseif ($Item.PSObject.Properties['Name']) { [string]$Item.Name } else { [string]$Item.name })
+        is_builtin      = $isBuiltinVal
+        base_url        = $(if ($isBuiltinVal) { '' } elseif ($Item.PSObject.Properties['BaseUrl']) { [string]$Item.BaseUrl } else { [string]$Item.base_url })
+        key_file        = $(if ($isBuiltinVal) { '' } elseif ($Item.PSObject.Properties['KeyFile']) { [string]$Item.KeyFile } else { [string]$Item.key_file })
+        desired_running = $desiredVal
+    })
+}
+
+function Set-PublicTunnelItemDesiredRunning {
+    param(
+        $Context,
+        [string]$TunnelId,
+        [bool]$DesiredRunning
+    )
+    $lockPath = Join-Path $Context.DataRoot 'public-tunnels.lock'
+    $lock = $null
+    $deadline = [DateTime]::UtcNow.AddSeconds(5)
+    while (-not $lock) {
+        try { $lock = [IO.File]::Open($lockPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None) }
+        catch { if ([DateTime]::UtcNow -gt $deadline) { throw '公网隧道配置正在写入，请稍后重试。' }; Start-Sleep -Milliseconds 30 }
+    }
+    try {
+        $pool = Get-PublicTunnelsPool -Context $Context
+        $serialized = @(foreach ($it in $pool.Items) {
+            $ov = if ($it.Id -eq $TunnelId) { $DesiredRunning } else { $null }
+            ConvertTo-SerializedPublicTunnelPoolItem -Item $it -DesiredRunningOverride $ov
+        })
+        Write-PublicTunnelsPoolPayload -Context $Context -SelectedByPlatform $pool.SelectedByPlatform -SerializedItems $serialized
+    } finally {
+        if ($lock) { $lock.Dispose() }
+    }
+}
+
+function Save-PublicTunnelItem {
+    param(
+        $Context,
+        [string]$TunnelId = '',
+        [string]$Name = '',
+        [string]$BaseUrl = '',
+        [string]$StartupKey = '',
+        [switch]$ClearKey
+    )
+    [IO.Directory]::CreateDirectory($Context.DataRoot) | Out-Null
+    $cleanId = if ($TunnelId) { $TunnelId.Trim() } else { '' }
+    if ($cleanId -eq 'new') { $cleanId = '' }
+    if ($cleanId -eq 'pub_builtin_quick') {
+        throw '内置免费临时隧道无需修改配置；如需使用固定域名或 Cloudflare 专线，请新建公网隧道。'
+    }
+    $normBaseUrl = if ($BaseUrl -and $BaseUrl.Trim()) {
+        ConvertTo-PublicMcpUrl $BaseUrl
+    } else { '' }
+    $cleanKey = if ($StartupKey) { $StartupKey.Trim() } else { '' }
+    if ($cleanKey -and ($cleanKey -match '^[a-z]+://' -or $cleanKey -match '\s')) {
+        throw '隧道启动凭证 Key 栏请粘贴凭证本身，不能包含网页链接、空格或换行。'
+    }
+
+    $lockPath = Join-Path $Context.DataRoot 'public-tunnels.lock'
+    $lock = $null
+    $deadline = [DateTime]::UtcNow.AddSeconds(5)
+    while (-not $lock) {
+        try { $lock = [IO.File]::Open($lockPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None) }
+        catch { if ([DateTime]::UtcNow -gt $deadline) { throw '公网隧道配置正在写入，请稍后重试。' }; Start-Sleep -Milliseconds 30 }
+    }
+    $savedId = ''
+    try {
+        $pool = Get-PublicTunnelsPool -Context $Context
+        $existing = if ($cleanId) {
+            $pool.Items | Where-Object { $_.Id -eq $cleanId } | Select-Object -First 1
+        } else { $null }
+
+        $serializedList = New-Object 'System.Collections.Generic.List[object]'
+        if ($existing) {
+            if ($existing.IsBuiltin) {
+                throw '内置免费临时隧道无需修改配置；如需使用固定域名或 Cloudflare 专线，请新建公网隧道。'
+            }
+            $savedId = [string]$existing.Id
+            foreach ($it in $pool.Items) {
+                if ($it.Id -eq $savedId) {
+                    $newName = if ($Name -and $Name.Trim()) { $Name.Trim() } else { [string]$it.Name }
+                    $keyFile = [string]$it.KeyFile
+                    if ($cleanKey) {
+                        $keyFile = "public-tunnel-key-$savedId.dpapi"
+                        Write-AtomicConnectionText (Join-Path $Context.DataRoot $keyFile) (Protect-ConnectionSecret $cleanKey)
+                    } elseif ($ClearKey) {
+                        if ($keyFile) {
+                            $kp = Join-Path $Context.DataRoot $keyFile
+                            if (Test-Path -LiteralPath $kp) {
+                                Remove-Item -LiteralPath $kp -Force -ErrorAction SilentlyContinue
+                            }
+                        }
+                        $keyFile = ''
+                    }
+                    [void]$serializedList.Add([pscustomobject]([ordered]@{
+                        id              = $savedId
+                        name            = $newName
+                        is_builtin      = $false
+                        base_url        = $normBaseUrl
+                        key_file        = $keyFile
+                        desired_running = [bool]$it.DesiredRunning
+                    }))
+                } else {
+                    [void]$serializedList.Add((ConvertTo-SerializedPublicTunnelPoolItem -Item $it))
+                }
+            }
+            # Clear stale offline/fault runtime snapshot when editing a non-running tunnel
+            $curRt = Get-PublicTunnelItemRuntimeState -Context $Context -Item $existing
+            if (-not $curRt.Running) {
+                $rtPath = Join-Path $Context.DataRoot "public-tunnel-rt-$savedId.json"
+                if (Test-Path -LiteralPath $rtPath) {
+                    Remove-Item -LiteralPath $rtPath -Force -ErrorAction SilentlyContinue
+                }
+                [void]$script:PublicTunnelItemRtCache.Remove("$($Context.DataRoot)|$savedId")
+            }
+        } else {
+            foreach ($it in $pool.Items) {
+                [void]$serializedList.Add((ConvertTo-SerializedPublicTunnelPoolItem -Item $it))
+            }
+            $tsMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+            while (@($pool.Items | Where-Object { $_.Id -eq "pub_$tsMs" }).Count -gt 0) {
+                $tsMs++
+            }
+            $savedId = if ($cleanId -and $cleanId -match '^pub_[a-zA-Z0-9_-]+$') { $cleanId } else { "pub_$tsMs" }
+            $keyFile = ''
+            if ($cleanKey) {
+                $keyFile = "public-tunnel-key-$savedId.dpapi"
+                Write-AtomicConnectionText (Join-Path $Context.DataRoot $keyFile) (Protect-ConnectionSecret $cleanKey)
+            }
+            $customIdx = @($pool.Items | Where-Object { -not $_.IsBuiltin }).Count + 1
+            $effName = if ($Name -and $Name.Trim()) {
+                $Name.Trim()
+            } elseif ($cleanKey) {
+                "Cloudflare 专线 #$customIdx"
+            } elseif ($normBaseUrl) {
+                $h = try { ([Uri]$normBaseUrl).Host } catch { '' }
+                if ($h -like '*.ts.net') { "Tailscale ($(($h -split '\.')[0]))" } elseif ($h) { $h } else { "公网隧道 #$customIdx" }
+            } else {
+                "免费临时隧道 #$customIdx"
+            }
+            [void]$serializedList.Add([pscustomobject]([ordered]@{
+                id              = $savedId
+                name            = $effName
+                is_builtin      = $false
+                base_url        = $normBaseUrl
+                key_file        = $keyFile
+                desired_running = $false
+            }))
+        }
+        Write-PublicTunnelsPoolPayload -Context $Context -SelectedByPlatform $pool.SelectedByPlatform -SerializedItems ($serializedList.ToArray())
+    } finally {
+        if ($lock) { $lock.Dispose() }
+    }
+    $updatedPool = Get-PublicTunnelsPool -Context $Context
+    $updatedPool | Add-Member -NotePropertyName 'LastSavedTunnelId' -NotePropertyValue $savedId -Force
+    return $updatedPool
+}
+
+function Remove-PublicTunnelItem {
+    param(
+        $Context,
+        [string]$TunnelId
+    )
+    $cleanId = if ($TunnelId) { $TunnelId.Trim() } else { '' }
+    if (-not $cleanId) { throw '未指定要删除的公网隧道编号。' }
+    if ($cleanId -eq 'pub_builtin_quick') { throw '内置免费临时隧道不可删除。' }
+
+    $poolPre = Get-PublicTunnelsPool -Context $Context
+    $target = $poolPre.Items | Where-Object { $_.Id -eq $cleanId } | Select-Object -First 1
+    if (-not $target) { throw "找不到要删除的公网隧道 ($cleanId)。" }
+    if ($target.IsBuiltin) { throw '内置免费临时隧道不可删除。' }
+
+    [void](Stop-PublicTunnelItem -Context $Context -TunnelId $cleanId -SkipDesiredStateUpdate)
+
+    $lockPath = Join-Path $Context.DataRoot 'public-tunnels.lock'
+    $lock = $null
+    $deadline = [DateTime]::UtcNow.AddSeconds(5)
+    while (-not $lock) {
+        try { $lock = [IO.File]::Open($lockPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None) }
+        catch { if ([DateTime]::UtcNow -gt $deadline) { throw '公网隧道配置正在写入，请稍后重试。' }; Start-Sleep -Milliseconds 30 }
+    }
+    try {
+        $pool = Get-PublicTunnelsPool -Context $Context
+        $remItems = @(foreach ($it in $pool.Items) {
+            if ($it.Id -ne $cleanId) {
+                ConvertTo-SerializedPublicTunnelPoolItem -Item $it
+            }
+        })
+        $newSel = [ordered]@{
+            gemini = $(if ([string]$pool.SelectedByPlatform['gemini'] -eq $cleanId) { 'pub_builtin_quick' } else { [string]$pool.SelectedByPlatform['gemini'] })
+            claude = $(if ([string]$pool.SelectedByPlatform['claude'] -eq $cleanId) { 'pub_builtin_quick' } else { [string]$pool.SelectedByPlatform['claude'] })
+        }
+        Write-PublicTunnelsPoolPayload -Context $Context -SelectedByPlatform $newSel -SerializedItems $remItems
+
+        foreach ($delPath in @(
+            $(if ($target.KeyFile) { Join-Path $Context.DataRoot $target.KeyFile } else { '' }),
+            (Join-Path $Context.DataRoot "public-tunnel-key-$cleanId.dpapi"),
+            (Join-Path $Context.DataRoot "public-tunnel-rt-$cleanId.json"),
+            (Join-Path $Context.DataRoot "public-tunnel-$cleanId.log"),
+            (Join-Path $Context.DataRoot "public-tunnel-op-$cleanId.lock")
+        )) {
+            if ($delPath -and (Test-Path -LiteralPath $delPath)) {
+                Remove-Item -LiteralPath $delPath -Force -ErrorAction SilentlyContinue
+            }
+        }
+        [void]$script:PublicTunnelItemRtCache.Remove("$($Context.DataRoot)|$cleanId")
+    } finally {
+        if ($lock) { $lock.Dispose() }
+    }
+    return (Get-PublicTunnelsPool -Context $Context)
+}
+
+function Set-PlatformPublicTunnelBinding {
+    param(
+        $Context,
+        [string]$Platform,
+        [string]$TunnelId
+    )
+    $plat = Resolve-CanonicalPlatform $Platform
+    if ($plat -notin @('gemini', 'claude')) {
+        throw "仅支持为 Gemini 或 Claude 平台绑定公网隧道（当前: $Platform）。"
+    }
+    $cleanId = if ($TunnelId) { $TunnelId.Trim() } else { '' }
+    if (-not $cleanId) { throw '未指定要绑定的公网隧道编号。' }
+
+    $lockPath = Join-Path $Context.DataRoot 'public-tunnels.lock'
+    $lock = $null
+    $deadline = [DateTime]::UtcNow.AddSeconds(5)
+    while (-not $lock) {
+        try { $lock = [IO.File]::Open($lockPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None) }
+        catch { if ([DateTime]::UtcNow -gt $deadline) { throw '公网隧道配置正在写入，请稍后重试。' }; Start-Sleep -Milliseconds 30 }
+    }
+    try {
+        $pool = Get-PublicTunnelsPool -Context $Context
+        $exists = $pool.Items | Where-Object { $_.Id -eq $cleanId } | Select-Object -First 1
+        if (-not $exists) {
+            throw "找不到指定的公网隧道 ($cleanId)。"
+        }
+        $newSel = [ordered]@{
+            gemini = [string]$pool.SelectedByPlatform['gemini']
+            claude = [string]$pool.SelectedByPlatform['claude']
+        }
+        $newSel[$plat] = $cleanId
+        $serialized = @(foreach ($it in $pool.Items) { ConvertTo-SerializedPublicTunnelPoolItem -Item $it })
+        Write-PublicTunnelsPoolPayload -Context $Context -SelectedByPlatform $newSel -SerializedItems $serialized
+    } finally {
+        if ($lock) { $lock.Dispose() }
+    }
+    return (Get-PublicTunnelsPool -Context $Context)
+}
+
+function Get-PublicTunnelItemSecret {
+    param(
+        $Context,
+        [string]$TunnelId
+    )
+    $cleanId = if ($TunnelId) { $TunnelId.Trim() } else { '' }
+    if (-not $cleanId) { return '' }
+    $pool = Get-PublicTunnelsPool -Context $Context
+    $target = $pool.Items | Where-Object { $_.Id -eq $cleanId } | Select-Object -First 1
+    if ($target -and $target.PSObject.Properties['PlainKey'] -and $target.PlainKey) {
+        return [string]$target.PlainKey
+    }
+    return ''
+}
+
+function Read-SharedPublicTunnelLogSnippet {
+    param([string]$LogPath)
+    if (-not $LogPath -or -not (Test-Path -LiteralPath $LogPath)) {
+        return [pscustomobject]@{ DiscoveredUrl = ''; Registered = $false }
+    }
+    $discoveredUrl = ''
+    $registered = $false
+    $stream = $null
+    try {
+        $stream = [IO.File]::Open($LogPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+        $len = $stream.Length
+        if ($len -gt 0) {
+            if ($len -gt 8192) {
+                $headLen = [Math]::Min(4096, [int]$len)
+                $headBuf = New-Object byte[] $headLen
+                $headRead = $stream.Read($headBuf, 0, $headLen)
+                $headTxt = [Text.Encoding]::UTF8.GetString($headBuf, 0, $headRead)
+                if ($headTxt -match 'https://[a-zA-Z0-9-]+\.trycloudflare\.com') {
+                    $discoveredUrl = ConvertTo-PublicMcpUrl $Matches[0]
+                }
+                if ($headTxt -match 'Registered tunnel connection') {
+                    $registered = $true
+                }
+                [void]$stream.Seek(-8192, [IO.SeekOrigin]::End)
+                $tailBuf = New-Object byte[] 8192
+                $tailRead = $stream.Read($tailBuf, 0, 8192)
+                $tailTxt = [Text.Encoding]::UTF8.GetString($tailBuf, 0, $tailRead)
+                if (-not $discoveredUrl -and $tailTxt -match 'https://[a-zA-Z0-9-]+\.trycloudflare\.com') {
+                    $discoveredUrl = ConvertTo-PublicMcpUrl $Matches[0]
+                }
+                if ($tailTxt -match 'Registered tunnel connection') {
+                    $registered = $true
+                }
+            } else {
+                $buf = New-Object byte[] ([int]$len)
+                $readBytes = $stream.Read($buf, 0, [int]$len)
+                $txt = [Text.Encoding]::UTF8.GetString($buf, 0, $readBytes)
+                if ($txt -match 'https://[a-zA-Z0-9-]+\.trycloudflare\.com') {
+                    $discoveredUrl = ConvertTo-PublicMcpUrl $Matches[0]
+                }
+                if ($txt -match 'Registered tunnel connection') {
+                    $registered = $true
+                }
+            }
+        }
+    } catch {
+    } finally {
+        if ($stream) { try { $stream.Dispose() } catch { } }
+    }
+    return [pscustomobject]@{
+        DiscoveredUrl = $discoveredUrl
+        Registered    = $registered
+    }
+}
+
+function Write-PublicTunnelItemRuntimeFile {
+    param(
+        $Context,
+        [string]$TunnelId,
+        [hashtable]$StateData
+    )
+    $rtPath = Join-Path $Context.DataRoot "public-tunnel-rt-$TunnelId.json"
+    Write-AtomicConnectionText $rtPath (([pscustomobject]$StateData) | ConvertTo-Json -Depth 5)
+    $cacheKey = "$($Context.DataRoot)|$TunnelId"
+    [void]$script:PublicTunnelItemRtCache.Remove($cacheKey)
+}
+
+function Get-PublicTunnelItemRuntimeState {
+    param(
+        $Context,
+        $Item
+    )
+    $tunId = [string]$Item.Id
+    $mInfo = Resolve-PublicTunnelItemMode -BaseUrl ([string]$Item.BaseUrl) -HasKey ([bool]$Item.HasKey)
+    $defaultRes = [pscustomobject]@{
+        TunnelId          = $tunId
+        Mode              = $mInfo.Mode
+        ModeLabel         = $mInfo.ModeLabel
+        EffectiveUrl      = $mInfo.FixedUrl
+        Running           = $false
+        Status            = '未启动'
+        HealthPhase       = 'Offline'
+        PublicRttMs       = 0
+        ErrorReason       = ''
+        ProcessId         = 0
+        VerifiedIngressIp = ''
+        LastCheckedUtc    = ''
+        DiedUnexpectedly  = $false
+    }
+
+    $rtPath = Join-Path $Context.DataRoot "public-tunnel-rt-$tunId.json"
+    $rtSig = Get-FileStatToken $rtPath
+    if ($rtSig -eq '0:0:0') {
+        return $defaultRes
+    }
+
+    $logPath = Join-Path $Context.DataRoot "public-tunnel-$tunId.log"
+    $logSig = Get-FileStatToken $logPath
+    $cacheKey = "$($Context.DataRoot)|$tunId"
+    $combinedSig = "$rtSig|$logSig|$($mInfo.Mode)|$($mInfo.FixedUrl)"
+
+    if ($script:PublicTunnelItemRtCache.ContainsKey($cacheKey)) {
+        $cachedEntry = $script:PublicTunnelItemRtCache[$cacheKey]
+        if ($cachedEntry -and $cachedEntry.Sig -eq $combinedSig) {
+            $cState = $cachedEntry.State
+            if ($cState.ProcessId -gt 0) {
+                $liveProc = Get-Process -Id $cState.ProcessId -ErrorAction SilentlyContinue
+                $ticksOk = ($null -ne $liveProc) -and ($cachedEntry.StartTicks -le 0 -or $liveProc.StartTime.ToUniversalTime().Ticks -eq $cachedEntry.StartTicks)
+                if ($ticksOk) {
+                    return $cState
+                }
+                [void]$script:PublicTunnelItemRtCache.Remove($cacheKey)
+            } else {
+                return $cState
+            }
+        }
+    }
+
+    $saved = $null
+    try {
+        $saved = [IO.File]::ReadAllText($rtPath, [Text.Encoding]::UTF8) | ConvertFrom-Json
+    } catch {
+        return $defaultRes
+    }
+    if ($null -eq $saved) { return $defaultRes }
+
+    $isSimulated = [bool]($saved.PSObject.Properties['Simulated'] -and $saved.Simulated)
+    $savedPid = if ($saved.PSObject.Properties['ProcessId'] -and $null -ne $saved.ProcessId) { [int]$saved.ProcessId } else { 0 }
+    $savedTicks = if ($saved.PSObject.Properties['StartTicks'] -and $null -ne $saved.StartTicks) { [long]$saved.StartTicks } else { 0L }
+    $savedRunning = if ($saved.PSObject.Properties['Running'] -and $null -ne $saved.Running) { [bool]$saved.Running } else { $false }
+    $savedEffUrl = if ($saved.PSObject.Properties['EffectiveUrl'] -and $saved.EffectiveUrl) { [string]$saved.EffectiveUrl } else { $mInfo.FixedUrl }
+    $savedStatus = if ($saved.PSObject.Properties['Status'] -and $saved.Status) { [string]$saved.Status } else { '未启动' }
+    $savedPhase = if ($saved.PSObject.Properties['HealthPhase'] -and $saved.HealthPhase) { [string]$saved.HealthPhase } else { 'Offline' }
+    $savedRtt = if ($saved.PSObject.Properties['PublicRttMs'] -and $null -ne $saved.PublicRttMs) { [int]$saved.PublicRttMs } else { 0 }
+    $savedErr = if ($saved.PSObject.Properties['ErrorReason'] -and $saved.ErrorReason) { [string]$saved.ErrorReason } else { '' }
+    $savedIp = if ($saved.PSObject.Properties['VerifiedIngressIp'] -and $saved.VerifiedIngressIp) { [string]$saved.VerifiedIngressIp } else { '' }
+    $savedChecked = if ($saved.PSObject.Properties['LastCheckedUtc'] -and $saved.LastCheckedUtc) { [string]$saved.LastCheckedUtc } else { '' }
+
+    if ((-not $isSimulated) -and ($mInfo.Mode -in @('quick', 'cloudflare_key')) -and ($savedPid -gt 0)) {
+        $proc = Get-Process -Id $savedPid -ErrorAction SilentlyContinue
+        $alive = ($null -ne $proc) -and ($savedTicks -le 0 -or $proc.StartTime.ToUniversalTime().Ticks -eq $savedTicks)
+        if (-not $alive) {
+            $deadState = [pscustomobject]@{
+                TunnelId          = $tunId
+                Mode              = $mInfo.Mode
+                ModeLabel         = $mInfo.ModeLabel
+                EffectiveUrl      = $mInfo.FixedUrl
+                Running           = $false
+                Status            = '连接失败'
+                HealthPhase       = 'Fault'
+                PublicRttMs       = 0
+                ErrorReason       = $(if ($savedErr) { $savedErr } else { '隧道进程已退出，请重新连接' })
+                ProcessId         = 0
+                VerifiedIngressIp = ''
+                LastCheckedUtc    = $savedChecked
+                DiedUnexpectedly  = $true
+            }
+            return $deadState
+        }
+        if (-not $savedRunning -or (-not $savedEffUrl)) {
+            $logInfo = Read-SharedPublicTunnelLogSnippet -LogPath $logPath
+            $effCandidate = if ($mInfo.FixedUrl) { $mInfo.FixedUrl } elseif ($savedEffUrl) { $savedEffUrl } else { $logInfo.DiscoveredUrl }
+            if ($logInfo.Registered -and $effCandidate) {
+                $savedRunning = $true
+                $savedEffUrl = $effCandidate
+                $savedStatus = '运行中'
+                $savedPhase = 'Online'
+                $savedErr = ''
+            }
+        }
+        $liveRes = [pscustomobject]@{
+            TunnelId          = $tunId
+            Mode              = $mInfo.Mode
+            ModeLabel         = $mInfo.ModeLabel
+            EffectiveUrl      = $savedEffUrl
+            Running           = $savedRunning
+            Status            = $savedStatus
+            HealthPhase       = $savedPhase
+            PublicRttMs       = $savedRtt
+            ErrorReason       = $savedErr
+            ProcessId         = $proc.Id
+            VerifiedIngressIp = $savedIp
+            LastCheckedUtc    = $savedChecked
+            DiedUnexpectedly  = $false
+        }
+        $script:PublicTunnelItemRtCache[$cacheKey] = @{
+            Sig        = $combinedSig
+            StartTicks = $savedTicks
+            State      = $liveRes
+        }
+        return $liveRes
+    }
+
+    $staticRes = [pscustomobject]@{
+        TunnelId          = $tunId
+        Mode              = $mInfo.Mode
+        ModeLabel         = $mInfo.ModeLabel
+        EffectiveUrl      = $(if ($savedEffUrl) { $savedEffUrl } else { $mInfo.FixedUrl })
+        Running           = $savedRunning
+        Status            = $savedStatus
+        HealthPhase       = $savedPhase
+        PublicRttMs       = $savedRtt
+        ErrorReason       = $savedErr
+        ProcessId         = $(if ($savedPid -gt 0 -and (-not $isSimulated)) { $savedPid } else { 0 })
+        VerifiedIngressIp = $savedIp
+        LastCheckedUtc    = $savedChecked
+        DiedUnexpectedly  = $false
+    }
+    $script:PublicTunnelItemRtCache[$cacheKey] = @{
+        Sig        = $combinedSig
+        StartTicks = 0L
+        State      = $staticRes
+    }
+    return $staticRes
+}
+
+function Invoke-TailscaleCliFast {
+    param(
+        [string]$TailscaleExe,
+        [string[]]$Arguments = @(),
+        [int]$TimeoutMs = 1500
+    )
+    if (-not $TailscaleExe -or -not (Test-Path -LiteralPath $TailscaleExe)) {
+        return [pscustomobject]@{ TimedOut = $false; ExitCode = 127; StdOut = ''; StdErr = 'not_found' }
+    }
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $quotedArgs = ($Arguments | ForEach-Object { if ($_ -match '\s') { '"' + $_ + '"' } else { [string]$_ } }) -join ' '
+    if ($TailscaleExe -match '\.(cmd|bat)$') {
+        $psi.FileName = 'cmd.exe'
+        $psi.Arguments = '/d /s /c ""' + $TailscaleExe + '" ' + $quotedArgs + '"'
+    } else {
+        $psi.FileName = $TailscaleExe
+        $psi.Arguments = $quotedArgs
+    }
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $proc = $null
+    try {
+        $proc = [System.Diagnostics.Process]::Start($psi)
+        if (-not $proc) {
+            return [pscustomobject]@{ TimedOut = $false; ExitCode = 1; StdOut = ''; StdErr = '' }
+        }
+        $outTask = $proc.StandardOutput.ReadToEndAsync()
+        $errTask = $proc.StandardError.ReadToEndAsync()
+        if (-not $proc.WaitForExit($TimeoutMs)) {
+            try { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue } catch { }
+            return [pscustomobject]@{ TimedOut = $true; ExitCode = -1; StdOut = ''; StdErr = 'timeout' }
+        }
+        [void]$outTask.Wait(300)
+        [void]$errTask.Wait(300)
+        return [pscustomobject]@{
+            TimedOut = $false
+            ExitCode = [int]$proc.ExitCode
+            StdOut   = $(if ($outTask.IsCompleted) { [string]$outTask.Result } else { '' })
+            StdErr   = $(if ($errTask.IsCompleted) { [string]$errTask.Result } else { '' })
+        }
+    } catch {
+        return [pscustomobject]@{ TimedOut = $false; ExitCode = 1; StdOut = ''; StdErr = [string]$_.Exception.Message }
+    } finally {
+        if ($proc) { try { $proc.Dispose() } catch { } }
+    }
+}
+
+function Test-TailscaleControlPlaneFakeIp {
+    if ($null -ne $script:TailscaleControlPlaneIpsOverride) {
+        foreach ($ipItem in @($script:TailscaleControlPlaneIpsOverride)) {
+            $s = ([string]$ipItem).Trim()
+            if ($s.StartsWith('198.18.') -or $s.StartsWith('198.19.')) {
+                return $true
+            }
+        }
+        return $false
+    }
+    try {
+        $dnsTask = [System.Net.Dns]::GetHostAddressesAsync('controlplane.tailscale.com')
+        if ($dnsTask.Wait(600)) {
+            foreach ($addr in @($dnsTask.Result)) {
+                if ($null -ne $addr -and $addr.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork) {
+                    $ipStr = $addr.IPAddressToString
+                    if ($ipStr.StartsWith('198.18.') -or $ipStr.StartsWith('198.19.')) {
+                        return $true
+                    }
+                }
+            }
+        }
+    } catch { }
+    return $false
+}
+
+function Get-TailscaleOfflineErrorReason {
+    param(
+        [string]$TailscaleExe,
+        $StatusObj = $null
+    )
+    if (Test-TailscaleControlPlaneFakeIp) {
+        return 'Tailscale 被本机代理虚拟网卡 (Fake-IP) 拦截，请将 +.tailscale.com 与 +.ts.net 加入代理 Fake-IP 绕过列表'
+    }
+    $backendState = if ($StatusObj -and $StatusObj.PSObject.Properties['BackendState']) { [string]$StatusObj.BackendState } else { '' }
+    $isLoggedOut = ($backendState -eq 'NeedsLogin')
+    if ((-not $isLoggedOut) -and $StatusObj -and $StatusObj.PSObject.Properties['AuthURL'] -and ([string]$StatusObj.AuthURL).Trim()) {
+        $isLoggedOut = $true
+    }
+    if ((-not $isLoggedOut) -and $TailscaleExe) {
+        $prefsRes = Invoke-TailscaleCliFast -TailscaleExe $TailscaleExe -Arguments @('debug', 'prefs') -TimeoutMs 1000
+        if ($prefsRes.StdOut -and $prefsRes.StdOut.Trim()) {
+            $prefsTxt = $prefsRes.StdOut.Trim()
+            try {
+                $prefsObj = $prefsTxt | ConvertFrom-Json
+                if ($prefsObj -and $prefsObj.PSObject.Properties['LoggedOut'] -and [bool]$prefsObj.LoggedOut) {
+                    $isLoggedOut = $true
+                }
+            } catch {
+                if ($prefsTxt -match '"LoggedOut"\s*:\s*true') {
+                    $isLoggedOut = $true
+                }
+            }
+        }
+    }
+    if ($isLoggedOut) {
+        return '本机 Tailscale 尚未登录，请在右下角托盘打开 Tailscale 登录'
+    }
+    return '本机 Tailscale 当前未连接官方服务器，请检查网络后重试'
+}
+
+function Find-LocalTailscalePublicUrl {
+    param(
+        $Context,
+        [string]$TailscalePath = ''
+    )
+    $selfUrl = Get-TailscaleFunnelSelfUrl -TailscalePath $TailscalePath -Context $Context
+    if ($selfUrl) {
+        return [pscustomobject]([ordered]@{
+            ok          = $true
+            url         = [string]$selfUrl
+            errorReason = ''
+        })
+    }
+
+    $diagWarning = ''
+    $tsExe = Resolve-TailscaleClientPath -TailscalePath $TailscalePath -Context $Context
+    if ($tsExe) {
+        $stRes = Invoke-TailscaleCliFast -TailscaleExe $tsExe -Arguments @('status', '--json') -TimeoutMs 1500
+        $stObj = $null
+        if ($stRes.StdOut -and $stRes.StdOut.Trim()) {
+            try { $stObj = $stRes.StdOut.Trim() | ConvertFrom-Json } catch { $stObj = $null }
+        }
+        $backendState = if ($stObj -and $stObj.PSObject.Properties['BackendState']) { [string]$stObj.BackendState } else { '' }
+        if ($backendState -ne 'Running') {
+            $diagWarning = Get-TailscaleOfflineErrorReason -TailscaleExe $tsExe -StatusObj $stObj
+        }
+        if ($stObj) {
+            $candDns = ''
+            if ($stObj.PSObject.Properties['Self'] -and $stObj.Self -and $stObj.Self.PSObject.Properties['DNSName'] -and $stObj.Self.DNSName) {
+                $candDns = ([string]$stObj.Self.DNSName).Trim().TrimEnd('.')
+            }
+            if ((-not $candDns) -and $stObj.PSObject.Properties['CertDomains'] -and $stObj.CertDomains -and @($stObj.CertDomains).Count -gt 0) {
+                $candDns = ([string]@($stObj.CertDomains)[0]).Trim().TrimEnd('.')
+            }
+            if ($candDns -and $candDns -like '*.ts.net') {
+                try {
+                    $normFound = ConvertTo-PublicMcpUrl "https://$candDns/"
+                    return [pscustomobject]([ordered]@{
+                        ok          = $true
+                        url         = $normFound
+                        errorReason = $diagWarning
+                    })
+                } catch { }
+            }
+        }
+    }
+
+    # Fallback: check existing *.ts.net URLs in public-tunnels.json or credential-profiles.json
+    try {
+        $pool = Get-PublicTunnelsPool -Context $Context
+        foreach ($it in @($pool.Items)) {
+            if ($it.BaseUrl) {
+                $h = try { ([Uri]$it.BaseUrl).Host.ToLowerInvariant() } catch { '' }
+                if ($h -like '*.ts.net') {
+                    return [pscustomobject]([ordered]@{
+                        ok          = $true
+                        url         = (ConvertTo-PublicMcpUrl $it.BaseUrl)
+                        errorReason = $diagWarning
+                    })
+                }
+            }
+        }
+    } catch { }
+
+    try {
+        $profs = Get-ConnectionProfiles $Context
+        foreach ($p in @($profs.Profiles)) {
+            if ($p.BaseUrl) {
+                $h = try { ([Uri]$p.BaseUrl).Host.ToLowerInvariant() } catch { '' }
+                if ($h -like '*.ts.net') {
+                    return [pscustomobject]([ordered]@{
+                        ok          = $true
+                        url         = (ConvertTo-PublicMcpUrl $p.BaseUrl)
+                        errorReason = $diagWarning
+                    })
+                }
+            }
+        }
+    } catch { }
+
+    $finalErr = if ($diagWarning) {
+        $diagWarning
+    } elseif (-not $tsExe) {
+        '本机未安装 Tailscale 客户端'
+    } else {
+        '未能检测到本机 Tailscale 域名，请先登录 Tailscale 并在网页后台开启 HTTPS'
+    }
+    return [pscustomobject]([ordered]@{
+        ok          = $false
+        url         = ''
+        errorReason = $finalErr
+    })
+}
+
+function Start-PublicTunnelItem {
+    param(
+        $Context,
+        [string]$TunnelId = 'pub_builtin_quick',
+        [int]$Port = 8766,
+        [string]$ClientPath = '',
+        [string]$TailscalePath = '',
+        [switch]$SkipDesiredStateUpdate
+    )
+    [IO.Directory]::CreateDirectory($Context.DataRoot) | Out-Null
+    $cleanId = if ($TunnelId -and $TunnelId.Trim()) { $TunnelId.Trim() } else { 'pub_builtin_quick' }
+    $pool = Get-PublicTunnelsPool -Context $Context
+    $item = $pool.Items | Where-Object { $_.Id -eq $cleanId } | Select-Object -First 1
+    if (-not $item) {
+        throw "找不到指定的公网隧道 ($cleanId)。"
+    }
+
+    if (-not $SkipDesiredStateUpdate) {
+        Set-PublicTunnelItemDesiredRunning -Context $Context -TunnelId $cleanId -DesiredRunning $true
+    }
+
+    $opLockPath = Join-Path $Context.DataRoot "public-tunnel-op-$cleanId.lock"
+    $opLock = $null
+    $lockDeadline = [DateTime]::UtcNow.AddSeconds(5)
+    while (-not $opLock) {
+        try { $opLock = [IO.File]::Open($opLockPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None) }
+        catch { if ([DateTime]::UtcNow -gt $lockDeadline) { throw '该公网隧道正在操作中，请稍后重试。' }; Start-Sleep -Milliseconds 40 }
+    }
+
+    try {
+        $isIsolatedCtx = [bool]($Context -and ($Context.Isolated -or ([string]$Context.DataRoot -match 'connection-test-')))
+        $hasEdgeOverride = ($script:PublicMcpEdgeProbeOverride -is [scriptblock])
+
+        # Stop ONLY this item's existing process if it was already running
+        $prevRt = Get-PublicTunnelItemRuntimeState -Context $Context -Item $item
+        if ($prevRt.ProcessId -gt 0) {
+            Stop-Process -Id $prevRt.ProcessId -Force -ErrorAction SilentlyContinue
+        }
+
+        $fixedUrl = if ($item.BaseUrl -and ([string]$item.BaseUrl).Trim()) { ConvertTo-PublicMcpUrl ([string]$item.BaseUrl) } else { '' }
+        $cleanKey = if ($item.PlainKey -and ([string]$item.PlainKey).Trim()) { ([string]$item.PlainKey).Trim() } else { '' }
+        $mInfo = Resolve-PublicTunnelItemMode -BaseUrl $fixedUrl -HasKey ([bool]($cleanKey.Length -gt 0))
+        $mode = $mInfo.Mode
+
+        # Exception: if starting a tailscale item while another tailscale item was active, they share the machine's single Tailscale Funnel
+        if ($mode -eq 'tailscale') {
+            foreach ($otherIt in @($pool.Items)) {
+                if ($otherIt.Id -ne $cleanId -and $otherIt.Mode -eq 'tailscale') {
+                    $otherRt = Get-PublicTunnelItemRuntimeState -Context $Context -Item $otherIt
+                    if ($otherRt.Running -or $otherIt.DesiredRunning) {
+                        Set-PublicTunnelItemDesiredRunning -Context $Context -TunnelId $otherIt.Id -DesiredRunning $false
+                        $otherRtPath = Join-Path $Context.DataRoot "public-tunnel-rt-$($otherIt.Id).json"
+                        if (Test-Path -LiteralPath $otherRtPath) {
+                            Remove-Item -LiteralPath $otherRtPath -Force -ErrorAction SilentlyContinue
+                        }
+                        [void]$script:PublicTunnelItemRtCache.Remove("$($Context.DataRoot)|$($otherIt.Id)")
+                    }
+                }
+            }
+        }
+
+        # Ensure local Shield (:8766) is open during real non-isolated runs
+        if ((-not $isIsolatedCtx) -and (-not $ClientPath) -and (-not $TailscalePath)) {
+            try {
+                if (-not (Test-LocalUrlPortOpen "http://127.0.0.1:$Port")) {
+                    $settingsObj = Read-ConnectionSettings $Context
+                    [void](Start-ReadOnlyShield $Context $settingsObj (Get-OfficialCoreEndpoint $settingsObj))
+                }
+            } catch { }
+        }
+
+        $nowIso = [DateTime]::UtcNow.ToString('o')
+
+        # Case 1: (!$fixedUrl && !$cleanKey) -> Mode 'quick' ('免费临时隧道')
+        if ($mode -eq 'quick') {
+            if ($isIsolatedCtx -and (-not $ClientPath)) {
+                $slug = ($cleanId -replace '[^a-zA-Z0-9-]', '-').Trim('-').ToLowerInvariant()
+                if (-not $slug) { $slug = 'quick' }
+                $simUrl = "https://sim-$slug.trycloudflare.com/mcp"
+                Write-PublicTunnelItemRuntimeFile -Context $Context -TunnelId $cleanId -StateData @{
+                    TunnelId          = $cleanId
+                    Mode              = 'quick'
+                    ModeLabel         = '免费临时隧道'
+                    ProcessId         = 0
+                    StartTicks        = 0
+                    Simulated         = $true
+                    FixedUrl          = ''
+                    EffectiveUrl      = $simUrl
+                    Port              = $Port
+                    Running           = $true
+                    Status            = '运行中'
+                    HealthPhase       = 'Online'
+                    PublicRttMs       = 15
+                    ErrorReason       = ''
+                    VerifiedIngressIp = '203.0.113.10'
+                    LastCheckedUtc    = $nowIso
+                }
+                return (Get-PublicTunnelItemRuntimeState -Context $Context -Item $item)
+            }
+
+            $cfExe = Resolve-CloudflaredClientPath -ClientPath $ClientPath -Context $Context
+            if (-not $cfExe) {
+                Write-PublicTunnelItemRuntimeFile -Context $Context -TunnelId $cleanId -StateData @{
+                    TunnelId       = $cleanId
+                    Mode           = 'quick'
+                    ModeLabel      = '免费临时隧道'
+                    ProcessId      = 0
+                    StartTicks     = 0
+                    FixedUrl       = ''
+                    EffectiveUrl   = ''
+                    Port           = $Port
+                    Running        = $false
+                    Status         = '连接失败'
+                    HealthPhase    = 'Fault'
+                    PublicRttMs    = 0
+                    ErrorReason    = '免费临时隧道连接超时，请检查本机网络或代理设置'
+                    LastCheckedUtc = $nowIso
+                }
+                return (Get-PublicTunnelItemRuntimeState -Context $Context -Item $item)
+            }
+
+            $logPath = Join-Path $Context.DataRoot "public-tunnel-$cleanId.log"
+            [IO.File]::WriteAllText($logPath, '', (New-Object Text.UTF8Encoding($false)))
+            $psi = New-Object Diagnostics.ProcessStartInfo
+            $psi.FileName = $cfExe
+            $psi.UseShellExecute = $false
+            $psi.CreateNoWindow = $true
+            $proxyRes = Resolve-EffectiveOutboundProxyEnv -Context $Context
+            foreach ($envKey in @('HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy', 'NO_PROXY', 'no_proxy')) {
+                $valStr = if ($proxyRes.Environment.ContainsKey($envKey)) { [string]$proxyRes.Environment[$envKey] } else { '' }
+                if ($valStr -ne '') { $psi.EnvironmentVariables[$envKey] = $valStr }
+                else { [void]$psi.EnvironmentVariables.Remove($envKey) }
+            }
+            $psi.EnvironmentVariables['TUNNEL_LOGFILE'] = $logPath
+            $psi.Arguments = 'tunnel --no-autoupdate --protocol http2 --no-chunked-encoding --logfile "' + $logPath + '" --url http://127.0.0.1:' + $Port
+
+            $proc = [Diagnostics.Process]::Start($psi)
+            $procTicks = $proc.StartTime.ToUniversalTime().Ticks
+            $pollDeadline = [DateTime]::UtcNow.AddMilliseconds(7500)
+            $discoveredUrl = ''
+            $registeredOk = $false
+
+            while ([DateTime]::UtcNow -lt $pollDeadline) {
+                Start-Sleep -Milliseconds 150
+                if ($proc.HasExited) { break }
+                $snip = Read-SharedPublicTunnelLogSnippet -LogPath $logPath
+                if ($snip.DiscoveredUrl) { $discoveredUrl = $snip.DiscoveredUrl }
+                if ($discoveredUrl -and $snip.Registered) {
+                    $registeredOk = $true
+                    break
+                }
+            }
+
+            if ($discoveredUrl -and (-not $registeredOk) -and (-not $proc.HasExited)) {
+                $probeQuick = Test-PublicMcpEdgeHealth -Url $discoveredUrl -Context $Context -TimeoutMs 1500
+                if ($probeQuick -and $probeQuick.Reachable) {
+                    $registeredOk = $true
+                }
+            }
+
+            if ($registeredOk -and $discoveredUrl -and (-not $proc.HasExited)) {
+                Write-PublicTunnelItemRuntimeFile -Context $Context -TunnelId $cleanId -StateData @{
+                    TunnelId       = $cleanId
+                    Mode           = 'quick'
+                    ModeLabel      = '免费临时隧道'
+                    ProcessId      = $proc.Id
+                    StartTicks     = $procTicks
+                    FixedUrl       = ''
+                    EffectiveUrl   = $discoveredUrl
+                    Port           = $Port
+                    Running        = $true
+                    Status         = '运行中'
+                    HealthPhase    = 'Online'
+                    PublicRttMs    = 0
+                    ErrorReason    = ''
+                    LastCheckedUtc = [DateTime]::UtcNow.ToString('o')
+                }
+                return (Get-PublicTunnelItemRuntimeState -Context $Context -Item $item)
+            }
+
+            if (-not $proc.HasExited) {
+                try { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue } catch { }
+            }
+            Write-PublicTunnelItemRuntimeFile -Context $Context -TunnelId $cleanId -StateData @{
+                TunnelId       = $cleanId
+                Mode           = 'quick'
+                ModeLabel      = '免费临时隧道'
+                ProcessId      = 0
+                StartTicks     = 0
+                FixedUrl       = ''
+                EffectiveUrl   = ''
+                Port           = $Port
+                Running        = $false
+                Status         = '连接失败'
+                HealthPhase    = 'Fault'
+                PublicRttMs    = 0
+                ErrorReason    = '免费临时隧道连接超时，请检查本机网络或代理设置'
+                LastCheckedUtc = [DateTime]::UtcNow.ToString('o')
+            }
+            return (Get-PublicTunnelItemRuntimeState -Context $Context -Item $item)
+        }
+
+        # Case 2: ($cleanKey is non-empty) -> Mode 'cloudflare_key' ('Cloudflare 专线')
+        if ($mode -eq 'cloudflare_key') {
+            if (-not $fixedUrl) {
+                Write-PublicTunnelItemRuntimeFile -Context $Context -TunnelId $cleanId -StateData @{
+                    TunnelId       = $cleanId
+                    Mode           = 'cloudflare_key'
+                    ModeLabel      = 'Cloudflare 专线'
+                    ProcessId      = 0
+                    StartTicks     = 0
+                    FixedUrl       = ''
+                    EffectiveUrl   = ''
+                    Port           = $Port
+                    Running        = $false
+                    Status         = '连接失败'
+                    HealthPhase    = 'Fault'
+                    PublicRttMs    = 0
+                    ErrorReason    = '请先在编辑中填写该隧道对应的公网网址，以便生成连接地址'
+                    LastCheckedUtc = $nowIso
+                }
+                return (Get-PublicTunnelItemRuntimeState -Context $Context -Item $item)
+            }
+
+            if ($isIsolatedCtx -and (-not $ClientPath)) {
+                Write-PublicTunnelItemRuntimeFile -Context $Context -TunnelId $cleanId -StateData @{
+                    TunnelId          = $cleanId
+                    Mode              = 'cloudflare_key'
+                    ModeLabel         = 'Cloudflare 专线'
+                    ProcessId         = 0
+                    StartTicks        = 0
+                    Simulated         = $true
+                    FixedUrl          = $fixedUrl
+                    EffectiveUrl      = $fixedUrl
+                    Port              = $Port
+                    Running           = $true
+                    Status            = '运行中'
+                    HealthPhase       = 'Online'
+                    PublicRttMs       = 15
+                    ErrorReason       = ''
+                    VerifiedIngressIp = '203.0.113.10'
+                    LastCheckedUtc    = $nowIso
+                }
+                return (Get-PublicTunnelItemRuntimeState -Context $Context -Item $item)
+            }
+
+            $cfExe = Resolve-CloudflaredClientPath -ClientPath $ClientPath -Context $Context
+            if (-not $cfExe) {
+                Write-PublicTunnelItemRuntimeFile -Context $Context -TunnelId $cleanId -StateData @{
+                    TunnelId       = $cleanId
+                    Mode           = 'cloudflare_key'
+                    ModeLabel      = 'Cloudflare 专线'
+                    ProcessId      = 0
+                    StartTicks     = 0
+                    FixedUrl       = $fixedUrl
+                    EffectiveUrl   = $fixedUrl
+                    Port           = $Port
+                    Running        = $false
+                    Status         = '连接失败'
+                    HealthPhase    = 'Fault'
+                    PublicRttMs    = 0
+                    ErrorReason    = '隧道启动凭证 Key 无效，或无法连接 Cloudflare 服务器'
+                    LastCheckedUtc = $nowIso
+                }
+                return (Get-PublicTunnelItemRuntimeState -Context $Context -Item $item)
+            }
+
+            $logPath = Join-Path $Context.DataRoot "public-tunnel-$cleanId.log"
+            [IO.File]::WriteAllText($logPath, '', (New-Object Text.UTF8Encoding($false)))
+            $psi = New-Object Diagnostics.ProcessStartInfo
+            $psi.FileName = $cfExe
+            $psi.UseShellExecute = $false
+            $psi.CreateNoWindow = $true
+            $proxyRes = Resolve-EffectiveOutboundProxyEnv -Context $Context
+            foreach ($envKey in @('HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy', 'NO_PROXY', 'no_proxy')) {
+                $valStr = if ($proxyRes.Environment.ContainsKey($envKey)) { [string]$proxyRes.Environment[$envKey] } else { '' }
+                if ($valStr -ne '') { $psi.EnvironmentVariables[$envKey] = $valStr }
+                else { [void]$psi.EnvironmentVariables.Remove($envKey) }
+            }
+            $psi.EnvironmentVariables['TUNNEL_LOGFILE'] = $logPath
+            $psi.EnvironmentVariables['TUNNEL_TOKEN'] = $cleanKey
+            $psi.Arguments = 'tunnel --no-autoupdate --protocol http2 --no-chunked-encoding --logfile "' + $logPath + '" run --token "' + $cleanKey + '"'
+
+            $proc = [Diagnostics.Process]::Start($psi)
+            $procTicks = $proc.StartTime.ToUniversalTime().Ticks
+            $pollDeadline = [DateTime]::UtcNow.AddMilliseconds(6000)
+            $registeredOk = $false
+
+            while ([DateTime]::UtcNow -lt $pollDeadline) {
+                Start-Sleep -Milliseconds 150
+                if ($proc.HasExited) { break }
+                $snip = Read-SharedPublicTunnelLogSnippet -LogPath $logPath
+                if ($snip.Registered) {
+                    $registeredOk = $true
+                    break
+                }
+            }
+
+            if ($registeredOk -and (-not $proc.HasExited)) {
+                Write-PublicTunnelItemRuntimeFile -Context $Context -TunnelId $cleanId -StateData @{
+                    TunnelId       = $cleanId
+                    Mode           = 'cloudflare_key'
+                    ModeLabel      = 'Cloudflare 专线'
+                    ProcessId      = $proc.Id
+                    StartTicks     = $procTicks
+                    FixedUrl       = $fixedUrl
+                    EffectiveUrl   = $fixedUrl
+                    Port           = $Port
+                    Running        = $true
+                    Status         = '运行中'
+                    HealthPhase    = 'Online'
+                    PublicRttMs    = 0
+                    ErrorReason    = ''
+                    LastCheckedUtc = [DateTime]::UtcNow.ToString('o')
+                }
+                return (Get-PublicTunnelItemRuntimeState -Context $Context -Item $item)
+            }
+
+            if (-not $proc.HasExited) {
+                try { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue } catch { }
+            }
+            Write-PublicTunnelItemRuntimeFile -Context $Context -TunnelId $cleanId -StateData @{
+                TunnelId       = $cleanId
+                Mode           = 'cloudflare_key'
+                ModeLabel      = 'Cloudflare 专线'
+                ProcessId      = 0
+                StartTicks     = 0
+                FixedUrl       = $fixedUrl
+                EffectiveUrl   = $fixedUrl
+                Port           = $Port
+                Running        = $false
+                Status         = '连接失败'
+                HealthPhase    = 'Fault'
+                PublicRttMs    = 0
+                ErrorReason    = '隧道启动凭证 Key 无效，或无法连接 Cloudflare 服务器'
+                LastCheckedUtc = [DateTime]::UtcNow.ToString('o')
+            }
+            return (Get-PublicTunnelItemRuntimeState -Context $Context -Item $item)
+        }
+
+        # Case 3: ($fixedUrl host ends with .ts.net && !$cleanKey) -> Mode 'tailscale' ('Tailscale')
+        if ($mode -eq 'tailscale') {
+            if ($isIsolatedCtx -and (-not $TailscalePath) -and ($null -eq $script:TailscaleClientPathOverride) -and (-not $hasEdgeOverride)) {
+                Write-PublicTunnelItemRuntimeFile -Context $Context -TunnelId $cleanId -StateData @{
+                    TunnelId          = $cleanId
+                    Mode              = 'tailscale'
+                    ModeLabel         = 'Tailscale'
+                    ProcessId         = 0
+                    StartTicks        = 0
+                    Simulated         = $true
+                    FixedUrl          = $fixedUrl
+                    EffectiveUrl      = $fixedUrl
+                    Port              = $Port
+                    Running           = $true
+                    Status            = '运行中'
+                    HealthPhase       = 'Online'
+                    PublicRttMs       = 15
+                    ErrorReason       = ''
+                    VerifiedIngressIp = '203.0.113.10'
+                    LastCheckedUtc    = $nowIso
+                }
+                return (Get-PublicTunnelItemRuntimeState -Context $Context -Item $item)
+            }
+
+            $tsExe = Resolve-TailscaleClientPath -TailscalePath $TailscalePath -Context $Context
+            if (-not $tsExe) {
+                Write-PublicTunnelItemRuntimeFile -Context $Context -TunnelId $cleanId -StateData @{
+                    TunnelId       = $cleanId
+                    Mode           = 'tailscale'
+                    ModeLabel      = 'Tailscale'
+                    ProcessId      = 0
+                    StartTicks     = 0
+                    FixedUrl       = $fixedUrl
+                    EffectiveUrl   = $fixedUrl
+                    Port           = $Port
+                    Running        = $false
+                    Status         = '连接失败'
+                    HealthPhase    = 'Fault'
+                    PublicRttMs    = 0
+                    ErrorReason    = '本机未安装 Tailscale 客户端'
+                    LastCheckedUtc = $nowIso
+                }
+                return (Get-PublicTunnelItemRuntimeState -Context $Context -Item $item)
+            }
+
+            $stRes = Invoke-TailscaleCliFast -TailscaleExe $tsExe -Arguments @('status', '--json') -TimeoutMs 1500
+            $stObj = $null
+            if ($stRes.StdOut -and $stRes.StdOut.Trim()) {
+                try { $stObj = $stRes.StdOut.Trim() | ConvertFrom-Json } catch { $stObj = $null }
+            }
+            $backendState = if ($stObj -and $stObj.PSObject.Properties['BackendState']) { [string]$stObj.BackendState } else { '' }
+            if ($backendState -ne 'Running') {
+                $tsErr = Get-TailscaleOfflineErrorReason -TailscaleExe $tsExe -StatusObj $stObj
+                Write-PublicTunnelItemRuntimeFile -Context $Context -TunnelId $cleanId -StateData @{
+                    TunnelId       = $cleanId
+                    Mode           = 'tailscale'
+                    ModeLabel      = 'Tailscale'
+                    ProcessId      = 0
+                    StartTicks     = 0
+                    FixedUrl       = $fixedUrl
+                    EffectiveUrl   = $fixedUrl
+                    Port           = $Port
+                    Running        = $false
+                    Status         = '连接失败'
+                    HealthPhase    = 'Fault'
+                    PublicRttMs    = 0
+                    ErrorReason    = $tsErr
+                    LastCheckedUtc = [DateTime]::UtcNow.ToString('o')
+                }
+                return (Get-PublicTunnelItemRuntimeState -Context $Context -Item $item)
+            }
+
+            $funRes = Invoke-TailscaleCliFast -TailscaleExe $tsExe -Arguments @('funnel', '--bg', "$Port") -TimeoutMs 3500
+            if ($funRes.TimedOut -or ($funRes.ExitCode -ne 0)) {
+                Write-PublicTunnelItemRuntimeFile -Context $Context -TunnelId $cleanId -StateData @{
+                    TunnelId       = $cleanId
+                    Mode           = 'tailscale'
+                    ModeLabel      = 'Tailscale'
+                    ProcessId      = 0
+                    StartTicks     = 0
+                    FixedUrl       = $fixedUrl
+                    EffectiveUrl   = $fixedUrl
+                    Port           = $Port
+                    Running        = $false
+                    Status         = '连接失败'
+                    HealthPhase    = 'Fault'
+                    PublicRttMs    = 0
+                    ErrorReason    = 'Tailscale 尚未开启公网 Funnel 权限，请在 Tailscale 网页后台 DNS 页面开启 HTTPS 与 Funnel'
+                    LastCheckedUtc = [DateTime]::UtcNow.ToString('o')
+                }
+                return (Get-PublicTunnelItemRuntimeState -Context $Context -Item $item)
+            }
+
+            $edge = Test-PublicMcpEdgeHealth -Url $fixedUrl -Context $Context -TimeoutMs 3500
+            if ($edge -and $edge.Reachable) {
+                $phase = if ($edge.Phase -eq 'Degraded') { 'Degraded' } else { 'Online' }
+                Write-PublicTunnelItemRuntimeFile -Context $Context -TunnelId $cleanId -StateData @{
+                    TunnelId          = $cleanId
+                    Mode              = 'tailscale'
+                    ModeLabel         = 'Tailscale'
+                    ProcessId         = 0
+                    StartTicks        = 0
+                    TailscalePath     = $tsExe
+                    FixedUrl          = $fixedUrl
+                    EffectiveUrl      = $fixedUrl
+                    Port              = $Port
+                    Running           = $true
+                    Status            = '运行中'
+                    HealthPhase       = $phase
+                    PublicRttMs       = [int]$edge.PublicRttMs
+                    ErrorReason       = ''
+                    VerifiedIngressIp = [string]$edge.IngressIp
+                    LastCheckedUtc    = [DateTime]::UtcNow.ToString('o')
+                }
+                return (Get-PublicTunnelItemRuntimeState -Context $Context -Item $item)
+            }
+
+            Write-PublicTunnelItemRuntimeFile -Context $Context -TunnelId $cleanId -StateData @{
+                TunnelId       = $cleanId
+                Mode           = 'tailscale'
+                ModeLabel      = 'Tailscale'
+                ProcessId      = 0
+                StartTicks     = 0
+                TailscalePath  = $tsExe
+                FixedUrl       = $fixedUrl
+                EffectiveUrl   = $fixedUrl
+                Port           = $Port
+                Running        = $false
+                Status         = '连接失败'
+                HealthPhase    = 'Fault'
+                PublicRttMs    = 0
+                ErrorReason    = 'Tailscale 公网映射已开启，但外部网络暂无法连通该域名'
+                LastCheckedUtc = [DateTime]::UtcNow.ToString('o')
+            }
+            return (Get-PublicTunnelItemRuntimeState -Context $Context -Item $item)
+        }
+
+        # Case 4: ($fixedUrl non-.ts.net && !$cleanKey) -> Mode 'external_url' ('外部公网隧道')
+        $edgeExt = Test-PublicMcpEdgeHealth -Url $fixedUrl -Context $Context -TimeoutMs 3500
+        if ($edgeExt -and $edgeExt.Reachable) {
+            $extPhase = if ($edgeExt.Phase -eq 'Degraded') { 'Degraded' } else { 'Online' }
+            Write-PublicTunnelItemRuntimeFile -Context $Context -TunnelId $cleanId -StateData @{
+                TunnelId          = $cleanId
+                Mode              = 'external_url'
+                ModeLabel         = '外部公网隧道'
+                ProcessId         = 0
+                StartTicks        = 0
+                FixedUrl          = $fixedUrl
+                EffectiveUrl      = $fixedUrl
+                Port              = $Port
+                Running           = $true
+                Status            = '运行中'
+                HealthPhase       = $extPhase
+                PublicRttMs       = [int]$edgeExt.PublicRttMs
+                ErrorReason       = ''
+                VerifiedIngressIp = [string]$edgeExt.IngressIp
+                LastCheckedUtc    = [DateTime]::UtcNow.ToString('o')
+            }
+            return (Get-PublicTunnelItemRuntimeState -Context $Context -Item $item)
+        }
+
+        Write-PublicTunnelItemRuntimeFile -Context $Context -TunnelId $cleanId -StateData @{
+            TunnelId       = $cleanId
+            Mode           = 'external_url'
+            ModeLabel      = '外部公网隧道'
+            ProcessId      = 0
+            StartTicks     = 0
+            FixedUrl       = $fixedUrl
+            EffectiveUrl   = $fixedUrl
+            Port           = $Port
+            Running        = $false
+            Status         = '连接失败'
+            HealthPhase    = 'Fault'
+            PublicRttMs    = 0
+            ErrorReason    = '该公网网址当前无法连通本机工作台，请确认外部隧道工具已开启并指向 127.0.0.1:8766'
+            LastCheckedUtc = [DateTime]::UtcNow.ToString('o')
+        }
+        return (Get-PublicTunnelItemRuntimeState -Context $Context -Item $item)
+    } finally {
+        if ($opLock) { $opLock.Dispose() }
+    }
+}
+
+function Stop-PublicTunnelItem {
+    param(
+        $Context,
+        [string]$TunnelId,
+        [string]$TailscalePath = '',
+        [switch]$SkipDesiredStateUpdate
+    )
+    $cleanId = if ($TunnelId) { $TunnelId.Trim() } else { '' }
+    if (-not $cleanId) { return }
+    [IO.Directory]::CreateDirectory($Context.DataRoot) | Out-Null
+
+    if (-not $SkipDesiredStateUpdate) {
+        Set-PublicTunnelItemDesiredRunning -Context $Context -TunnelId $cleanId -DesiredRunning $false
+    }
+
+    $opLockPath = Join-Path $Context.DataRoot "public-tunnel-op-$cleanId.lock"
+    $opLock = $null
+    $lockDeadline = [DateTime]::UtcNow.AddSeconds(5)
+    while (-not $opLock) {
+        try { $opLock = [IO.File]::Open($opLockPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None) }
+        catch { if ([DateTime]::UtcNow -gt $lockDeadline) { break }; Start-Sleep -Milliseconds 40 }
+    }
+    try {
+        $pool = Get-PublicTunnelsPool -Context $Context
+        $item = $pool.Items | Where-Object { $_.Id -eq $cleanId } | Select-Object -First 1
+        $rtPath = Join-Path $Context.DataRoot "public-tunnel-rt-$cleanId.json"
+        $saved = $null
+        if (Test-Path -LiteralPath $rtPath) {
+            try { $saved = [IO.File]::ReadAllText($rtPath, [Text.Encoding]::UTF8) | ConvertFrom-Json } catch { $saved = $null }
+        }
+        if ($item) {
+            $curRt = Get-PublicTunnelItemRuntimeState -Context $Context -Item $item
+            if ($curRt.ProcessId -gt 0) {
+                Stop-Process -Id $curRt.ProcessId -Force -ErrorAction SilentlyContinue
+            }
+        } elseif ($saved -and $saved.PSObject.Properties['ProcessId'] -and [int]$saved.ProcessId -gt 0) {
+            Stop-Process -Id ([int]$saved.ProcessId) -Force -ErrorAction SilentlyContinue
+        }
+
+        $itemMode = if ($item) { [string]$item.Mode } elseif ($saved -and $saved.PSObject.Properties['Mode']) { [string]$saved.Mode } else { '' }
+        if ($itemMode -eq 'tailscale') {
+            $savedTsPath = if ($TailscalePath) { $TailscalePath } elseif ($saved -and $saved.PSObject.Properties['TailscalePath']) { [string]$saved.TailscalePath } else { '' }
+            $tsExe = Resolve-TailscaleClientPath -TailscalePath $savedTsPath -Context $Context
+            if ($tsExe) {
+                [void](Invoke-TailscaleCliFast -TailscaleExe $tsExe -Arguments @('funnel', '--https=443', 'off') -TimeoutMs 2500)
+            }
+        }
+
+        if (Test-Path -LiteralPath $rtPath) {
+            Remove-Item -LiteralPath $rtPath -Force -ErrorAction SilentlyContinue
+        }
+        [void]$script:PublicTunnelItemRtCache.Remove("$($Context.DataRoot)|$cleanId")
+    } finally {
+        if ($opLock) { $opLock.Dispose() }
+    }
+}
+
+function Stop-AllPublicTunnelItems {
+    param(
+        $Context,
+        [switch]$PreserveDesiredState
+    )
+    $pool = Get-PublicTunnelsPool -Context $Context
+    foreach ($it in @($pool.Items)) {
+        $rt = Get-PublicTunnelItemRuntimeState -Context $Context -Item $it
+        if ($rt.Running -or $rt.ProcessId -gt 0 -or ((-not $PreserveDesiredState) -and $it.DesiredRunning)) {
+            Stop-PublicTunnelItem -Context $Context -TunnelId $it.Id -SkipDesiredStateUpdate:$PreserveDesiredState
+        }
+    }
+}
+
+function Get-PublicTunnelItemsWithRuntime {
+    param(
+        $Context,
+        $Settings = $null,
+        [string[]]$EnabledPlatforms = $null,
+        [switch]$DeepPublicProbe
+    )
+    $pool = Get-PublicTunnelsPool -Context $Context -Settings $Settings
+    if ($null -eq $EnabledPlatforms) {
+        $profState = Get-ConnectionProfiles $Context $Settings
+        $EnabledPlatforms = @($profState.EnabledPlatforms | ForEach-Object { [string]$_ })
+    }
+    $selGem = [string]$pool.SelectedByPlatform['gemini']
+    $selCla = [string]$pool.SelectedByPlatform['claude']
+
+    $resultList = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($it in @($pool.Items)) {
+        $rt = Get-PublicTunnelItemRuntimeState -Context $Context -Item $it
+        if ($DeepPublicProbe -and (-not $Context.Isolated) -and $rt.Running -and $rt.EffectiveUrl -and ($rt.Mode -in @('tailscale', 'external_url'))) {
+            $checkedDto = [DateTimeOffset]::MinValue
+            $isFresh = ($rt.LastCheckedUtc -and [DateTimeOffset]::TryParse([string]$rt.LastCheckedUtc, [ref]$checkedDto) -and (([DateTimeOffset]::UtcNow - $checkedDto).TotalSeconds -lt 15.0))
+            if (-not $isFresh) {
+                try {
+                    $edge = Test-PublicMcpEdgeHealth -Url ([string]$rt.EffectiveUrl) -Context $Context -TimeoutMs 3500
+                    if ($edge) {
+                        $newRunning = [bool]$edge.Reachable
+                        $newPhase = if (-not $newRunning) { 'Fault' } elseif ($edge.Phase -eq 'Degraded') { 'Degraded' } else { 'Online' }
+                        $newStatus = if ($newRunning) { '运行中' } else { '连接失败' }
+                        $newErr = if ($newRunning) { '' } elseif ($rt.Mode -eq 'tailscale') { 'Tailscale 公网映射已开启，但外部网络暂无法连通该域名' } else { '该公网网址当前无法连通本机工作台，请确认外部隧道工具已开启并指向 127.0.0.1:8766' }
+                        Write-PublicTunnelItemRuntimeFile -Context $Context -TunnelId $it.Id -StateData @{
+                            TunnelId          = $it.Id
+                            Mode              = $rt.Mode
+                            ModeLabel         = $rt.ModeLabel
+                            ProcessId         = 0
+                            StartTicks        = 0
+                            FixedUrl          = [string]$it.BaseUrl
+                            EffectiveUrl      = [string]$rt.EffectiveUrl
+                            Running           = $newRunning
+                            Status            = $newStatus
+                            HealthPhase       = $newPhase
+                            PublicRttMs       = [int]$edge.PublicRttMs
+                            ErrorReason       = $newErr
+                            VerifiedIngressIp = [string]$edge.IngressIp
+                            LastCheckedUtc    = [DateTime]::UtcNow.ToString('o')
+                        }
+                        $rt = Get-PublicTunnelItemRuntimeState -Context $Context -Item $it
+                    }
+                } catch { }
+            }
+        }
+
+        $usedPlats = New-Object 'System.Collections.Generic.List[string]'
+        if (($EnabledPlatforms -contains 'gemini') -and ($selGem -eq $it.Id)) {
+            [void]$usedPlats.Add('gemini')
+        }
+        if (($EnabledPlatforms -contains 'claude') -and ($selCla -eq $it.Id)) {
+            [void]$usedPlats.Add('claude')
+        }
+
+        [void]$resultList.Add([pscustomobject]([ordered]@{
+            Id              = [string]$it.Id
+            Name            = [string]$it.Name
+            IsBuiltin       = [bool]$it.IsBuiltin
+            BaseUrl         = [string]$it.BaseUrl
+            EffectiveUrl    = [string]$rt.EffectiveUrl
+            HasKey          = [bool]$it.HasKey
+            MaskedKey       = [string]$it.MaskedKey
+            Mode            = [string]$rt.Mode
+            ModeLabel       = [string]$rt.ModeLabel
+            Running         = [bool]$rt.Running
+            Status          = [string]$rt.Status
+            HealthPhase     = [string]$rt.HealthPhase
+            PublicRttMs     = [int]$rt.PublicRttMs
+            ErrorReason     = [string]$rt.ErrorReason
+            ProcessId       = [int]$rt.ProcessId
+            UsedByPlatforms = [string[]]@($usedPlats.ToArray())
+        }))
+    }
+
+    return [pscustomobject]@{
+        SelectedByPlatform = [pscustomobject]([ordered]@{
+            gemini = $selGem
+            claude = $selCla
+        })
+        PublicTunnels      = [object[]]@($resultList.ToArray())
+    }
 }
 
 Export-ModuleMember -Function *-* -Alias *

@@ -1,4 +1,4 @@
-﻿param([string]$EvidenceRoot = (Join-Path ([IO.Path]::GetTempPath()) 'relaystudio-test-outputs'), [switch]$PublicTunnelOnly, [switch]$ModelCatalogOnly)
+﻿param([string]$EvidenceRoot = (Join-Path ([IO.Path]::GetTempPath()) 'relaystudio-test-outputs'), [switch]$PublicTunnelOnly, [switch]$ModelCatalogOnly, [switch]$SkipPythonSeams)
 
 $ErrorActionPreference='Stop'
 
@@ -17,6 +17,238 @@ $script:passed=0
 function Assert([bool]$Condition,[string]$Message) { if (-not $Condition) { throw "FAIL: $Message" }; $script:passed++ }
 
 function Assert-Throws([scriptblock]$Action,[string]$Message) { $thrown=$false;try { & $Action | Out-Null }catch { $thrown=$true }; Assert $thrown $Message }
+
+function Invoke-UnifiedPublicTunnelPoolAndEnvTests {
+    param([string]$SuiteRoot, [string]$RepoRoot)
+
+    # A. Resolve-CloudflaredClientPath prioritizes ReleaseRoot\bin\cloudflared.exe & repo bin\cloudflared.exe
+    $cfStageRoot = Join-Path $SuiteRoot 'cf-rel'
+    $cfStageBin = Join-Path $cfStageRoot 'bin'
+    [IO.Directory]::CreateDirectory($cfStageBin) | Out-Null
+    $stagedCfExe = Join-Path $cfStageBin 'cloudflared.exe'
+    [IO.File]::WriteAllBytes($stagedCfExe, [byte[]](0x4D, 0x5A, 0x90, 0x00))
+    $cfCtx = New-ConnectionContext -DataRoot (Join-Path $SuiteRoot 'cf-data') -ReleaseRoot $cfStageRoot -Isolated
+    Assert ((Resolve-CloudflaredClientPath -Context $cfCtx -SkipScriptRootFallback) -eq $stagedCfExe) 'Resolve-CloudflaredClientPath checks ReleaseRoot\bin\cloudflared.exe first'
+    if (Test-Path -LiteralPath (Join-Path $RepoRoot 'bin\cloudflared.exe')) {
+        $repoResolvedCf = Resolve-CloudflaredClientPath -Context (New-ConnectionContext -DataRoot (Join-Path $SuiteRoot 'cf-data2') -ReleaseRoot (Join-Path $SuiteRoot 'empty-rel') -Isolated)
+        Assert ($repoResolvedCf -eq (Join-Path $RepoRoot 'bin\cloudflared.exe')) 'Resolve-CloudflaredClientPath resolves PSScriptRoot\bin\cloudflared.exe'
+    }
+
+    # B. Resolve-PythonExePath skips WindowsApps stub & 0-byte files and throws clear Chinese error when none valid
+    $pyTestDir = Join-Path $SuiteRoot 'py-discovery'
+    $winAppsDir = Join-Path $pyTestDir 'Microsoft\WindowsApps'
+    $zeroDir = Join-Path $pyTestDir 'ZeroStub'
+    $realPyDir = Join-Path $pyTestDir 'OfficialPython312'
+    [IO.Directory]::CreateDirectory($winAppsDir) | Out-Null
+    [IO.Directory]::CreateDirectory($zeroDir) | Out-Null
+    [IO.Directory]::CreateDirectory($realPyDir) | Out-Null
+    $winAppsPy = Join-Path $winAppsDir 'python.exe'
+    $zeroPy = Join-Path $zeroDir 'python.exe'
+    $validPy = Join-Path $realPyDir 'python.exe'
+    [IO.File]::WriteAllBytes($winAppsPy, [byte[]](0x4D, 0x5A, 0x01, 0x02))
+    [IO.File]::WriteAllBytes($zeroPy, [byte[]]@())
+    [IO.File]::WriteAllBytes($validPy, [byte[]](0x4D, 0x5A, 0x90, 0x00))
+
+    $resolvedPy = Resolve-PythonExePath -CandidatePathsOverride @($winAppsPy, $zeroPy, $validPy)
+    Assert ($resolvedPy -eq ([IO.Path]::GetFullPath($validPy))) 'Resolve-PythonExePath skips Microsoft\WindowsApps stub and 0-byte python.exe'
+    $pyErrMsg = ''
+    try {
+        [void](Resolve-PythonExePath -CandidatePathsOverride @($winAppsPy, $zeroPy))
+    } catch {
+        $pyErrMsg = [string]$_.Exception.Message
+    }
+    Assert ($pyErrMsg -eq '未检测到可用的 Python 3.11+ 环境（已跳过微软商店空壳别名），请先安装官方 Python 3.11+ 并勾选 Add to PATH。') "Resolve-PythonExePath throws exact Chinese guidance when only stubs exist (actual=$pyErrMsg)"
+
+    # C. Resolve-PublicMcpDohIpv4List 1200ms default timeout & OS DNS public-IPv4 fallback when DoH fails
+    $mod = Get-Module ConnectionManager
+    $dohDefaultTimeout = & $mod { (Get-Command Resolve-PublicMcpDohIpv4List).Parameters['TimeoutMs'].Attributes | Out-Null; $ast = (Get-Command Resolve-PublicMcpDohIpv4List).ScriptBlock.Ast; ($ast.Body.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'TimeoutMs' }).DefaultValue.Extent.Text }
+    Assert ($dohDefaultTimeout -eq '1200') "Resolve-PublicMcpDohIpv4List default TimeoutMs is 1200 (actual=$dohDefaultTimeout)"
+    try {
+        Set-PublicMcpDnsTestOverrides -DisableDoh $true -SystemDnsOverride {
+            param($TargetHost)
+            return @(
+                [Net.IPAddress]::Parse('198.18.0.25'),
+                [Net.IPAddress]::Parse('100.100.100.100'),
+                [Net.IPAddress]::Parse('127.0.0.1'),
+                [Net.IPAddress]::Parse('192.168.1.10'),
+                [Net.IPAddress]::Parse('103.84.155.153')
+            )
+        }
+        $fallbackIps = @(Resolve-PublicMcpDohIpv4List -HostName 'fallback-check.example.com')
+        Assert ($fallbackIps.Count -eq 1 -and $fallbackIps[0] -eq '103.84.155.153') 'Resolve-PublicMcpDohIpv4List falls back to OS DNS filtered through Test-IsPublicRoutableIpv4 when DoH fails'
+    } finally {
+        Set-PublicMcpDnsTestOverrides -DisableDoh $false -SystemDnsOverride $null
+    }
+
+    # D. Automatic Non-Destructive Migration & Deduplication from credential-profiles.json
+    $migCtx = New-ConnectionContext -DataRoot (Join-Path $SuiteRoot 'pool-mig') -Isolated
+    [void](Add-CapsulePlatform -Context $migCtx -Platform 'gemini')
+    [void](Add-CapsulePlatform -Context $migCtx -Platform 'claude')
+    $migProfs = Get-ConnectionProfiles $migCtx
+    $gemProfId = ($migProfs.Profiles | Where-Object { $_.Platform -eq 'gemini' } | Select-Object -First 1).Id
+    $claProfId = ($migProfs.Profiles | Where-Object { $_.Platform -eq 'claude' } | Select-Object -First 1).Id
+    [void](Save-ConnectionProfile -Context $migCtx -ProfileId $gemProfId -Name 'yuanyang' -Platform 'gemini' -Kind 'public_tunnel' -BaseUrl 'https://thinkbook16pl.tail29988f.ts.net/' -SetActive)
+    [void](Save-ConnectionProfile -Context $migCtx -ProfileId $claProfId -Name 'yuan' -Platform 'claude' -Kind 'public_tunnel' -BaseUrl 'https://thinkbook16pl.tail29988f.ts.net/mcp' -SetActive)
+
+    Assert (-not (Test-Path -LiteralPath (Join-Path $migCtx.DataRoot 'public-tunnels.json'))) 'public-tunnels.json absent before first Get-PublicTunnelsPool'
+    $migratedPool = Get-PublicTunnelsPool -Context $migCtx
+    Assert (Test-Path -LiteralPath (Join-Path $migCtx.DataRoot 'public-tunnels.json')) 'Get-PublicTunnelsPool creates public-tunnels.json automatically'
+    Assert ($migratedPool.Items.Count -eq 2) "Shared BaseUrl across gemini & claude deduplicates into 1 custom item + 1 builtin (count=$($migratedPool.Items.Count))"
+    Assert ($migratedPool.Items[0].Id -eq 'pub_builtin_quick' -and $migratedPool.Items[0].Name -eq '免费临时隧道' -and $migratedPool.Items[0].IsBuiltin) 'First item is always built-in pub_builtin_quick (免费临时隧道)'
+    $sharedCustom = $migratedPool.Items[1]
+    Assert ($sharedCustom.Id -like 'pub_*' -and (-not $sharedCustom.IsBuiltin) -and $sharedCustom.Name -eq 'yuanyang' -and $sharedCustom.BaseUrl -eq 'https://thinkbook16pl.tail29988f.ts.net/mcp' -and $sharedCustom.Mode -eq 'tailscale') 'Migrated custom item preserves first custom Name and normalized /mcp BaseUrl'
+    Assert ($migratedPool.SelectedByPlatform['gemini'] -eq $sharedCustom.Id -and $migratedPool.SelectedByPlatform['claude'] -eq $sharedCustom.Id) 'Both gemini and claude point to deduplicated shared tunnel id'
+
+    # Partial migration: gemini has custom URL+Key, claude has none -> claude defaults to pub_builtin_quick
+    $migCtx2 = New-ConnectionContext -DataRoot (Join-Path $SuiteRoot 'pool-mig2') -Isolated
+    [void](Add-CapsulePlatform -Context $migCtx2 -Platform 'gemini')
+    [void](Add-CapsulePlatform -Context $migCtx2 -Platform 'claude')
+    $migProfs2 = Get-ConnectionProfiles $migCtx2
+    $gemProfId2 = ($migProfs2.Profiles | Where-Object { $_.Platform -eq 'gemini' } | Select-Object -First 1).Id
+    [void](Save-ConnectionProfile -Context $migCtx2 -ProfileId $gemProfId2 -Name 'CF专线A' -Platform 'gemini' -Kind 'public_tunnel' -BaseUrl 'https://cf-edge.example.com' -ApiKey 'eyJhTokenMigrated123456' -SetActive)
+    $migratedPool2 = Get-PublicTunnelsPool -Context $migCtx2
+    $cfMigItem = $migratedPool2.Items | Where-Object { -not $_.IsBuiltin } | Select-Object -First 1
+    Assert ($null -ne $cfMigItem -and $cfMigItem.HasKey -and $cfMigItem.Mode -eq 'cloudflare_key' -and (Get-PublicTunnelItemSecret -Context $migCtx2 -TunnelId $cfMigItem.Id) -eq 'eyJhTokenMigrated123456') 'Migration encrypts PlainKey into public-tunnel-key-<id>.dpapi'
+    Assert ($migratedPool2.SelectedByPlatform['gemini'] -eq $cfMigItem.Id -and $migratedPool2.SelectedByPlatform['claude'] -eq 'pub_builtin_quick') 'Platform without custom URL defaults to pub_builtin_quick'
+
+    # E. CRUD, Builtin Protection, Rebinding on Delete & 4 Automatic Modes + Simultaneous Independent Runtime
+    $poolCtx = New-ConnectionContext -DataRoot (Join-Path $SuiteRoot 'pool-rt') -Isolated
+    Assert-Throws { Remove-PublicTunnelItem -Context $poolCtx -TunnelId 'pub_builtin_quick' } 'Built-in pub_builtin_quick cannot be deleted'
+    Assert-Throws { Save-PublicTunnelItem -Context $poolCtx -TunnelId 'pub_builtin_quick' -Name 'Hack' } 'Built-in pub_builtin_quick cannot be modified'
+
+    $savedNoUrlCf = Save-PublicTunnelItem -Context $poolCtx -Name '缺网址专线' -BaseUrl '' -StartupKey 'eyJhKeyWithoutUrl999'
+    $noUrlCfId = $savedNoUrlCf.LastSavedTunnelId
+    $noUrlRt = Start-PublicTunnelItem -Context $poolCtx -TunnelId $noUrlCfId
+    Assert ((-not $noUrlRt.Running) -and $noUrlRt.Status -eq '连接失败' -and $noUrlRt.HealthPhase -eq 'Fault' -and $noUrlRt.ErrorReason -eq '请先在编辑中填写该隧道对应的公网网址，以便生成连接地址') 'cloudflare_key without BaseUrl fails immediately with exact guidance'
+
+    # Compile fake-cloudflared-multi.exe supporting both quick (--url) and named (run --token) + bad-token exit
+    $multiCfExe = Join-Path $SuiteRoot 'fake-cloudflared-multi.exe'
+    $multiCfSrc = @'
+using System;
+using System.IO;
+using System.Threading;
+class FakeMultiCloudflared {
+    static int Main(string[] args) {
+        string logFile = "";
+        string token = "";
+        for (int i = 0; i < args.Length; i++) {
+            if (args[i] == "--logfile" && i + 1 < args.Length) logFile = args[i + 1];
+            if (args[i] == "--token" && i + 1 < args.Length) token = args[i + 1];
+        }
+        if (token == "BAD_TOKEN_EXIT") {
+            if (!string.IsNullOrEmpty(logFile)) File.AppendAllText(logFile, "ERR invalid tunnel token\n");
+            return 1;
+        }
+        if (!string.IsNullOrEmpty(logFile)) {
+            if (string.IsNullOrEmpty(token)) {
+                File.AppendAllText(logFile, "2026-11-12T00:00:00Z INF https://multi-quick-box.trycloudflare.com\n2026-11-12T00:00:01Z INF Registered tunnel connection connIndex=0\n");
+            } else {
+                File.AppendAllText(logFile, "2026-11-12T00:00:01Z INF Registered tunnel connection connIndex=0\n");
+            }
+        }
+        Thread.Sleep(60000);
+        return 0;
+    }
+}
+'@
+    $cscBin = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+    if ($PSVersionTable.PSEdition -eq 'Core' -and (Test-Path -LiteralPath $cscBin)) {
+        $multiCsFile = Join-Path $SuiteRoot 'FakeMultiCloudflared.cs'
+        [IO.File]::WriteAllText($multiCsFile, $multiCfSrc, [Text.Encoding]::UTF8)
+        & $cscBin /nologo /target:exe /out:$multiCfExe $multiCsFile | Out-Null
+    } else {
+        Add-Type -TypeDefinition $multiCfSrc -OutputAssembly $multiCfExe -OutputType ConsoleApplication
+    }
+
+    $savedNamed = Save-PublicTunnelItem -Context $poolCtx -Name '主力CF专线' -BaseUrl 'https://named-tunnel.example.com' -StartupKey 'eyJhValidNamedToken888'
+    $namedId = $savedNamed.LastSavedTunnelId
+    $savedBadCf = Save-PublicTunnelItem -Context $poolCtx -Name '坏凭证专线' -BaseUrl 'https://bad-token.example.com' -StartupKey 'BAD_TOKEN_EXIT'
+    $badCfId = $savedBadCf.LastSavedTunnelId
+
+    try {
+        # Simultaneous independent runtime: start pub_builtin_quick AND namedId concurrently!
+        $rtQuick1 = Start-PublicTunnelItem -Context $poolCtx -TunnelId 'pub_builtin_quick' -ClientPath $multiCfExe
+        $rtNamed1 = Start-PublicTunnelItem -Context $poolCtx -TunnelId $namedId -ClientPath $multiCfExe
+        Assert ($rtQuick1.Running -and $rtQuick1.ProcessId -gt 0 -and $rtQuick1.EffectiveUrl -eq 'https://multi-quick-box.trycloudflare.com/mcp') 'pub_builtin_quick running with live PID and discovered trycloudflare /mcp URL'
+        Assert ($rtNamed1.Running -and $rtNamed1.ProcessId -gt 0 -and $rtNamed1.EffectiveUrl -eq 'https://named-tunnel.example.com/mcp') 'Custom cloudflare_key tunnel running simultaneously with live PID'
+        Assert ($rtQuick1.ProcessId -ne $rtNamed1.ProcessId) 'Simultaneous public tunnels run as distinct independent cloudflared processes'
+        Assert ($null -ne (Get-Process -Id $rtQuick1.ProcessId -ErrorAction SilentlyContinue)) 'pub_builtin_quick process stayed alive when second tunnel started'
+
+        # Restarting pub_builtin_quick ONLY restarts pub_builtin_quick, leaving namedId untouched!
+        $origQuickPid = $rtQuick1.ProcessId
+        $origNamedPid = $rtNamed1.ProcessId
+        $rtQuick2 = Start-PublicTunnelItem -Context $poolCtx -TunnelId 'pub_builtin_quick' -ClientPath $multiCfExe
+        $rtNamedCheck = Get-PublicTunnelItemRuntimeState -Context $poolCtx -Item ((Get-PublicTunnelsPool -Context $poolCtx).Items | Where-Object Id -eq $namedId)
+        Assert ($rtQuick2.Running -and $rtQuick2.ProcessId -gt 0 -and $rtQuick2.ProcessId -ne $origQuickPid) 'Restarting item X spawns a fresh PID for item X'
+        Assert ($rtNamedCheck.Running -and $rtNamedCheck.ProcessId -eq $origNamedPid -and ($null -ne (Get-Process -Id $origNamedPid -ErrorAction SilentlyContinue))) 'Restarting item X NEVER stops running item Y'
+
+        # Bad token exits early -> exact Chinese ErrorReason without harming running tunnels
+        $rtBad = Start-PublicTunnelItem -Context $poolCtx -TunnelId $badCfId -ClientPath $multiCfExe
+        Assert ((-not $rtBad.Running) -and $rtBad.Status -eq '连接失败' -and $rtBad.HealthPhase -eq 'Fault' -and $rtBad.ErrorReason -eq '隧道启动凭证 Key 无效，或无法连接 Cloudflare 服务器') 'Invalid Cloudflare token reports exact ErrorReason'
+        Assert ($null -ne (Get-Process -Id $origNamedPid -ErrorAction SilentlyContinue)) 'Failed start on item Z leaves item Y running'
+
+        # Stopping pub_builtin_quick leaves namedId running
+        Stop-PublicTunnelItem -Context $poolCtx -TunnelId 'pub_builtin_quick'
+        $afterQuickStop = Get-PublicTunnelItemRuntimeState -Context $poolCtx -Item ((Get-PublicTunnelsPool -Context $poolCtx).Items | Where-Object Id -eq 'pub_builtin_quick')
+        $afterQuickStopNamed = Get-PublicTunnelItemRuntimeState -Context $poolCtx -Item ((Get-PublicTunnelsPool -Context $poolCtx).Items | Where-Object Id -eq $namedId)
+        Assert ((-not $afterQuickStop.Running) -and $afterQuickStopNamed.Running -and $afterQuickStopNamed.ProcessId -eq $origNamedPid) 'Stop-PublicTunnelItem stops only target item and keeps other tunnel alive'
+
+        # Bind gemini to namedId, then remove namedId -> stops process and rebinds gemini back to pub_builtin_quick
+        [void](Set-PlatformPublicTunnelBinding -Context $poolCtx -Platform 'gemini' -TunnelId $namedId)
+        Assert ((Get-PublicTunnelsPool -Context $poolCtx).SelectedByPlatform['gemini'] -eq $namedId) 'Set-PlatformPublicTunnelBinding binds gemini to custom tunnel'
+        $afterRemovePool = Remove-PublicTunnelItem -Context $poolCtx -TunnelId $namedId
+        Assert ($afterRemovePool.SelectedByPlatform['gemini'] -eq 'pub_builtin_quick') 'Removing bound tunnel automatically rebinds platform back to pub_builtin_quick'
+        Start-Sleep -Milliseconds 60
+        Assert ($null -eq (Get-Process -Id $origNamedPid -ErrorAction SilentlyContinue)) 'Remove-PublicTunnelItem stops running process of deleted tunnel'
+    } finally {
+        Stop-AllPublicTunnelItems -Context $poolCtx
+    }
+
+    # F. Tailscale fast 3-step diagnostics (<50ms missing client, Fake-IP 198.18.*, LoggedOut, Funnel off) & External URL mode
+    $tsSave = Save-PublicTunnelItem -Context $poolCtx -Name 'TS节点' -BaseUrl 'https://my-laptop.tail12345.ts.net'
+    $tsId = $tsSave.LastSavedTunnelId
+    $extSave = Save-PublicTunnelItem -Context $poolCtx -Name '外部FRP' -BaseUrl 'https://frp.custom-gateway.example.com'
+    $extId = $extSave.LastSavedTunnelId
+
+    try {
+        # 1. Missing tailscale.exe (<50ms)
+        Set-TailscaleTestOverrides -ClientPathOverride ''
+        Set-PublicMcpEdgeProbeOverride { return [pscustomobject]@{ Reachable = $false; Phase = 'Offline'; PublicRttMs = 0; IngressIp = '' } }
+        $swMissingTs = [Diagnostics.Stopwatch]::StartNew()
+        $rtTsMissing = Start-PublicTunnelItem -Context $poolCtx -TunnelId $tsId
+        $swMissingTs.Stop()
+        Assert ((-not $rtTsMissing.Running) -and $rtTsMissing.ErrorReason -eq '本机未安装 Tailscale 客户端' -and $swMissingTs.ElapsedMilliseconds -lt 250) "Missing tailscale.exe returns fast with exact ErrorReason (Elapsed=$($swMissingTs.ElapsedMilliseconds)ms)"
+
+        # 2. Fake-IP 198.18.* collision when BackendState != Running
+        $fakeTsStoppedCmd = Join-Path $SuiteRoot 'fake-ts-stopped.cmd'
+        [IO.File]::WriteAllText($fakeTsStoppedCmd, "@echo off`r`nif `"%1`"==`"status`" (`r`n  echo {`"BackendState`":`"NoState`"}`r`n  exit /b 0`r`n)`r`nif `"%1`"==`"debug`" (`r`n  echo {`"LoggedOut`":true}`r`n  exit /b 0`r`n)`r`nexit /b 0`r`n", [Text.Encoding]::ASCII)
+        Set-TailscaleTestOverrides -ControlPlaneIpsOverride @('198.18.0.88')
+        $rtTsFakeIp = Start-PublicTunnelItem -Context $poolCtx -TunnelId $tsId -TailscalePath $fakeTsStoppedCmd
+        Assert ((-not $rtTsFakeIp.Running) -and $rtTsFakeIp.ErrorReason -eq 'Tailscale 被本机代理虚拟网卡 (Fake-IP) 拦截，请将 +.tailscale.com 与 +.ts.net 加入代理 Fake-IP 绕过列表') 'Tailscale Fake-IP 198.18.* collision detected and reported accurately'
+
+        # 3. LoggedOut = true when DNS is normal
+        Set-TailscaleTestOverrides -ControlPlaneIpsOverride @('52.10.20.30')
+        $rtTsLoggedOut = Start-PublicTunnelItem -Context $poolCtx -TunnelId $tsId -TailscalePath $fakeTsStoppedCmd
+        Assert ((-not $rtTsLoggedOut.Running) -and $rtTsLoggedOut.ErrorReason -eq '本机 Tailscale 尚未登录，请在右下角托盘打开 Tailscale 登录') 'Tailscale LoggedOut state detected via debug prefs'
+
+        # 4. Funnel permission off (funnel --bg returns non-zero)
+        $fakeTsNoFunnelCmd = Join-Path $SuiteRoot 'fake-ts-nofunnel.cmd'
+        [IO.File]::WriteAllText($fakeTsNoFunnelCmd, "@echo off`r`nif `"%1`"==`"status`" (`r`n  echo {`"BackendState`":`"Running`",`"Self`":{`"DNSName`":`"my-laptop.tail12345.ts.net.`"}}`r`n  exit /b 0`r`n)`r`nif `"%1`"==`"funnel`" exit /b 1`r`nexit /b 0`r`n", [Text.Encoding]::ASCII)
+        $rtTsNoFunnel = Start-PublicTunnelItem -Context $poolCtx -TunnelId $tsId -TailscalePath $fakeTsNoFunnelCmd
+        Assert ((-not $rtTsNoFunnel.Running) -and $rtTsNoFunnel.ErrorReason -eq 'Tailscale 尚未开启公网 Funnel 权限，请在 Tailscale 网页后台 DNS 页面开启 HTTPS 与 Funnel') 'Tailscale Funnel non-zero exit reports exact permission guidance'
+
+        # 5. External URL mode offline vs online
+        $rtExtOff = Start-PublicTunnelItem -Context $poolCtx -TunnelId $extId
+        Assert ((-not $rtExtOff.Running) -and $rtExtOff.Mode -eq 'external_url' -and $rtExtOff.ModeLabel -eq '外部公网隧道' -and $rtExtOff.ErrorReason -eq '该公网网址当前无法连通本机工作台，请确认外部隧道工具已开启并指向 127.0.0.1:8766') 'External URL offline reports exact guidance'
+        Set-PublicMcpEdgeProbeOverride { return [pscustomobject]@{ Reachable = $true; Phase = 'Online'; PublicRttMs = 38; IngressIp = '104.21.8.8' } }
+        $rtExtOn = Start-PublicTunnelItem -Context $poolCtx -TunnelId $extId
+        Assert ($rtExtOn.Running -and $rtExtOn.EffectiveUrl -eq 'https://frp.custom-gateway.example.com/mcp' -and $rtExtOn.Status -eq '运行中' -and $rtExtOn.HealthPhase -eq 'Online' -and $rtExtOn.PublicRttMs -eq 38 -and $rtExtOn.ErrorReason -eq '') 'External URL online transitions to Running=true, Online'
+    } finally {
+        Set-TailscaleTestOverrides -ClientPathOverride $null -ControlPlaneIpsOverride $null
+        Set-PublicMcpEdgeProbeOverride $null
+        Stop-AllPublicTunnelItems -Context $poolCtx
+    }
+}
 
 Assert ((Get-WebRoomUrl -Record ([pscustomobject]@{provider='gemini'}) -Room 'abc123') -eq 'https://gemini.google.com/app/abc123') 'Gemini native room route'
 Assert ((Get-WebRoomUrl -Record ([pscustomobject]@{provider='claude'}) -Room 'aaa-bbb') -eq 'https://claude.ai/chat/aaa-bbb') 'Claude room route'
@@ -271,6 +503,8 @@ if ($PublicTunnelOnly) {
         Set-PublicMcpEdgeProbeOverride $null
         Stop-PublicMcpTunnel $ctx
     }
+
+    Invoke-UnifiedPublicTunnelPoolAndEnvTests -SuiteRoot (Join-Path $testRoot 'unified-pub') -RepoRoot $managerRoot
 
     # Verify UTF-8 BOM preservation and PowerShell AST clean parse on all 3 PowerShell files
     foreach ($psFile in @(
@@ -1855,24 +2089,26 @@ try {
 
     # 6. Run Python ShieldHub seam test suite (T1-T7)
 
-    $prevEap = $ErrorActionPreference
-    $ErrorActionPreference = 'Continue'
-    $pyTestOut = & python (Join-Path $PSScriptRoot 'test_shield_hub.py') 2>&1 | Out-String
-    $pyExit = $LASTEXITCODE
-    $ErrorActionPreference = $prevEap
-    Assert ($pyExit -eq 0) "Python ShieldHub seam tests (T1-T12) pass: $pyTestOut"
+    if (-not $SkipPythonSeams) {
+        $prevEap = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        $pyTestOut = & python (Join-Path $PSScriptRoot 'test_shield_hub.py') 2>&1 | Out-String
+        $pyExit = $LASTEXITCODE
+        $ErrorActionPreference = $prevEap
+        Assert ($pyExit -eq 0) "Python ShieldHub seam tests (T1-T12) pass: $pyTestOut"
 
-    $ErrorActionPreference = 'Continue'
-    $pyV41Out = & python (Join-Path $PSScriptRoot 'test_spec_v41.py') 2>&1 | Out-String
-    $pyV41Exit = $LASTEXITCODE
-    $ErrorActionPreference = $prevEap
-    Assert ($pyV41Exit -eq 0) "Python Spec v4.1 seam tests (T24-T28) pass: $pyV41Out"
+        $ErrorActionPreference = 'Continue'
+        $pyV41Out = & python (Join-Path $PSScriptRoot 'test_spec_v41.py') 2>&1 | Out-String
+        $pyV41Exit = $LASTEXITCODE
+        $ErrorActionPreference = $prevEap
+        Assert ($pyV41Exit -eq 0) "Python Spec v4.1 seam tests (T24-T28) pass: $pyV41Out"
 
-    $ErrorActionPreference = 'Continue'
-    $pyV44Out = & python (Join-Path $PSScriptRoot 'test_spec_v44.py') 2>&1 | Out-String
-    $pyV44Exit = $LASTEXITCODE
-    $ErrorActionPreference = $prevEap
-    Assert ($pyV44Exit -eq 0) "Python Spec v4.4 seam tests (Issues 1-6) pass: $pyV44Out"
+        $ErrorActionPreference = 'Continue'
+        $pyV44Out = & python (Join-Path $PSScriptRoot 'test_spec_v44.py') 2>&1 | Out-String
+        $pyV44Exit = $LASTEXITCODE
+        $ErrorActionPreference = $prevEap
+        Assert ($pyV44Exit -eq 0) "Python Spec v4.4 seam tests (Issues 1-6) pass: $pyV44Out"
+    }
     Assert ($uiScriptRaw -notmatch '\$pId\s*=' -and $uiScriptRaw -match '\$targetPaneId\s*=') 'Spec v4.4 Issue 1: openGptBtn never assigns to read-only automatic variable $PID'
     Assert ($psm1ScriptRaw -notmatch 'Invoke-CimMethod' -and $psm1ScriptRaw -match 'Start-InteractiveHiddenCmd') 'Spec v4.4 Issue 2: ConnectionManager.psm1 starts daemons via ProcessStartInfo in WinSta0\Default instead of Win32_Process'
 
@@ -2016,6 +2252,8 @@ try {
         Set-PublicMcpEdgeProbeOverride $null
         Stop-PublicMcpTunnel $script:context
     }
+
+    Invoke-UnifiedPublicTunnelPoolAndEnvTests -SuiteRoot (Join-Path $testRoot 'main-unified-pub') -RepoRoot $managerRoot
 
     # Verify UTF-8 BOM preservation and PowerShell AST clean parse on all 3 PowerShell files
     foreach ($psFile in @(

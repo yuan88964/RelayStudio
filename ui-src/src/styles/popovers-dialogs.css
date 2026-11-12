@@ -30,7 +30,7 @@
 }
 
 .global-settings-popover.anchored-popover-surface {
-  transform-origin: 85% 0%;
+  transform-origin: 15% 0%;
 }
 
 .anchored-popover-surface.is-gliding {
@@ -396,6 +396,19 @@
   color: var(--accent-text);
 }
 
+.th-strip-badge.is-muted {
+  background: var(--bg-pill);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.th-strip-badge.is-usage {
+  background: var(--accent-bg);
+  border: 1px solid var(--accent-border);
+  color: var(--accent-text);
+}
+
 .th-inline-toggle-btn {
   flex-shrink: 0;
   padding: 2px 7px;
@@ -676,6 +689,7 @@
   display: flex;
   flex-direction: column;
   gap: 11px;
+  interpolate-size: allow-keywords;
 }
 
 .gs-header {
@@ -690,16 +704,88 @@
   font-size: 13.5px;
   font-weight: 700;
   color: var(--text-primary);
+  flex-shrink: 0;
 }
 
-.gs-body-box {
+/* Segmented 2-Tab Switcher (`常规设置` | `隧道与连接`) — constant dimensions + border/underline indicator */
+.gs-seg-tablist {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2.5px;
+  border-radius: 8px;
+  background: var(--bg-pill);
+  border: 1px solid var(--border-subtle);
+  flex-shrink: 0;
+}
+
+.gs-seg-tab {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 24px;
+  padding: 0 11px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-muted);
+  font-family: var(--font-sans);
+  font-size: 11.5px;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+
+.gs-seg-tab:hover:not([aria-selected="true"]) {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+
+.gs-seg-tab[aria-selected="true"] {
+  background: var(--bg-surface);
+  border-color: var(--accent-border);
+  color: var(--accent-text);
+  box-shadow: var(--shadow-card);
+}
+
+.gs-seg-tab[aria-selected="true"]::after {
+  content: "";
+  position: absolute;
+  inset: auto 8px 1px;
+  border-block-end: 2px solid var(--accent);
+  border-radius: 2px;
+}
+
+.gs-root [role="tabpanel"][hidden] {
+  display: none;
+}
+
+.gs-panel-stack {
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  padding: 12px 12px;
-  border-radius: 10px;
+  gap: 9px;
+}
+
+.gs-section-card {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  padding: 10px 12px;
+  border-radius: 9px;
   border: 1px solid var(--border-subtle);
   background: var(--bg-subtle);
+}
+
+.gs-section-heading {
+  font-family: var(--font-serif);
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--text-muted);
+  letter-spacing: 0.02em;
+  line-height: 1.3;
 }
 
 .gs-row {
@@ -728,32 +814,285 @@
   margin: 1px 0;
 }
 
-.gs-core-status {
+/* Tab 2 Upper Overview Box (`本机核心与专属通道`) */
+.gs-overview-card {
+  gap: 7px;
+}
+
+.gs-overview-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 25px;
+}
+
+.gs-overview-left {
   display: flex;
   align-items: center;
   gap: 7px;
   min-width: 0;
+  flex: 1;
 }
 
-.gs-core-dot {
+.gs-status-dot {
   width: 8px;
   height: 8px;
   border-radius: 50%;
   flex-shrink: 0;
+  background: var(--text-faint);
+}
+
+.gs-status-dot.is-ok {
   background: var(--green);
 }
 
-.gs-core-dot.is-warn {
+.gs-status-dot.is-warn {
   background: var(--amber);
 }
 
-.gs-core-label {
+.gs-status-dot.is-fault {
+  background: var(--red);
+}
+
+.gs-status-dot.is-accent {
+  background: var(--accent);
+}
+
+.gs-status-dot.is-off {
+  background: var(--text-faint);
+}
+
+.gs-overview-title {
   font-size: 12px;
   font-weight: 600;
   color: var(--text-primary);
+  flex-shrink: 0;
+}
+
+.gs-overview-meta {
+  font-size: 11.5px;
+  color: var(--text-subtle);
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.gs-overview-meta.is-ok {
+  color: var(--green-text);
+  font-weight: 500;
+}
+
+.gs-overview-meta.is-fault {
+  color: var(--red-text);
+  font-weight: 500;
+}
+
+.gs-quiet-nav-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 25px;
+  padding: 0 9px;
+  border-radius: 6px;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-surface);
+  color: var(--accent-text);
+  font-family: var(--font-sans);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+  flex-shrink: 0;
+  cursor: pointer;
+  transition: background-color 120ms ease, border-color 120ms ease;
+}
+
+.gs-quiet-nav-btn:hover {
+  background: var(--accent-bg);
+  border-color: var(--accent-border);
+}
+
+/* Tab 2 Lower Public Tunnels Section (`公网隧道`) */
+.gs-pub-section {
+  gap: 8px;
+}
+
+.gs-pub-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.gs-pub-section-title-wrap {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  min-width: 0;
+}
+
+.gs-pub-section-sub {
+  font-size: 10.5px;
+  color: var(--text-subtle);
+  white-space: nowrap;
+}
+
+.gs-pub-cards-list {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  max-height: 310px;
+  overflow-y: auto;
+  padding-right: 1px;
+}
+
+.gs-pub-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 9px 11px;
+  border-radius: 8px;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-surface);
+  transition: border-color 150ms ease, background-color 150ms ease, box-shadow 180ms ease;
+}
+
+.gs-pub-card.is-running {
+  background: var(--green-bg);
+  border-color: var(--green-border);
+}
+
+.gs-pub-card.has-error {
+  border-color: var(--red-border);
+}
+
+.gs-pub-card.is-editing {
+  background: var(--accent-bg);
+  border-color: var(--accent-border);
+}
+
+.gs-pub-card.is-highlighted {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-border);
+}
+
+.gs-pub-card-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.gs-pub-card-title-wrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: 1;
+  flex-wrap: wrap;
+}
+
+.gs-pub-card-name {
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--text-primary);
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.gs-pub-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+}
+
+.gs-card-btn {
+  height: 24px;
+  padding: 0 9px;
+  font-size: 11px;
+  border-radius: 5px;
+}
+
+.gs-pub-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 6px;
+  padding-left: 14px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-subtle);
+  line-height: 1.45;
+}
+
+.gs-pub-meta-seg {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.gs-pub-addr-seg {
+  max-width: 100%;
+}
+
+.gs-pub-meta-prefix {
+  flex-shrink: 0;
+}
+
+.gs-pub-addr-val {
+  max-width: 245px;
+  min-width: 0;
+}
+
+.gs-pub-error-strip {
+  margin-top: 2px;
+  padding: 6px 9px;
+  border-radius: 6px;
+  border: 1px solid var(--red-border);
+  background: var(--red-bg);
+  color: var(--red-text);
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  font-family: var(--font-sans);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.gs-pub-error-icon {
+  flex-shrink: 0;
+  font-size: 11.5px;
+  line-height: 1.35;
+}
+
+.gs-pub-error-text {
+  min-width: 0;
+  flex: 1;
+  word-break: break-word;
+}
+
+.gs-pub-form {
+  margin-top: 4px;
+}
+
+.gs-field-label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.gs-key-clear-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10.5px;
+  color: var(--amber-text);
 }
 
 .gs-compact-btn {
@@ -894,37 +1233,18 @@
   text-decoration: underline;
 }
 
+.gs-link-action.is-muted {
+  color: var(--text-subtle);
+  font-weight: 500;
+}
+
+.gs-link-action.is-muted:hover:not(:disabled) {
+  color: var(--red-text);
+}
+
 .gs-link-action:disabled {
   opacity: 0.5;
   cursor: not-allowed;
-}
-
-/* Browser Automation (CDP) 1-Click Toggle Pill */
-.gs-cdp-toggle-pill {
-  height: 26px;
-  padding: 0 11px;
-  border-radius: 999px;
-  font-family: var(--font-sans);
-  font-size: 11.5px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease;
-}
-
-.gs-cdp-toggle-pill.is-on {
-  background: var(--green-bg);
-  border: 1px solid var(--green-border);
-  color: var(--green-text);
-}
-
-.gs-cdp-toggle-pill.is-off {
-  background: var(--bg-surface);
-  border: 1px solid var(--border-subtle);
-  color: var(--text-muted);
-}
-
-.gs-cdp-toggle-pill:hover:not(:disabled) {
-  filter: brightness(0.97);
 }
 
 .gs-footer-row {

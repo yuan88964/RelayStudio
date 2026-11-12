@@ -3,6 +3,7 @@ import type {
   EffectiveTheme,
   HostInfraBundle,
   PaneMemoryItem,
+  PlatformId,
   StudioSessionCard,
   StudioSnapshot,
   ThemeMode,
@@ -28,7 +29,10 @@ import { Titlebar, type TunnelHubTab } from './components/Titlebar';
 import { TaskRail, type PendingPurgeItem } from './components/TaskRail';
 import { WorkspacePanes } from './components/WorkspacePanes';
 import { TunnelHubPopover } from './components/TunnelHubPopover';
-import { GlobalSettingsPopover } from './components/GlobalSettingsPopover';
+import {
+  GlobalSettingsPopover,
+  type GlobalSettingsTab,
+} from './components/GlobalSettingsPopover';
 import {
   ArchiveDialog,
   SentHistoryDialog,
@@ -68,6 +72,30 @@ function buildBootstrapFallbackInfra(): HostInfraBundle {
       PublicRttMs: 0,
       VerifiedIngressIp: '',
       LastCheckedUtc: '',
+    },
+    publicTunnels: [
+      {
+        Id: 'pub_builtin_quick',
+        Name: '免费临时隧道',
+        IsBuiltin: true,
+        BaseUrl: '',
+        EffectiveUrl: '',
+        HasKey: false,
+        MaskedKey: '',
+        Mode: 'quick',
+        ModeLabel: '免费临时隧道',
+        Running: false,
+        Status: '未启动',
+        HealthPhase: 'Offline',
+        PublicRttMs: 0,
+        ErrorReason: '',
+        ProcessId: 0,
+        UsedByPlatforms: [],
+      },
+    ],
+    selectedPublicTunnelByPlatform: {
+      gemini: 'pub_builtin_quick',
+      claude: 'pub_builtin_quick',
     },
     display: {
       Endpoint: 'http://127.0.0.1:8789/mcp',
@@ -139,6 +167,8 @@ export function App() {
   // Popovers & Modals
   const [activePopover, setActivePopover] = useState<'tunnel' | 'settings' | null>(null);
   const [tunnelTab, setTunnelTab] = useState<TunnelHubTab>('chatgpt');
+  const [settingsTab, setSettingsTab] = useState<GlobalSettingsTab>('general');
+  const [highlightedTunnelId, setHighlightedTunnelId] = useState<string | null>(null);
   const [tunnelAnchorEl, setTunnelAnchorEl] = useState<HTMLElement | null>(null);
   const [settingsAnchorEl, setSettingsAnchorEl] = useState<HTMLElement | null>(null);
   const [discardSignal, setDiscardSignal] = useState(0);
@@ -161,6 +191,9 @@ export function App() {
   const infraRef = useRef<HostInfraBundle>(infra);
   const streamRef = useRef<StudioEventStream | null>(null);
   const firstCapsuleRef = useRef<HTMLElement | null>(null);
+  const settingsBtnRef = useRef<HTMLElement | null>(null);
+  const capsuleRefsByPlat = useRef<Partial<Record<PlatformId, HTMLElement | null>>>({});
+  const highlightTimerRef = useRef<number | null>(null);
   const windowVisibleRef = useRef<boolean>(true);
   const prevStalledKeysRef = useRef<Set<string>>(new Set());
   const initialStallSeededRef = useRef<boolean>(false);
@@ -378,6 +411,9 @@ export function App() {
       }
       if (purgeTimerRef.current !== null) {
         window.clearTimeout(purgeTimerRef.current);
+      }
+      if (highlightTimerRef.current !== null) {
+        window.clearTimeout(highlightTimerRef.current);
       }
     };
   }, [applyIncomingSnapshot, applyInfraBundle, refreshSnapshotImmediate]);
@@ -919,6 +955,39 @@ export function App() {
         ? '#F59E0B'
         : '#22C55E';
 
+  const handleManagePublicTunnels = useCallback((highlightId?: string) => {
+    setSettingsTab('tunnels');
+    if (highlightTimerRef.current !== null) {
+      window.clearTimeout(highlightTimerRef.current);
+      highlightTimerRef.current = null;
+    }
+    if (highlightId) {
+      setHighlightedTunnelId(highlightId);
+      highlightTimerRef.current = window.setTimeout(() => {
+        setHighlightedTunnelId(null);
+        highlightTimerRef.current = null;
+      }, 2400);
+    } else {
+      setHighlightedTunnelId(null);
+    }
+    if (settingsBtnRef.current) {
+      setSettingsAnchorEl(settingsBtnRef.current);
+    }
+    setActivePopover('settings');
+  }, []);
+
+  const handleNavigateToChatGptTunnel = useCallback(() => {
+    setTunnelTab('chatgpt');
+    const chatgptAnchor =
+      capsuleRefsByPlat.current.chatgpt ||
+      firstCapsuleRef.current ||
+      settingsBtnRef.current;
+    if (chatgptAnchor) {
+      setTunnelAnchorEl(chatgptAnchor);
+    }
+    setActivePopover('tunnel');
+  }, []);
+
   return (
     <>
       {/* 38px Seamless Top Titlebar */}
@@ -929,6 +998,8 @@ export function App() {
         activePopover={activePopover}
         activeTunnelTab={tunnelTab}
         firstCapsuleRef={firstCapsuleRef}
+        settingsBtnRef={settingsBtnRef}
+        capsuleRefsByPlat={capsuleRefsByPlat}
         onToggleRail={handleToggleRail}
         onQuickToggleTheme={handleQuickToggleTheme}
         onResetSystemTheme={handleResetSystemTheme}
@@ -972,7 +1043,9 @@ export function App() {
           onDismissPurgeBanner={handleDismissPurgeBanner}
           onOpenFaultTunnelHub={() => {
             setTunnelTab('chatgpt');
-            setTunnelAnchorEl(firstCapsuleRef.current);
+            setTunnelAnchorEl(
+              capsuleRefsByPlat.current.chatgpt || firstCapsuleRef.current
+            );
             setActivePopover('tunnel');
           }}
           onInfraUpdated={(next) => applyInfraBundle(next, false)}
@@ -1007,14 +1080,23 @@ export function App() {
         />
       </main>
 
-      {/* Popovers (Worker 3B Frozen Prop Contracts) */}
+      {/* Popovers */}
       <TunnelHubPopover
         open={activePopover === 'tunnel'}
         activeTab={tunnelTab}
         anchorEl={tunnelAnchorEl}
         infra={infra}
         discardSignal={discardSignal}
-        onSelectTab={setTunnelTab}
+        onSelectTab={(nextTab) => {
+          setTunnelTab(nextTab);
+          if (nextTab !== 'add') {
+            const nextAnchor = capsuleRefsByPlat.current[nextTab];
+            if (nextAnchor) {
+              setTunnelAnchorEl(nextAnchor);
+            }
+          }
+        }}
+        onManagePublicTunnels={handleManagePublicTunnels}
         onClose={() => setActivePopover(null)}
         onInfraUpdated={(next) => applyInfraBundle(next, false)}
         onToast={pushToast}
@@ -1022,10 +1104,15 @@ export function App() {
 
       <GlobalSettingsPopover
         open={activePopover === 'settings'}
-        anchorEl={settingsAnchorEl}
+        anchorEl={settingsAnchorEl || settingsBtnRef.current}
         infra={infra}
         themeMode={infra.themeMode}
         systemTheme={infra.systemTheme}
+        activeSettingsTab={settingsTab}
+        onChangeSettingsTab={setSettingsTab}
+        highlightedTunnelId={highlightedTunnelId}
+        onNavigateToChatGptTunnel={handleNavigateToChatGptTunnel}
+        discardSignal={discardSignal}
         onClose={() => setActivePopover(null)}
         onSetThemeMode={handleSetThemeMode}
         onInfraUpdated={(next) => applyInfraBundle(next, false)}

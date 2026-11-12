@@ -1,5 +1,5 @@
 import type { HostInfraBundle, PlatformId } from '../types/contracts';
-import { hostRpc } from '../services/hostBridge';
+import { hostRpc, resolveBoundPublicTunnel } from '../services/hostBridge';
 import { normalizePlatformId } from '../utils/formatters';
 
 export type TunnelHubTab = 'chatgpt' | 'gemini' | 'claude' | 'add';
@@ -11,6 +11,8 @@ export interface TitlebarProps {
   activePopover: 'tunnel' | 'settings' | null;
   activeTunnelTab: TunnelHubTab;
   firstCapsuleRef?: { current: HTMLElement | null };
+  settingsBtnRef?: { current: HTMLElement | null };
+  capsuleRefsByPlat?: { current: Partial<Record<PlatformId, HTMLElement | null>> };
   onToggleRail: () => void;
   onQuickToggleTheme: () => void;
   onResetSystemTheme: () => void;
@@ -27,6 +29,8 @@ export function Titlebar({
   activePopover,
   activeTunnelTab,
   firstCapsuleRef,
+  settingsBtnRef,
+  capsuleRefsByPlat,
   onToggleRail,
   onQuickToggleTheme,
   onResetSystemTheme,
@@ -86,6 +90,9 @@ export function Titlebar({
             if (idx === 0 && firstCapsuleRef) {
               firstCapsuleRef.current = el;
             }
+            if (capsuleRefsByPlat) {
+              capsuleRefsByPlat.current[plat] = el;
+            }
           }}
           type="button"
           className={`capsule-seg-btn ${isSelected ? 'active' : ''}`}
@@ -99,9 +106,10 @@ export function Titlebar({
       );
     }
 
-    const pub = infra.publicTunnel;
-    const pubRunning = Boolean(pub?.Running);
-    const phase = (pub?.HealthPhase || '').toLowerCase();
+    const platName = plat === 'gemini' ? 'Gemini' : 'Claude';
+    const { boundTun } = resolveBoundPublicTunnel(infra, plat);
+    const pubRunning = Boolean(boundTun?.Running);
+    const phase = (boundTun?.HealthPhase || '').toLowerCase();
     const dotColor = !pubRunning
       ? '#A1A1AA'
       : phase === 'fault'
@@ -109,26 +117,13 @@ export function Titlebar({
         : phase === 'degraded' || phase === 'connecting'
           ? '#D97706'
           : '#16A34A';
-    const platName = plat === 'gemini' ? 'Gemini' : 'Claude';
-    const platProfiles = allProfiles.filter(
-      (p) => normalizePlatformId(String(p.Platform || 'chatgpt')) === plat
-    );
-    const targetPlatId =
-      activeByPlat[plat] ||
-      platProfiles.find((p) => p.IsActive)?.Id ||
-      platProfiles[0]?.Id ||
-      '';
-    const platProfile =
-      platProfiles.find((p) => p.Id === targetPlatId) || platProfiles[0];
-    const capsuleLabel = platProfile?.Name
-      ? `${platName} · ${platProfile.Name} ▾`
-      : `${platName} ▾`;
 
-    const rttMs = Math.round(Number(pub?.PublicRttMs) || 0);
+    const capsuleLabel = `${platName} · ${boundTun?.Name || '免费临时隧道'} ▾`;
+    const rttMs = Math.round(Number(boundTun?.PublicRttMs) || 0);
     const pubRttTip = pubRunning
       ? rttMs > 0
-        ? `${rttMs}ms`
-        : '公网隧道在线'
+        ? `运行中 (${rttMs}ms)`
+        : '公网隧道运行中'
       : '公网隧道未启动';
 
     return (
@@ -137,6 +132,9 @@ export function Titlebar({
         ref={(el) => {
           if (idx === 0 && firstCapsuleRef) {
             firstCapsuleRef.current = el;
+          }
+          if (capsuleRefsByPlat) {
+            capsuleRefsByPlat.current[plat] = el;
           }
         }}
         type="button"
@@ -203,14 +201,19 @@ export function Titlebar({
         {/* 4. 14px Spacer + GlobalSettingsButton (`⚙`) */}
         <div className="titlebar-settings-spacer" />
         <button
+          ref={(el) => {
+            if (settingsBtnRef) {
+              settingsBtnRef.current = el;
+            }
+          }}
           type="button"
-          className={`quiet-icon-btn ${activePopover === 'settings' ? 'active' : ''}`}
-          aria-label="通用设置"
+          className={`quiet-icon-btn titlebar-settings-btn ${activePopover === 'settings' ? 'active' : ''}`}
+          aria-label="设置"
           aria-expanded={activePopover === 'settings'}
-          title="通用设置（本地内核、自动归档、默认载体、CLI 智能体与外观）"
+          title="设置（常规设置、本地内核与公网隧道管理）"
           onClick={(e) => onOpenSettings(e.currentTarget as HTMLElement)}
         >
-          <svg width="13.5" height="13.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+          <svg aria-hidden="true" width="13.5" height="13.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
             <path d="M12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6z" />
             <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
           </svg>

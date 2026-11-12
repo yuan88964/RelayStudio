@@ -159,7 +159,17 @@ def _platform(record=None):
 
 def _platform_base(record, project_prefix=""):
     provider = _platform(record)
-    return project_prefix if provider == "chatgpt" and project_prefix else PLATFORM_ROUTES.get(provider, PLATFORM_ROUTES["chatgpt"])[0]
+    if provider in ("chatgpt", "gemini"):
+        rec_prefix = str(record.get("project_prefix") or "") if isinstance(record, dict) else ""
+        rec_url = str(record.get("url") or "") if isinstance(record, dict) else ""
+        norm_pref = _extract_project_prefix(
+            rec_url,
+            str(project_prefix or rec_prefix),
+            provider_hint=provider,
+        )
+        if norm_pref:
+            return norm_pref
+    return PLATFORM_ROUTES.get(provider, PLATFORM_ROUTES["chatgpt"])[0]
 
 
 def _platform_room_url(record, room, project_prefix=""):
@@ -207,16 +217,73 @@ def _build_handover_url(
     return f"{clean_base}?{'&'.join(qs_parts)}"
 
 
-def _extract_project_prefix(url: str, explicit_prefix: str = "") -> str:
-    if isinstance(explicit_prefix, str) and explicit_prefix.strip().startswith("https://chatgpt.com/g/g-p-"):
-        m_exp = re.match(r"^(https://chatgpt\.com/g/g-p-[a-zA-Z0-9_-]+)", explicit_prefix.strip())
-        if m_exp:
-            return m_exp.group(1)
-    if isinstance(url, str) and url:
-        m = re.match(r"^(https://chatgpt\.com/g/g-p-[a-zA-Z0-9_-]+)", url.strip())
+def _extract_gemini_project_prefix(raw_val: str) -> str:
+    s = str(raw_val or "").strip()
+    if not s:
+        return ""
+    if s.startswith("https://gemini.google.com/"):
+        m = re.match(
+            r"^(https://gemini\.google\.com/(?:u/\d+/(?:app|gem/[a-zA-Z0-9_-]+)|gem/[a-zA-Z0-9_-]+))(?:[/?#]|$)",
+            s,
+        )
         if m:
             return m.group(1)
+        mu = re.match(r"^(https://gemini\.google\.com/u/\d+)(?:[/?#]|$)", s)
+        if mu:
+            return f"{mu.group(1)}/app"
+        return ""
+    if s.startswith(("/u/", "/gem/")):
+        mp = re.match(r"^/(?:u/\d+/(?:app|gem/[a-zA-Z0-9_-]+)|gem/[a-zA-Z0-9_-]+)(?:[/?#]|$)", s)
+        if mp:
+            clean_p = s.split("?", 1)[0].split("#", 1)[0].rstrip("/")
+            # Strip trailing /<id> if caller passed a full room path like /u/1/app/<id> or /u/1/gem/<slug>/<id>
+            m_clean = re.match(r"^/(?:u/\d+/(?:app|gem/[a-zA-Z0-9_-]+)|gem/[a-zA-Z0-9_-]+)", clean_p)
+            if m_clean:
+                return f"https://gemini.google.com{m_clean.group(0)}"
+        mu_rel = re.match(r"^/(u/\d+)/?$", s)
+        if mu_rel:
+            return f"https://gemini.google.com/{mu_rel.group(1)}/app"
     return ""
+
+
+def _extract_project_prefix(url: str, explicit_prefix: str = "", provider_hint: str = "") -> str:
+    norm_hint = _normalize_studio_provider(provider_hint, default="") if provider_hint else ""
+    allow_chatgpt = norm_hint in ("", "chatgpt")
+    allow_gemini = norm_hint in ("", "gemini")
+
+    for candidate in (explicit_prefix, url):
+        s = str(candidate or "").strip()
+        if not s:
+            continue
+        if allow_chatgpt and s.startswith(("https://chatgpt.com/g/g-p-", "https://chat.openai.com/g/g-p-")):
+            m_cg = re.match(r"^https://(?:chatgpt\.com|chat\.openai\.com)(/g/g-p-[a-zA-Z0-9_-]+)", s)
+            if m_cg:
+                return f"https://chatgpt.com{m_cg.group(1)}"
+        if allow_gemini:
+            gem_pref = _extract_gemini_project_prefix(s)
+            if gem_pref:
+                return gem_pref
+    return ""
+
+
+def _extract_conv_uuid_from_url(url: str, provider: str = "") -> str:
+    s = str(url or "").strip()
+    if not s:
+        return ""
+    try:
+        parsed = urllib.parse.urlsplit(s)
+        path = parsed.path or ""
+    except Exception:
+        return ""
+    eff_prov = _normalize_studio_provider(provider, default="") if provider else _platform({"url": s})
+    if eff_prov == "gemini":
+        m = re.match(r"^/(?:u/\d+/)?(?:app|gem/[a-zA-Z0-9_-]+)/([a-zA-Z0-9_-]+)/?$", path)
+        return m.group(1) if m else ""
+    if eff_prov == "claude":
+        m = re.search(r"/chat/([a-zA-Z0-9_-]+)(?:/|$)", path)
+        return m.group(1) if m else ""
+    m = re.search(r"/c/([0-9a-fA-F-]{36})(?:/|$)", path)
+    return m.group(1) if m else ""
 
 
 def _normalize_target_mode(raw_mode: str) -> str:
@@ -1129,7 +1196,7 @@ def _ensure_binding_entry(raw_binding: dict | None, browser_profile: str = "Chro
         "carrier": prof,
         "carrier_by_provider": dict(carrier_by_provider),
         "conv_uuid": str(b.get("conv_uuid") or "").strip(),
-        "project_prefix": _extract_project_prefix(str(b.get("url") or ""), str(b.get("project_prefix") or "")),
+        "project_prefix": _extract_project_prefix(str(b.get("url") or ""), str(b.get("project_prefix") or ""), provider_hint=provider),
         "tab_id": str(b.get("tab_id") or "").strip(),
         "title": str(b.get("title") or "").strip(),
         "browser": browser,
@@ -3534,6 +3601,7 @@ def _inherit_new_task_binding(state: dict, new_task_id: str, ar_cfg: dict, overr
         if norm_prov and norm_prov != _normalize_studio_provider(raw.get("provider"), default="chatgpt"):
             raw.pop("browser_profile", None)
             raw.pop("carrier", None)
+            raw.pop("project_prefix", None)
     for key, value in override_dict.items():
         if isinstance(value, dict):
             raw[key] = copy.deepcopy(value)
@@ -4702,17 +4770,25 @@ def _build_session_queue_slice(queue_list: list | None, session_key: str, now_ep
         m_time_txt = _format_local_time_text(_parse_iso_epoch(ref_iso), include_date=True)
         defer_flag = bool(m.get("defer_until_stopped", False))
         conv_uuid = str(m.get("conv_uuid") or "")
+        item_id = str(m.get("id") or "")
+        item_mode = str(m.get("mode") or default_mode)
         return {
-            "id": str(m.get("id") or ""),
+            "id": item_id,
+            "Id": item_id,
             "session_key": session_key,
+            "SessionKey": session_key,
             "prompt": full_prompt,
+            "Prompt": full_prompt,
             "display_text": display_txt,
             "DisplayText": display_txt,
             "text": display_txt,
+            "Text": display_txt,
             "status": eff_status,
+            "Status": eff_status,
             "StatusText": status_txt,
             "status_text": status_txt,
-            "mode": str(m.get("mode") or default_mode),
+            "mode": item_mode,
+            "Mode": item_mode,
             "created_at": created_iso,
             "CreatedAt": created_iso,
             "claimed_at": claimed_iso,
@@ -5368,8 +5444,11 @@ def build_studio_snapshot(data_root: str, tasks_root: str, web_bridge_path: str 
             st_upd_txt = _format_local_time_text(_parse_iso_epoch(st_upd_iso), include_date=False) if st_upd_iso else ""
             ui_steps.append({
                 "id": st_id,
+                "Id": st_id,
                 "title": st_title,
+                "Title": st_title,
                 "status": st_status,
+                "Status": st_status,
                 "StatusText": status_txt,
                 "StatusLabel": status_lbl,
                 "BadgeBg": badge_bg,
@@ -8271,9 +8350,11 @@ def _sync_conv_archived_flag(state: dict, conv_uuid: str, archived: bool, now_is
 def _update_tab_and_bindings(state: dict, tab_payload: dict, default_browser: str, default_profile: str, tasks_by_id: dict, now_iso: str) -> dict:
     provider = _platform(tab_payload)
     tab_id = str(tab_payload.get("tab_id") or "").strip()
-    conv_uuid = str(tab_payload.get("conv_uuid") or "").strip()
     url = str(tab_payload.get("url") or "").strip()
-    project_prefix = _extract_project_prefix(url, str(tab_payload.get("project_prefix") or ""))
+    conv_uuid = str(tab_payload.get("conv_uuid") or "").strip() or (
+        _extract_conv_uuid_from_url(url, provider) if "conv_uuid" not in tab_payload else ""
+    )
+    project_prefix = _extract_project_prefix(url, str(tab_payload.get("project_prefix") or ""), provider_hint=provider)
     title = str(tab_payload.get("title") or "").strip()
     browser = str(tab_payload.get("browser") or default_browser or "Chrome").strip()
     browser_profile = _normalize_profile_spec(str(tab_payload.get("browser_profile") or default_profile or "Chrome:Default").strip(), browser)
@@ -10421,6 +10502,19 @@ def handle_web_bridge_ack_deliver(wb_path: str, payload: dict, now_iso: str = ""
                     _bind_conv_uuid(b, conv_uuid)
                 elif msg_mode == "new_window_handover" and old_conv:
                     _bind_conv_uuid(b, "", clear_if_empty=True)
+                ack_tab_rec = (state.get("tabs") or {}).get(tab_id) if tab_id and isinstance(state.get("tabs"), dict) else None
+                ack_proj = _extract_project_prefix(
+                    str(payload.get("url") or (ack_tab_rec or {}).get("url") or ""),
+                    str(
+                        payload.get("project_prefix")
+                        or (ack_tab_rec or {}).get("project_prefix")
+                        or m.get("project_prefix")
+                        or ""
+                    ),
+                    provider_hint=_platform(m),
+                )
+                if ack_proj:
+                    b["project_prefix"] = ack_proj
                 if tab_id:
                     b["tab_id"] = tab_id
                 b["updated_at"] = eff_now
@@ -11431,38 +11525,93 @@ class ShieldHandler(BaseHTTPRequestHandler):
             self._send_json(404, {"ok": False, "error": "unknown control-plane endpoint"})
             return
 
+        if norm_path == "/mcp" or req_path.startswith("/mcp/"):
+            if not self._check_mcp_oauth_guard():
+                return
+
         self._forward("GET")
 
+    def _is_public_tunnel_request(self) -> bool:
+        """Return True when the request arrives through a public reverse-proxy / tunnel rather than direct loopback."""
+        if not self.headers:
+            peer_ip = str((self.client_address[0] if self.client_address else "") or "").strip().lower()
+            return bool(peer_ip and peer_ip not in _LOOPBACK_PEER_IPS)
+
+        for hdr_name in ("Cf-Connecting-Ip", "Cf-Ray", "Tailscale-Funnel-Request"):
+            vals = self.headers.get_all(hdr_name) if hasattr(self.headers, "get_all") else [self.headers.get(hdr_name)]
+            if any(str(v or "").strip() for v in (vals or [])):
+                return True
+
+        fwd_hosts = self.headers.get_all("X-Forwarded-Host") if hasattr(self.headers, "get_all") else [self.headers.get("X-Forwarded-Host")]
+        for raw_fh in (fwd_hosts or []):
+            for part in str(raw_fh or "").split(","):
+                fh_clean = _extract_host_without_port(part)
+                if fh_clean and fh_clean not in _LOOPBACK_HOST_NAMES:
+                    return True
+
+        host_vals = self.headers.get_all("Host") if hasattr(self.headers, "get_all") else [self.headers.get("Host")]
+        for raw_h in (host_vals or []):
+            h_clean = _extract_host_without_port(raw_h)
+            if h_clean and h_clean not in _LOOPBACK_HOST_NAMES:
+                return True
+
+        ua = str(self.headers.get("User-Agent") or "").strip().lower()
+        is_oai_private_tunnel = ua.startswith("oai-tunnel-client/")
+        if not is_oai_private_tunnel:
+            xff_vals = self.headers.get_all("X-Forwarded-For") if hasattr(self.headers, "get_all") else [self.headers.get("X-Forwarded-For")]
+            if any(str(v or "").strip() for v in (xff_vals or [])):
+                return True
+
+        return False
+
     def _check_mcp_oauth_guard(self) -> bool:
-        """Challenge expired or invalid RelayStudio OAuth rs_at Bearer tokens on POST /mcp with 401."""
-        auth_hdr = str(self.headers.get("Authorization") or "").strip()
+        """Require valid RelayStudio OAuth rs_at Bearer tokens on public-tunnel /mcp requests, and reject expired/invalid rs_at everywhere."""
+        is_public = self._is_public_tunnel_request()
+        auth_hdr = str(self.headers.get("Authorization") or "").strip() if self.headers else ""
         if not auth_hdr:
-            return True
-        bearer_tok = auth_hdr[7:].strip() if auth_hdr.lower().startswith("bearer ") else ""
-        if not bearer_tok.startswith("rs_at"):
-            return True
-        tok_data = _verify_oauth_envelope(bearer_tok, "rs_at")
-        valid_tok = bool(tok_data and int(tok_data.get("expires_at") or 0) >= int(time.time()))
-        if valid_tok:
-            return True
-        try:
-            self._read_request_body(default=b"", raise_on_error=True)
-        except ValueError:
-            self._force_close_connection = True
-            self.close_connection = True
+            if not is_public:
+                return True
+            bearer_tok = ""
+            tok_data = None
+        else:
+            bearer_tok = auth_hdr[7:].strip() if auth_hdr.lower().startswith("bearer ") else ""
+            if not bearer_tok.startswith("rs_at"):
+                if not is_public:
+                    return True
+                tok_data = None
+            else:
+                tok_data = _verify_oauth_envelope(bearer_tok, "rs_at")
+                valid_tok = bool(tok_data and int(tok_data.get("expires_at") or 0) >= int(time.time()))
+                if valid_tok:
+                    return True
+
+        method_upper = str(getattr(self, "command", "POST") or "POST").upper()
+        if method_upper in ("POST", "PUT", "PATCH") or (
+            self.headers and (self.headers.get("Content-Length") or self.headers.get("Transfer-Encoding"))
+        ):
+            try:
+                self._read_request_body(default=b"", raise_on_error=True)
+            except ValueError:
+                self._force_close_connection = True
+                self.close_connection = True
+
+        event_name = "post_mcp_token_expired" if bearer_tok.startswith("rs_at") else "mcp_oauth_challenge"
         self._log_oauth_event(
-            "post_mcp_token_expired",
+            event_name,
             {
-                "has_auth": True,
+                "has_auth": bool(auth_hdr),
+                "public_tunnel": is_public,
                 "token_decoded": bool(tok_data),
                 "client_id": str((tok_data or {}).get("client_id") or ""),
             },
         )
         base_url = self._resolve_public_base_url()
         challenge = f'Bearer realm="mcp", resource_metadata="{base_url}/.well-known/oauth-protected-resource"'
+        err_code = "invalid_token" if auth_hdr else "unauthorized"
+        err_desc = "Access token expired or invalid." if auth_hdr else "OAuth Bearer token required."
         self._send_json(
             401,
-            {"error": "invalid_token", "error_description": "Access token expired or invalid."},
+            {"error": err_code, "error_description": err_desc},
             extra_headers={"WWW-Authenticate": challenge, "Cache-Control": "no-store"},
         )
         return False
@@ -11516,12 +11665,16 @@ class ShieldHandler(BaseHTTPRequestHandler):
 
     def do_DELETE(self):
         parsed_url = urllib.parse.urlsplit(self.path)
+        norm_path = parsed_url.path.rstrip("/") or "/"
         is_cp, req_tok = _classify_control_plane_route(parsed_url.path)
         if is_cp:
             if not self._check_local_control_plane_guard(parsed_url, require_studio_token=req_tok):
                 return
             self._send_json(404, {"ok": False, "error": "unknown control-plane endpoint"})
             return
+        if norm_path == "/mcp" or self.path.startswith("/mcp"):
+            if not self._check_mcp_oauth_guard():
+                return
         self._forward("DELETE")
 
     def _handle_web_bridge_post(self):

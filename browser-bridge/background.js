@@ -95,13 +95,38 @@ function providerFromUrl(url) {
 }
 function extractConvUuidFromUrl(url) {
   const provider = providerFromUrl(url);
-  const patterns = {chatgpt: /\/c\/([0-9a-fA-F-]{36})(?:[/?#]|$)/, gemini: /\/app\/([a-zA-Z0-9_-]+)(?:[/?#]|$)/, claude: /\/chat\/([a-zA-Z0-9_-]+)(?:[/?#]|$)/};
+  if (!provider) return '';
+  if (provider === 'gemini') {
+    try {
+      const pathname = new URL(String(url || '')).pathname || '';
+      const gm = pathname.match(/^\/(?:u\/\d+\/)?(?:app|gem\/[a-zA-Z0-9_-]+)\/([a-zA-Z0-9_-]+)\/?$/);
+      return gm ? gm[1] : '';
+    } catch (_) {
+      return '';
+    }
+  }
+  const patterns = {
+    chatgpt: /\/c\/([0-9a-fA-F-]{36})(?:[/?#]|$)/,
+    claude: /\/chat\/([a-zA-Z0-9_-]+)(?:[/?#]|$)/,
+  };
   const m = patterns[provider] && String(url || '').match(patterns[provider]);
   return m ? m[1] : '';
 }
+const extractConvIdFromUrl = extractConvUuidFromUrl;
 
 function extractProjectPrefixFromUrl(url) {
-  const m = String(url || "").match(/^(https:\/\/chatgpt\.com\/g\/g-p-[a-zA-Z0-9_-]+)/);
+  const raw = String(url || "");
+  const provider = providerFromUrl(raw);
+  if (provider === "gemini") {
+    const gemMatch = raw.match(/^(https:\/\/gemini\.google\.com\/(?:u\/\d+\/)?gem\/[a-zA-Z0-9_-]+)(?:[/?#]|$)/);
+    if (gemMatch) return gemMatch[1];
+    const uAppMatch = raw.match(/^(https:\/\/gemini\.google\.com\/u\/\d+)\/app(?:[/?#]|$)/);
+    if (uAppMatch) return `${uAppMatch[1]}/app`;
+    const uBareMatch = raw.match(/^(https:\/\/gemini\.google\.com\/u\/\d+)\/?(?:[?#]|$)/);
+    if (uBareMatch) return `${uBareMatch[1]}/app`;
+    return "";
+  }
+  const m = raw.match(/^(https:\/\/chatgpt\.com\/g\/g-p-[a-zA-Z0-9_-]+)/);
   return m ? m[1] : "";
 }
 
@@ -399,6 +424,7 @@ async function handleShuttleDispatches(dispatches) {
                     provider: resp.provider || messageObj.provider || d.provider || "chatgpt",
                     tab_id: tabKey,
                     conv_uuid: String(resp.conv_uuid || d.conv_uuid || ""),
+                    project_prefix: String(resp.project_prefix || d.project_prefix || ""),
                   }),
                 }).catch(() => {});
               } else if (!hasErr && resp && resp.retry_safe === true) {
@@ -449,12 +475,13 @@ async function handleShuttleRetireActions(retireActions) {
     const retireId = String(r.id || "");
     const convUuid = String(r.conv_uuid || "").trim();
     const op = String(r.operation || "archive").trim().toLowerCase();
+    const effProvider = normalizeProvider(r.provider) || "chatgpt";
     if (!convUuid || (retireId && completedRetireIds.has(retireId))) {
       continue;
     }
 
-    const matchedTab = openTabs.find((t) => {
-      if (providerFromUrl(t.url) !== (r.provider || "chatgpt")) return false;
+    const matchingTabs = openTabs.filter((t) => {
+      if (providerFromUrl(t.url) !== effProvider) return false;
       const tabConv = extractConvUuidFromUrl(t.url);
       if (tabConv && tabConv === convUuid) {
         return true;
@@ -464,7 +491,69 @@ async function handleShuttleRetireActions(retireActions) {
       }
       return false;
     });
-    const providerTabs = openTabs.filter(t => providerFromUrl(t.url) === (r.provider || "chatgpt"));
+    const matchedTab = matchingTabs[0] || null;
+
+    if (effProvider !== "chatgpt") {
+      // Neither Gemini nor Claude exposes ChatGPT's /backend-api/conversation REST endpoint:
+      // unarchive is a clean no-op, and archive/delete closes matching open tabs and ACKs immediately.
+      if (op !== "unarchive") {
+        if (r.stop_before_action === true || r.stop_before_archive === true) {
+          for (const t of matchingTabs) {
+            if (!t || typeof t.id !== "number") continue;
+            try {
+              await ensureTabScriptsInjected(t.id);
+              await new Promise((resolve) => {
+                chrome.tabs.sendMessage(
+                  t.id,
+                  { type: "RELAY_STOP_GENERATION", conv_uuid: convUuid },
+                  () => resolve()
+                );
+              });
+            } catch (_) {}
+          }
+        }
+        if (r.close_tab !== false) {
+          for (const t of matchingTabs) {
+            if (!t || typeof t.id !== "number") continue;
+            try {
+              const winTabs = t.windowId
+                ? await chrome.tabs.query({ windowId: t.windowId })
+                : openTabs;
+              if (Array.isArray(winTabs) && winTabs.length <= 1) {
+                const fallbackHome =
+                  extractProjectPrefixFromUrl(t.url) ||
+                  (effProvider === "gemini" ? "https://gemini.google.com/app" : "https://claude.ai/new");
+                await chrome.tabs.update(t.id, { url: fallbackHome });
+              } else if (typeof chrome.tabs.remove === "function") {
+                await chrome.tabs.remove(t.id);
+                openTabs = openTabs.filter((item) => item.id !== t.id);
+              }
+            } catch (_) {}
+          }
+        }
+      }
+
+      if (retireId) {
+        completedRetireIds.add(retireId);
+      }
+
+      try {
+        await fetch(`${BRIDGE_BASE}/web-bridge/ack-retire`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            retire_id: retireId,
+            conv_uuid: convUuid,
+            operation: op,
+            provider: effProvider,
+            ok: true,
+          }),
+        });
+      } catch (_) {}
+      continue;
+    }
+
+    const providerTabs = openTabs.filter((t) => providerFromUrl(t.url) === effProvider);
     const carrierTab = providerTabs.find((t) => t !== matchedTab) || matchedTab || providerTabs[0];
     if (!carrierTab || typeof carrierTab.id !== "number") {
       continue;
@@ -491,7 +580,7 @@ async function handleShuttleRetireActions(retireActions) {
     let cloudOk = false;
     if (r.archive_conversation === false && op === "archive") {
       cloudOk = true;
-    } else if ((r.provider || "chatgpt") === "chatgpt") {
+    } else if (effProvider === "chatgpt") {
       try {
         await ensureTabScriptsInjected(carrierTab.id);
         const archResp = await new Promise((resolve) => {
@@ -520,7 +609,7 @@ async function handleShuttleRetireActions(retireActions) {
           ? await chrome.tabs.query({ windowId: matchedTab.windowId })
           : openTabs;
         if (Array.isArray(winTabs) && winTabs.length <= 1) {
-          await chrome.tabs.update(matchedTab.id, { url: (r.provider === "gemini" ? "https://gemini.google.com/app" : r.provider === "claude" ? "https://claude.ai/new" : "https://chatgpt.com/") });
+          await chrome.tabs.update(matchedTab.id, { url: "https://chatgpt.com/" });
         } else if (typeof chrome.tabs.remove === "function") {
           await chrome.tabs.remove(matchedTab.id);
           openTabs = openTabs.filter((t) => t.id !== matchedTab.id);

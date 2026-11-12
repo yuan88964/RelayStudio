@@ -2655,10 +2655,13 @@ eval(hookCode);
         local_resp = self._post_json("/mcp", {"jsonrpc": "2.0", "id": "loc-1", "method": "tools/list", "params": {}})
         self.assertIn("tools", local_resp.get("result") or {})
 
-        # 2. Public forwarded POST /mcp without Authorization (unauthenticated connector) -> 200 OK
+        # 2. Public forwarded POST /mcp without Authorization -> 401 + RFC 9728 WWW-Authenticate challenge
         unauth_pub_req = urllib.request.Request(f"{base}/mcp", data=mcp_body, headers=fwd_headers, method="POST")
-        with urllib.request.urlopen(unauth_pub_req, timeout=3) as up_resp:
-            self.assertEqual(up_resp.status, 200)
+        with self.assertRaises(urllib.error.HTTPError) as unauth_err:
+            urllib.request.urlopen(unauth_pub_req, timeout=3)
+        self.assertEqual(unauth_err.exception.code, 401)
+        self.assertIn("resource_metadata=", unauth_err.exception.headers.get("WWW-Authenticate") or "")
+        unauth_err.exception.close()
 
         # 3. Expired Bearer rs_at... on POST /mcp -> 401 + WWW-Authenticate + oauth-shim.log event, without breaking HTTP/1.1 keep-alive!
         expired_tok = shield._sign_oauth_envelope(
@@ -2883,10 +2886,29 @@ eval(hookCode);
         self.assertIn("WWW-Authenticate", head_err.exception.headers)
         head_err.exception.close()
 
+        unauth_mcp_req = urllib.request.Request(
+            f"{base}/mcp",
+            data=json.dumps({"jsonrpc": "2.0", "id": "pub-unauth-1", "method": "tools/list", "params": {}}).encode("utf-8"),
+            headers={**pub_headers, "Content-Type": "application/json"},
+            method="POST",
+        )
+        with self.assertRaises(urllib.error.HTTPError) as unauth_mcp_err:
+            urllib.request.urlopen(unauth_mcp_req, timeout=3)
+        self.assertEqual(unauth_mcp_err.exception.code, 401)
+        self.assertIn(
+            f'resource_metadata="https://{tunnel_host}/.well-known/oauth-protected-resource"',
+            unauth_mcp_err.exception.headers.get("WWW-Authenticate") or "",
+        )
+        unauth_mcp_err.exception.close()
+
+        pub_valid_tok = shield._sign_oauth_envelope(
+            "rs_at",
+            {"client_id": "rs_client_pub", "scope": "mcp", "expires_at": int(time.time()) + 3600, "nonce": "pub1"},
+        )
         mcp_req = urllib.request.Request(
             f"{base}/mcp",
             data=json.dumps({"jsonrpc": "2.0", "id": "pub-ok-1", "method": "tools/list", "params": {}}).encode("utf-8"),
-            headers={**pub_headers, "Content-Type": "application/json"},
+            headers={**pub_headers, "Content-Type": "application/json", "Authorization": f"Bearer {pub_valid_tok}"},
             method="POST",
         )
         with urllib.request.urlopen(mcp_req, timeout=3) as mcp_resp:

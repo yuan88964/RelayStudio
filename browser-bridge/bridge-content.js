@@ -11,7 +11,13 @@
   if (!['gemini.google.com', 'claude.ai', 'chatgpt.com', 'chat.openai.com'].includes(host)) return;
   const SITE = {
     chatgpt: {room: /\/c\/([0-9a-fA-F-]{36})(?:[/?#]|$)/, user: '[data-message-author-role="user"]'},
-    gemini: {room: /\/app\/([a-zA-Z0-9_-]+)(?:[/?#]|$)/, user: 'user-query, [data-testid="user-query"]', composer: 'rich-textarea [contenteditable="true"]', send: 'button.send-button', stop: 'button[aria-label*="Stop response"], button[aria-label*="停止回答"]'},
+    gemini: {
+      room: /^\/(?:u\/\d+\/)?(?:app|gem\/[a-zA-Z0-9_-]+)\/([a-zA-Z0-9_-]+)\/?$/,
+      user: 'user-query, [data-testid="user-query"]',
+      composer: 'rich-textarea [contenteditable="true"]',
+      send: 'button.send-button',
+      stop: 'button[aria-label*="Stop response"], button[aria-label*="停止回答"], button[aria-label*="Stop generating"], button[aria-label*="停止生成"], button.stop-button, input-area-v2 button[aria-label*="Stop"], .input-area button[aria-label*="Stop"], .input-area-container button[aria-label*="Stop"], .text-input-field button[aria-label*="Stop"]',
+    },
     claude: {room: /\/chat\/([a-zA-Z0-9_-]+)(?:[/?#]|$)/, user: '[data-testid="user-message"]', composer: 'div.ProseMirror[contenteditable="true"]', send: 'button[aria-label="Send message"]', stop: 'button[aria-label="Stop response"], button[aria-label="停止响应"]'},
   }[PROVIDER];
   const BRIDGE_BASE = "http://127.0.0.1:8766";
@@ -82,13 +88,69 @@
   let shuttleConnected = false;
 
   function getConvUuid() {
-    const m = window.location.pathname.match(SITE.room);
+    const m = String(window.location.pathname || "").match(SITE.room);
     return m ? m[1] : "";
   }
 
   function getProjectPrefix() {
-    const m = window.location.href.match(/^(https:\/\/chatgpt\.com\/g\/g-p-[a-zA-Z0-9_-]+)/);
+    const href = String(window.location.href || "");
+    if (PROVIDER === "gemini") {
+      const gemMatch = href.match(/^(https:\/\/gemini\.google\.com\/(?:u\/\d+\/)?gem\/[a-zA-Z0-9_-]+)(?:[/?#]|$)/);
+      if (gemMatch) return gemMatch[1];
+      const uAppMatch = href.match(/^(https:\/\/gemini\.google\.com\/u\/\d+)\/app(?:[/?#]|$)/);
+      if (uAppMatch) return `${uAppMatch[1]}/app`;
+      const uBareMatch = href.match(/^(https:\/\/gemini\.google\.com\/u\/\d+)\/?(?:[?#]|$)/);
+      if (uBareMatch) return `${uBareMatch[1]}/app`;
+      return "";
+    }
+    const m = href.match(/^(https:\/\/chatgpt\.com\/g\/g-p-[a-zA-Z0-9_-]+)/);
     return m ? m[1] : "";
+  }
+
+  const TURN_MESSAGE_SELECTOR =
+    PROVIDER === "gemini"
+      ? "user-query, model-response"
+      : PROVIDER === "claude"
+        ? '[data-testid="user-message"], .font-claude-message, [data-is-streaming]'
+        : "[data-message-author-role]";
+
+  function queryConversationTurns() {
+    if (!document || typeof document.querySelectorAll !== "function") return [];
+    const raw = Array.from(document.querySelectorAll(TURN_MESSAGE_SELECTOR) || []);
+    if (raw.length <= 1 || PROVIDER === "chatgpt") return raw;
+    // Deduplicate nested matches (e.g. .font-claude-message inside [data-is-streaming]) while preserving DOM order.
+    return raw.filter(
+      (el) => !raw.some((other) => other !== el && other && typeof other.contains === "function" && other.contains(el))
+    );
+  }
+
+  function isUserTurnNode(node) {
+    if (!node) return false;
+    if (PROVIDER === "chatgpt") {
+      const role = String((typeof node.getAttribute === "function" && node.getAttribute("data-message-author-role")) || "");
+      return role === "user";
+    }
+    if (PROVIDER === "gemini") {
+      const tag = String(node.tagName || "").toUpperCase();
+      if (tag === "USER-QUERY") return true;
+      if (typeof node.getAttribute === "function" && node.getAttribute("data-testid") === "user-query") return true;
+      if (typeof node.matches === "function") {
+        try {
+          return Boolean(node.matches(SITE.user));
+        } catch (_) {}
+      }
+      return false;
+    }
+    if (PROVIDER === "claude") {
+      if (typeof node.getAttribute === "function" && node.getAttribute("data-testid") === "user-message") return true;
+      if (typeof node.matches === "function") {
+        try {
+          return Boolean(node.matches(SITE.user));
+        } catch (_) {}
+      }
+      return false;
+    }
+    return false;
   }
 
   function maybeClearResolvedHandoverUrl() {
@@ -147,13 +209,16 @@
       // seconds, which forces a layout pass and gets slower the longer the chat is). Only while no task number is known
       // yet, peek at the tail of the last two turns once in a while - bounded and cheap.
       const hasTaskHint = Array.from(hints).some((h) => /^(tsk|wfr)_/.test(h));
-      if (!hasTaskHint && now - lastTailPeekAt > 20000) {
-        lastTailPeekAt = now;
-        const turns = document.querySelectorAll("[data-message-author-role]");
-        for (let i = Math.max(0, turns.length - 2); i < turns.length; i++) {
-          const tail = String(turns[i].textContent || "").slice(-4000);
-          for (const m of tail.match(/\btsk_[0-9a-fA-F_]{6,32}\b/g) || []) hints.add(m);
-          for (const w of tail.match(/\bwfr_[0-9a-fA-F_]{8,40}\b/g) || []) hints.add(w);
+      const peekIntervalMs = PROVIDER === "chatgpt" ? 20000 : 4500;
+      if (!hasTaskHint && now - lastTailPeekAt > peekIntervalMs) {
+        const turns = queryConversationTurns();
+        if (turns.length > 0) {
+          lastTailPeekAt = now;
+          for (let i = Math.max(0, turns.length - 4); i < turns.length; i++) {
+            const tail = String(turns[i].textContent || turns[i].innerText || "").slice(-4000);
+            for (const m of tail.match(/\btsk_[0-9a-fA-F_]{6,32}\b/g) || []) hints.add(m);
+            for (const w of tail.match(/\bwfr_[0-9a-fA-F_]{8,40}\b/g) || []) hints.add(w);
+          }
         }
       }
     } catch (_) {}
@@ -184,10 +249,8 @@
       // +1 when outgoing user POST is accepted, +1 when assistant SSE finishes cleanly (+2 per full round-trip).
       const hookEntries = safeCompleted * 2 + Math.max(0, safeAccepted - safeCompleted);
       let domEntries = 0;
-      if (document && typeof document.querySelectorAll === "function") {
-        const nodes = document.querySelectorAll("[data-message-author-role]");
-        if (nodes && typeof nodes.length === "number") domEntries = nodes.length;
-      }
+      const nodes = queryConversationTurns();
+      if (nodes && typeof nodes.length === "number") domEntries = nodes.length;
       return Math.max(hookEntries, domEntries);
     } catch (_) {
       return 0;
@@ -201,7 +264,11 @@
     if (typeof el.closest === "function" && el.closest('[hidden], [aria-hidden="true"]')) return false;
     if (typeof el.getBoundingClientRect === "function") {
       const r = el.getBoundingClientRect();
-      if (r && r.width === 0 && r.height === 0) return false;
+      if (r && r.width === 0 && r.height === 0) {
+        const child = el.firstElementChild;
+        const cr = child && typeof child.getBoundingClientRect === "function" ? child.getBoundingClientRect() : null;
+        if (!cr || (cr.width === 0 && cr.height === 0)) return false;
+      }
     }
     try {
       const st =
@@ -215,10 +282,36 @@
     return true;
   }
 
+  function isUsableStopButton(btn) {
+    if (!btn || btn.disabled) return false;
+    if (typeof btn.getAttribute === "function" && btn.getAttribute("aria-disabled") === "true") return false;
+    const aria = String((typeof btn.getAttribute === "function" && btn.getAttribute("aria-label")) || "");
+    if (/read(ing)?\s+aloud|aloud|朗读|voice|语音|audio|microphone|麦克风/i.test(aria)) return false;
+    return isVisibleDomElement(btn);
+  }
+
   function findActiveStopButton() {
-    if (PROVIDER !== 'chatgpt') {
-      const candidates = document.querySelectorAll(SITE.stop);
-      return Array.from(candidates).find(btn => !btn.disabled && isVisibleDomElement(btn)) || null;
+    if (PROVIDER !== "chatgpt") {
+      const candidates = Array.from(document.querySelectorAll(SITE.stop) || []);
+      const direct = candidates.find((btn) => isUsableStopButton(btn));
+      if (direct) return direct;
+      if (PROVIDER === "gemini") {
+        const composer = findComposerElement();
+        const composerScope =
+          (composer &&
+            typeof composer.closest === "function" &&
+            composer.closest("input-area-v2, .input-area-container, .input-area, .text-input-field, form")) ||
+          (composer && composer.parentElement) ||
+          null;
+        if (composerScope && typeof composerScope.querySelectorAll === "function") {
+          const scoped = Array.from(
+            composerScope.querySelectorAll('button[aria-label*="Stop"], button[aria-label*="停止"], button.stop-button') || []
+          );
+          const hit = scoped.find((btn) => isUsableStopButton(btn));
+          if (hit) return hit;
+        }
+      }
+      return null;
     }
     const composer = findComposerElement();
     const formScope =
@@ -286,8 +379,23 @@
   // code blocks, user bubbles and the composer are never read, so quoted error words in a reply cannot trip it.
   const UI_ERROR_SELECTOR =
     '[data-testid*="conversation-error"], [data-testid*="error"], div[role="alert"], [role="status"], button[data-testid*="regenerate"], main [class*="error" i]';
-  const UI_ERROR_EXCLUDE =
+  const UI_ERROR_EXCLUDE_BASE =
     '.markdown, pre, code, [data-user-message-bubble="true"], [data-message-author-role="user"], textarea, #prompt-textarea';
+  const UI_ERROR_EXCLUDE =
+    PROVIDER === "gemini"
+      ? `${UI_ERROR_EXCLUDE_BASE}, user-query, model-response, rich-textarea, .cdk-live-announcer-element, .cdk-visually-hidden, [aria-live="polite"]`
+      : UI_ERROR_EXCLUDE_BASE;
+
+  function isExcludedGeminiStatusNode(node) {
+    if (!node || PROVIDER !== "gemini") return false;
+    const tag = String(node.tagName || "").toUpperCase();
+    if (tag === "USER-QUERY" || tag === "MODEL-RESPONSE" || tag === "RICH-TEXTAREA") return true;
+    const cls = String(node.className || "");
+    if (/\bcdk-live-announcer-element\b|\bcdk-visually-hidden\b/i.test(cls)) return true;
+    const ariaLive = String((typeof node.getAttribute === "function" && node.getAttribute("aria-live")) || "").toLowerCase();
+    if (ariaLive === "polite") return true;
+    return false;
+  }
 
   function extractUiErrorText() {
     try {
@@ -295,6 +403,7 @@
       const nodes = Array.from(document.querySelectorAll(UI_ERROR_SELECTOR) || []);
       for (const node of nodes) {
         if (!node) continue;
+        if (isExcludedGeminiStatusNode(node)) continue;
         if (typeof node.closest === "function" && node.closest(UI_ERROR_EXCLUDE)) continue;
         if (!isVisibleDomElement(node)) continue;
         let source = node;
@@ -302,7 +411,11 @@
           try {
             const clone = node.cloneNode(true);
             if (clone && typeof clone.querySelectorAll === "function") {
-              Array.from(clone.querySelectorAll(".markdown, pre, code") || []).forEach((n) => {
+              const stripSel =
+                PROVIDER === "gemini"
+                  ? '.markdown, pre, code, user-query, model-response, rich-textarea, .cdk-live-announcer-element, .cdk-visually-hidden, [aria-live="polite"]'
+                  : ".markdown, pre, code";
+              Array.from(clone.querySelectorAll(stripSel) || []).forEach((n) => {
                 try {
                   n.remove();
                 } catch (_) {}
@@ -325,14 +438,12 @@
       if (isSseActive() || isGeneratingState() || isBusySending) return false;
       const ds = (document.documentElement && document.documentElement.dataset) || {};
       if (ds.relayStreamIncomplete === "1" || ds.relayTurnIncomplete === "1") return true;
-      if (typeof document.querySelectorAll !== "function") return false;
-      const nodes = Array.from(document.querySelectorAll("[data-message-author-role]") || []);
+      const nodes = queryConversationTurns();
       if (nodes.length === 0) return false;
       for (let i = nodes.length - 1; i >= 0; i--) {
         const n = nodes[i];
         if (!isVisibleDomElement(n)) continue;
-        const role = String((typeof n.getAttribute === "function" && n.getAttribute("data-message-author-role")) || "");
-        return role === "user";
+        return isUserTurnNode(n);
       }
     } catch (_) {}
     return false;
@@ -413,6 +524,30 @@
     return raw;
   }
 
+  function cleanGeminiModelBadgeText(rawText) {
+    let s = String(rawText || "")
+      .replace(/[\u200B-\u200D\uFEFF]/g, "")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (!s) return "";
+    for (let i = 0; i < 4; i++) {
+      const next = s
+        .replace(
+          /^(?:keyboard_arrow_down|keyboard_arrow_up|arrow_drop_down|arrow_drop_up|expand_more|expand_less|chevron_down|chevron_up|auto_awesome|spark|check_circle|check)\s+/i,
+          ""
+        )
+        .replace(
+          /(?:\s*|(?:(?=[a-z_])))(?:keyboard_arrow_down|keyboard_arrow_up|arrow_drop_down|arrow_drop_up|expand_more|expand_less|chevron_down|chevron_up|auto_awesome|spark|check_circle|check)$/i,
+          ""
+        )
+        .replace(/[\s⌄▾▼∨⌃▴▲]+$/g, "")
+        .trim();
+      if (next === s) break;
+      s = next;
+    }
+    return s;
+  }
+
   function detectCurrentModel(catalog) {
     try {
       const ds = (document.documentElement && document.documentElement.dataset) || {};
@@ -434,6 +569,52 @@
       }
     } catch (_) {}
 
+    if (PROVIDER === "gemini") {
+      try {
+        const geminiBadgeSelectors = [
+          "bard-mode-switcher button",
+          '[data-test-id="bard-mode-menu-button"]',
+          '[data-test-id*="bard-mode"]',
+          '[data-testid*="bard-mode"]',
+          'bard-mode-switcher [role="button"]',
+          '[data-test-id*="model-selector"] button',
+          '[data-testid*="model-selector"] button',
+          "model-selector button",
+        ];
+        for (const sel of geminiBadgeSelectors) {
+          const nodes = document.querySelectorAll(sel);
+          for (const btn of nodes) {
+            if (!isVisibleDomElement(btn)) continue;
+            let rawTxt = String(btn.innerText || btn.textContent || "");
+            if (typeof btn.cloneNode === "function") {
+              try {
+                const clone = btn.cloneNode(true);
+                if (clone && typeof clone.querySelectorAll === "function") {
+                  Array.from(clone.querySelectorAll('mat-icon, .mat-icon, .google-symbols, [aria-hidden="true"]') || []).forEach(
+                    (ic) => {
+                      try {
+                        ic.remove();
+                      } catch (_) {}
+                    }
+                  );
+                }
+                const cloneTxt = String((clone && (clone.innerText || clone.textContent)) || "").trim();
+                if (cloneTxt) rawTxt = cloneTxt;
+              } catch (_) {}
+            }
+            const cleaned = cleanGeminiModelBadgeText(rawTxt);
+            if (
+              cleaned &&
+              cleaned.length <= 64 &&
+              !/^(menu|菜单|switch model|切换模型|select model|选择模型)$/i.test(cleaned)
+            ) {
+              return resolveModelDisplayName(cleaned, catalog);
+            }
+          }
+        }
+      } catch (_) {}
+    }
+
     try {
       const selectors = [
         'button[data-testid="model-switcher-dropdown-button"]',
@@ -450,7 +631,7 @@
           if (
             txt &&
             txt.length <= 42 &&
-            (/gpt|o1|o3|o4|auto|thinking|pro|mini|plus/i.test(txt) ||
+            (/gpt|o1|o3|o4|auto|thinking|pro|mini|plus|gemini|flash|claude|sonnet|opus|haiku/i.test(txt) ||
               (Array.isArray(catalog) &&
                 catalog.some(
                   (m) =>
@@ -785,12 +966,80 @@
     for (const sel of selectors) {
       const nodes = document.querySelectorAll(sel);
       for (const btn of nodes) {
-        if (btn && !btn.disabled && isVisibleDomElement(btn) && btn.getAttribute("aria-disabled") !== "true") {
-          return btn;
+        if (!btn || btn.disabled || !isVisibleDomElement(btn)) continue;
+        if (typeof btn.getAttribute === "function" && btn.getAttribute("aria-disabled") === "true") continue;
+        if (PROVIDER !== "chatgpt") {
+          const cls = String(btn.className || "");
+          const aria = String((typeof btn.getAttribute === "function" && btn.getAttribute("aria-label")) || "");
+          if (/\bstop(?:-button)?\b/i.test(cls) || /\bstop\b|停止/i.test(aria)) continue;
         }
+        return btn;
       }
     }
     return null;
+  }
+
+  function collapseReceiptWhitespace(raw) {
+    return String(raw || "")
+      .replace(/[\u200B-\u200D\uFEFF]/g, "")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function stripUserNodeChrome(raw, expectedNorm) {
+    let s = collapseReceiptWhitespace(raw);
+    if (!s) return "";
+    if (expectedNorm && s === expectedNorm) return s;
+    // Strip Gemini screen-reader prefixes ("You said", "你说过", "你说", etc.)
+    s = s.replace(/^(?:you\s+said|你说过|你说|你說過|你說)\s*[:：]?\s*/i, "").trim();
+    if (expectedNorm && s === expectedNorm) return s;
+    // Strip trailing Angular <mat-icon> ligatures / action button text
+    const tailRe =
+      /(?:\s+|(?<=[^\w]))(?:edit|expand_more|expand_less|keyboard_arrow_down|keyboard_arrow_up|chevron_down|chevron_up|content_copy|more_vert|more_horiz|pen_spark|keep_pin|push_pin|编辑|修改|复制|展开|收起)\s*$/i;
+    for (let i = 0; i < 6; i++) {
+      const next = s.replace(tailRe, "").trim();
+      if (next === s) break;
+      s = next;
+      if (expectedNorm && s === expectedNorm) return s;
+    }
+    return s;
+  }
+
+  function matchesInjectedUserNode(node, injectedRaw) {
+    if (!node) return false;
+    const expectedNorm = collapseReceiptWhitespace(injectedRaw);
+    if (!expectedNorm) return false;
+    const candidates = [];
+    if (typeof node.innerText === "string" && node.innerText) candidates.push(node.innerText);
+    if (typeof node.textContent === "string" && node.textContent && node.textContent !== node.innerText) {
+      candidates.push(node.textContent);
+    }
+    if (typeof node.querySelector === "function") {
+      try {
+        const qt = node.querySelector(".query-text, [data-test-id*='query-text'], .user-query-bubble-with-background");
+        if (qt) {
+          const qtTxt = qt.innerText || qt.textContent || "";
+          if (qtTxt) candidates.push(qtTxt);
+        }
+      } catch (_) {}
+    }
+    for (const raw of candidates) {
+      const collapsed = collapseReceiptWhitespace(raw);
+      if (!collapsed) continue;
+      if (collapsed === expectedNorm) return true;
+      const stripped = stripUserNodeChrome(raw, expectedNorm);
+      if (stripped === expectedNorm) return true;
+      if (expectedNorm.length >= 20) {
+        if (collapsed.includes(expectedNorm) || stripped.includes(expectedNorm)) return true;
+        const fpLen = Math.min(24, Math.floor(expectedNorm.length / 2));
+        const head = expectedNorm.slice(0, fpLen);
+        const tail = expectedNorm.slice(-fpLen);
+        if (stripped.length >= fpLen && stripped.startsWith(head) && stripped.endsWith(tail)) {
+          return true;
+        }
+      }
+    }
+    return false;
   }
 
   function sleep(ms) {
@@ -1084,14 +1333,44 @@
       }
 
       if (sent && PROVIDER !== 'chatgpt') {
-        // Third-party adapters confirm a NEW rendered user turn plus consumed composer and a real room.
+        // Third-party adapters confirm a NEW rendered user turn plus consumed composer.
         // Merely clicking Send or clearing the editor is not a delivery receipt.
+        // On a fresh Gemini /app or /gem/<slug> handover tab, history.pushState(/app/<id>) can lag 1-3s behind
+        // the rendered user bubble and streaming start; wait up to ~3.5s for conv_uuid, then accept if confirmed.
         const deadline = Date.now() + 25000;
         acceptanceOutcome = 'unconfirmed';
+        let confirmedBubbleAt = 0;
+        let postConfirmPolls = 0;
         for (let attempt = 0; attempt < 209 && Date.now() < deadline; attempt++) {
           const nodes = Array.from(document.querySelectorAll(SITE.user));
-          const found = nodes.some(node => !priorUserNodes.has(node) && String(node.innerText || node.textContent || '').trim() === lastInjectedText);
-          if (found && nodes.length > priorUserNodes.size && !readComposerCleanText() && getConvUuid()) {acceptanceOutcome = 'accepted'; break;}
+          const found =
+            nodes.length > priorUserNodes.size &&
+            nodes.some((node) => !priorUserNodes.has(node) && matchesInjectedUserNode(node, lastInjectedText));
+          const composerCleared = !readComposerCleanText();
+          if (found && composerCleared) {
+            if (getConvUuid()) {
+              acceptanceOutcome = 'accepted';
+              break;
+            }
+            if (!confirmedBubbleAt) {
+              confirmedBubbleAt = Date.now();
+            }
+            postConfirmPolls += 1;
+            if (Date.now() - confirmedBubbleAt >= 3500 || postConfirmPolls >= 30) {
+              acceptanceOutcome = 'accepted';
+              break;
+            }
+          } else if (confirmedBubbleAt && composerCleared && (found || isGeneratingState() || isSseActive())) {
+            if (getConvUuid()) {
+              acceptanceOutcome = 'accepted';
+              break;
+            }
+            postConfirmPolls += 1;
+            if (Date.now() - confirmedBubbleAt >= 3500 || postConfirmPolls >= 30) {
+              acceptanceOutcome = 'accepted';
+              break;
+            }
+          }
           await sleep(120);
         }
       } else if (sent && steerMode) {
@@ -1267,12 +1546,13 @@
             reason,
             provider: PROVIDER,
             conv_uuid: getConvUuid(),
+            project_prefix: getProjectPrefix(),
             model_switch_skipped: skipped,
           });
         }).catch(() => {
           // An exception after clicking Send does not prove the server rejected it.
           sendResponse({ ok: false, delivered: false, uncertain_delivery: true,
-            retry_safe: false, conv_uuid: getConvUuid() });
+            retry_safe: false, conv_uuid: getConvUuid(), project_prefix: getProjectPrefix() });
         });
         return true;
       }
@@ -1351,7 +1631,8 @@
               msg_id: String(msg.id),
               tab_id: localState.tab_id,
               provider: PROVIDER,
-            conv_uuid: getConvUuid(),
+              conv_uuid: getConvUuid(),
+              project_prefix: getProjectPrefix(),
             }),
           });
         }

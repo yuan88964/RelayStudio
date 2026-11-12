@@ -7,6 +7,7 @@ import type {
   HostRpcRequest,
   HostRpcResponse,
   PaneMemoryItem,
+  PublicTunnelItem,
   SafeConnectionProfile,
   ThemeMode,
   WindowLayoutMemory,
@@ -38,6 +39,9 @@ const DEFAULT_RPC_TIMEOUT_MS = 25_000;
 const DEV_STORAGE_LAYOUT_KEY = 'relaystudio.dev.layout';
 const DEV_STORAGE_PROFILES_KEY = 'relaystudio.dev.profiles';
 const DEV_STORAGE_ENGINE_KEY = 'relaystudio.dev.engine';
+const DEV_STORAGE_PUB_TUNNELS_KEY = 'relaystudio.dev.publicTunnels';
+const DEV_STORAGE_PUB_BINDINGS_KEY = 'relaystudio.dev.publicBindings';
+const DEV_STORAGE_PUB_SECRETS_KEY = 'relaystudio.dev.publicSecrets';
 
 let rpcSeq = 0;
 let listenerAttached = false;
@@ -175,6 +179,76 @@ export function extractInfraBundle(candidate: any): HostInfraBundle | null {
   return null;
 }
 
+export function formatMcpEndpoint(rawUrl: string | undefined): string {
+  const clean = (rawUrl || '').trim().replace(/\/+$/, '');
+  if (!clean) return '';
+  return clean.toLowerCase().endsWith('/mcp') ? clean : `${clean}/mcp`;
+}
+
+export function buildDefaultBuiltinPublicTunnel(
+  infra?: HostInfraBundle | null
+): PublicTunnelItem {
+  const legacy = infra?.publicTunnel;
+  const legacyRunning = Boolean(legacy?.Running);
+  const legacyUrl = formatMcpEndpoint(legacy?.PublicMcpUrl || legacy?.Url || '');
+  const enabledSet = new Set(
+    (infra?.profiles?.EnabledPlatforms || []).map((p) => String(p || '').trim().toLowerCase())
+  );
+  const usedBy: string[] = [];
+  if (enabledSet.has('gemini')) usedBy.push('gemini');
+  if (enabledSet.has('claude')) usedBy.push('claude');
+
+  return {
+    Id: 'pub_builtin_quick',
+    Name: '免费临时隧道',
+    IsBuiltin: true,
+    BaseUrl: '',
+    EffectiveUrl: legacyRunning ? legacyUrl : '',
+    HasKey: false,
+    MaskedKey: '',
+    Mode: legacy?.Mode || 'quick',
+    ModeLabel: legacy?.ModeLabel || '免费临时隧道',
+    Running: legacyRunning,
+    Status: legacy?.Status || (legacyRunning ? '运行中' : '未启动'),
+    HealthPhase: legacy?.HealthPhase || (legacyRunning ? 'Online' : 'Offline'),
+    PublicRttMs: Number(legacy?.PublicRttMs) || 0,
+    ErrorReason: '',
+    ProcessId: Number(legacy?.ProcessId) || 0,
+    UsedByPlatforms: usedBy,
+  };
+}
+
+export function getEffectivePublicTunnels(
+  infra: HostInfraBundle | null | undefined
+): PublicTunnelItem[] {
+  if (Array.isArray(infra?.publicTunnels) && infra.publicTunnels.length > 0) {
+    return infra.publicTunnels;
+  }
+  return [buildDefaultBuiltinPublicTunnel(infra)];
+}
+
+export function resolveBoundPublicTunnel(
+  infra: HostInfraBundle | null | undefined,
+  plat: 'gemini' | 'claude'
+): {
+  publicTunnels: PublicTunnelItem[];
+  boundId: string;
+  boundTun: PublicTunnelItem;
+} {
+  const publicTunnels = getEffectivePublicTunnels(infra);
+  const requestedId =
+    infra?.selectedPublicTunnelByPlatform?.[plat] ||
+    publicTunnels[0]?.Id ||
+    'pub_builtin_quick';
+  const boundTun =
+    publicTunnels.find((t) => t.Id === requestedId) || publicTunnels[0];
+  return {
+    publicTunnels,
+    boundId: boundTun?.Id || 'pub_builtin_quick',
+    boundTun,
+  };
+}
+
 // ======================== BROWSER DEV FALLBACK STATE ========================
 
 function readDevJson<T>(key: string, fallback: T): T {
@@ -248,25 +322,91 @@ function buildDevInfraBundle(): HostInfraBundle {
     DefaultBrowserProfile: 'Chrome:Default',
   });
 
+  let storedPubTunnels: PublicTunnelItem[] = [];
+  try {
+    const rawList = localStorage.getItem(DEV_STORAGE_PUB_TUNNELS_KEY);
+    if (rawList) {
+      const parsed = JSON.parse(rawList);
+      if (Array.isArray(parsed)) storedPubTunnels = parsed;
+    }
+  } catch {
+    // Ignore
+  }
+  if (!storedPubTunnels.some((t) => t.Id === 'pub_builtin_quick')) {
+    storedPubTunnels = [
+      {
+        Id: 'pub_builtin_quick',
+        Name: '免费临时隧道',
+        IsBuiltin: true,
+        BaseUrl: '',
+        EffectiveUrl: '',
+        HasKey: false,
+        MaskedKey: '',
+        Mode: 'quick',
+        ModeLabel: '免费临时隧道',
+        Running: false,
+        Status: '未启动',
+        HealthPhase: 'Offline',
+        PublicRttMs: 0,
+        ErrorReason: '',
+        ProcessId: 0,
+        UsedByPlatforms: [],
+      },
+      ...storedPubTunnels,
+    ];
+  }
+
+  const rawBindings = readDevJson<Record<string, string>>(DEV_STORAGE_PUB_BINDINGS_KEY, {
+    gemini: 'pub_builtin_quick',
+    claude: 'pub_builtin_quick',
+  });
+  const selectedPublicTunnelByPlatform: Record<string, string> = {
+    gemini: storedPubTunnels.some((t) => t.Id === rawBindings.gemini)
+      ? rawBindings.gemini
+      : storedPubTunnels[0].Id,
+    claude: storedPubTunnels.some((t) => t.Id === rawBindings.claude)
+      ? rawBindings.claude
+      : storedPubTunnels[0].Id,
+  };
+
+  const enabledLower = new Set(
+    (profiles.EnabledPlatforms || []).map((p) => String(p || '').toLowerCase())
+  );
+  const publicTunnels = storedPubTunnels.map((t) => {
+    const usedBy: string[] = [];
+    if (enabledLower.has('gemini') && selectedPublicTunnelByPlatform.gemini === t.Id) {
+      usedBy.push('gemini');
+    }
+    if (enabledLower.has('claude') && selectedPublicTunnelByPlatform.claude === t.Id) {
+      usedBy.push('claude');
+    }
+    return { ...t, UsedByPlatforms: usedBy };
+  });
+
+  const firstRunningPub = publicTunnels.find((t) => t.Running) || publicTunnels[0];
+
   return {
     shieldBaseUrl: 'http://127.0.0.1:8766',
     studioToken: '',
     profiles,
     publicTunnel: {
-      Running: false,
-      Url: '',
-      ProcessId: 0,
+      Running: Boolean(firstRunningPub?.Running),
+      Url: firstRunningPub?.EffectiveUrl || '',
+      PublicMcpUrl: firstRunningPub?.EffectiveUrl || '',
+      ProcessId: firstRunningPub?.ProcessId || 0,
       StartedAt: '',
-      Status: '浏览器预览模式 (未挂载宿主)',
-      Mode: 'funnel',
-      ModeLabel: 'Tailscale Funnel 固定域名',
-      ProfileId: '',
+      Status: firstRunningPub?.Status || '浏览器预览模式 (未挂载宿主)',
+      Mode: firstRunningPub?.Mode || 'quick',
+      ModeLabel: firstRunningPub?.ModeLabel || '免费临时隧道',
+      ProfileId: firstRunningPub?.Id || 'pub_builtin_quick',
       FallbackFrom: '',
-      HealthPhase: 'Offline',
-      PublicRttMs: 0,
+      HealthPhase: firstRunningPub?.HealthPhase || 'Offline',
+      PublicRttMs: firstRunningPub?.PublicRttMs || 0,
       VerifiedIngressIp: '',
       LastCheckedUtc: '',
     },
+    publicTunnels,
+    selectedPublicTunnelByPlatform,
     display: {
       Endpoint: 'http://127.0.0.1:8789/mcp',
       Core: '127.0.0.1:8765 (Dev)',
@@ -321,7 +461,176 @@ async function handleDevFallbackRpc<T = any>(
     }
 
     case 'open_browser_bridge_dir': {
-      return { ok: true, path: 'd:\\tool\\RelayStudio\\browser-bridge' } as unknown as T;
+      return { ok: true, path: './browser-bridge' } as unknown as T;
+    }
+
+    case 'public_tunnel_item_save': {
+      const list = [...getEffectivePublicTunnels(infra)];
+      const secrets = readDevJson<Record<string, string>>(DEV_STORAGE_PUB_SECRETS_KEY, {});
+      const incomingId = String(params.tunnelId ?? '').trim();
+      const tunnelId = incomingId || `pub_${Date.now()}`;
+      const name = String(params.name ?? '自定义公网隧道').trim() || '自定义公网隧道';
+      const baseUrl = String(params.baseUrl ?? '').trim().replace(/\/+$/, '');
+      const startupKey = String(params.startupKey ?? '').trim();
+      const clearKey = Boolean(params.clearKey);
+      const idx = list.findIndex((t) => t.Id === tunnelId);
+      const prev = idx >= 0 ? list[idx] : null;
+
+      let hasKey = prev?.HasKey ?? false;
+      let maskedKey = prev?.MaskedKey ?? '';
+      if (clearKey) {
+        hasKey = false;
+        maskedKey = '';
+        delete secrets[tunnelId];
+      } else if (startupKey) {
+        hasKey = true;
+        maskedKey =
+          startupKey.length > 10
+            ? `${startupKey.slice(0, 6)}••••${startupKey.slice(-4)}`
+            : '已加密配置';
+        secrets[tunnelId] = startupKey;
+      }
+
+      const mode = hasKey
+        ? 'cloudflare_key'
+        : /\.ts\.net(\/|$)/i.test(baseUrl)
+          ? 'tailscale'
+          : baseUrl
+            ? 'external_url'
+            : 'quick';
+      const modeLabel =
+        mode === 'cloudflare_key'
+          ? 'Cloudflare 专线'
+          : mode === 'tailscale'
+            ? 'Tailscale Funnel'
+            : mode === 'external_url'
+              ? '外部固定域名'
+              : '免费临时隧道';
+
+      const savedItem: PublicTunnelItem = {
+        Id: tunnelId,
+        Name: prev?.IsBuiltin ? prev.Name : name,
+        IsBuiltin: Boolean(prev?.IsBuiltin),
+        BaseUrl: prev?.IsBuiltin ? '' : baseUrl,
+        EffectiveUrl: prev?.Running
+          ? baseUrl
+            ? formatMcpEndpoint(baseUrl)
+            : prev.EffectiveUrl
+          : '',
+        HasKey: prev?.IsBuiltin ? false : hasKey,
+        MaskedKey: prev?.IsBuiltin ? '' : maskedKey,
+        Mode: mode,
+        ModeLabel: modeLabel,
+        Running: Boolean(prev?.Running),
+        Status: prev?.Status || '未启动',
+        HealthPhase: prev?.HealthPhase || 'Offline',
+        PublicRttMs: prev?.PublicRttMs || 0,
+        ErrorReason: prev?.ErrorReason || '',
+        ProcessId: prev?.ProcessId || 0,
+        UsedByPlatforms: prev?.UsedByPlatforms || [],
+      };
+
+      if (idx >= 0) {
+        list[idx] = savedItem;
+      } else {
+        list.push(savedItem);
+      }
+      writeDevJson(DEV_STORAGE_PUB_TUNNELS_KEY, list);
+      writeDevJson(DEV_STORAGE_PUB_SECRETS_KEY, secrets);
+      const nextInfra = buildDevInfraBundle();
+      emitPush({ type: 'infra_updated', infra: nextInfra });
+      return nextInfra as unknown as T;
+    }
+
+    case 'public_tunnel_item_remove': {
+      const tunnelId = String(params.tunnelId ?? '').trim();
+      const list = getEffectivePublicTunnels(infra).filter(
+        (t) => t.IsBuiltin || t.Id !== tunnelId
+      );
+      const secrets = readDevJson<Record<string, string>>(DEV_STORAGE_PUB_SECRETS_KEY, {});
+      delete secrets[tunnelId];
+      writeDevJson(DEV_STORAGE_PUB_TUNNELS_KEY, list);
+      writeDevJson(DEV_STORAGE_PUB_SECRETS_KEY, secrets);
+      const nextInfra = buildDevInfraBundle();
+      emitPush({ type: 'infra_updated', infra: nextInfra });
+      return nextInfra as unknown as T;
+    }
+
+    case 'public_tunnel_item_connect': {
+      const tunnelId = String(params.tunnelId ?? 'pub_builtin_quick').trim();
+      const list = getEffectivePublicTunnels(infra).map((t) => {
+        if (t.Id !== tunnelId) return t;
+        const effectiveUrl = t.BaseUrl
+          ? formatMcpEndpoint(t.BaseUrl)
+          : `https://preview-${t.Id.slice(-6)}.trycloudflare.com/mcp`;
+        return {
+          ...t,
+          Running: true,
+          EffectiveUrl: effectiveUrl,
+          Status: '运行中',
+          HealthPhase: 'Online',
+          PublicRttMs: 42,
+          ErrorReason: '',
+          ProcessId: 10240,
+        };
+      });
+      writeDevJson(DEV_STORAGE_PUB_TUNNELS_KEY, list);
+      const nextInfra = buildDevInfraBundle();
+      emitPush({ type: 'infra_updated', infra: nextInfra });
+      return nextInfra as unknown as T;
+    }
+
+    case 'public_tunnel_item_disconnect': {
+      const tunnelId = String(params.tunnelId ?? '').trim();
+      const list = getEffectivePublicTunnels(infra).map((t) =>
+        t.Id === tunnelId
+          ? {
+              ...t,
+              Running: false,
+              EffectiveUrl: '',
+              Status: '未启动',
+              HealthPhase: 'Offline',
+              PublicRttMs: 0,
+              ProcessId: 0,
+            }
+          : t
+      );
+      writeDevJson(DEV_STORAGE_PUB_TUNNELS_KEY, list);
+      const nextInfra = buildDevInfraBundle();
+      emitPush({ type: 'infra_updated', infra: nextInfra });
+      return nextInfra as unknown as T;
+    }
+
+    case 'public_tunnel_item_get_secret': {
+      const tunnelId = String(params.tunnelId ?? '').trim();
+      const secrets = readDevJson<Record<string, string>>(DEV_STORAGE_PUB_SECRETS_KEY, {});
+      const found = getEffectivePublicTunnels(infra).find((t) => t.Id === tunnelId);
+      const secret =
+        secrets[tunnelId] || (found?.HasKey ? 'eyJhIjoiZGV2LXByZXZpZXctdG9rZW4ifQ==' : '');
+      return { ok: Boolean(secret), secret } as unknown as T;
+    }
+
+    case 'public_tunnel_detect_tailscale': {
+      return {
+        ok: true,
+        url: 'https://relay-dev.tailnet.ts.net',
+        errorReason: '浏览器预览模式：已填入示例 Tailscale 域名',
+      } as unknown as T;
+    }
+
+    case 'platform_bind_public_tunnel': {
+      const plat = String(params.platform ?? '').trim().toLowerCase();
+      const tunnelId = String(params.tunnelId ?? '').trim();
+      if ((plat === 'gemini' || plat === 'claude') && tunnelId) {
+        const bindings = {
+          ...(infra.selectedPublicTunnelByPlatform || {}),
+          [plat]: tunnelId,
+        };
+        writeDevJson(DEV_STORAGE_PUB_BINDINGS_KEY, bindings);
+      }
+      const nextInfra = buildDevInfraBundle();
+      emitPush({ type: 'infra_updated', infra: nextInfra });
+      return nextInfra as unknown as T;
     }
 
     case 'open_external_url': {

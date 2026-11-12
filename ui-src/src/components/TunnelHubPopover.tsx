@@ -2,9 +2,15 @@ import { useEffect, useRef, useState } from 'preact/hooks';
 import type {
   HostInfraBundle,
   PlatformId,
+  PublicTunnelItem,
   SafeConnectionProfile,
 } from '../types/contracts';
-import { extractInfraBundle, hostRpc } from '../services/hostBridge';
+import {
+  extractInfraBundle,
+  getEffectivePublicTunnels,
+  hostRpc,
+  resolveBoundPublicTunnel,
+} from '../services/hostBridge';
 import { AnchoredPopover } from './AnchoredPopover';
 
 export type TunnelHubTab = 'chatgpt' | 'gemini' | 'claude' | 'add';
@@ -16,6 +22,7 @@ export interface TunnelHubPopoverProps {
   infra: HostInfraBundle;
   discardSignal?: number;
   onSelectTab: (tab: TunnelHubTab) => void;
+  onManagePublicTunnels: (highlightTunnelId?: string) => void;
   onClose: () => void;
   onInfraUpdated: (nextInfra: HostInfraBundle) => void;
   onToast: (message: string, level?: 'info' | 'success' | 'warning' | 'error') => void;
@@ -45,19 +52,18 @@ const PICKER_PLATFORMS: Array<{
     id: 'gemini',
     label: 'Gemini',
     title: 'Gemini · 公网 HTTPS MCP',
-    desc: '通过 Tailscale Funnel 固定域名或 Cloudflare Tunnel 暴露安全 /mcp 端点',
+    desc: '复用「设置 → 隧道与连接」中的公网隧道，暴露安全 HTTPS /mcp 端点',
   },
   {
     id: 'claude',
     label: 'Claude',
     title: 'Claude · 公网 HTTPS MCP',
-    desc: '供 Claude Connectors 接入公网 HTTPS /mcp 端点并自动完成 OAuth 鉴权',
+    desc: '复用「设置 → 隧道与连接」中的公网隧道，供 Claude Connectors 接入并完成 OAuth 鉴权',
   },
 ];
 
-// Module-level applied running profile & dirty edit tracking across popover open/close cycles
+// Module-level applied running profile & dirty edit tracking for ChatGPT across popover open/close cycles
 let appliedChatgptProfileId = '';
-const appliedPublicProfileByPlat: Partial<Record<'gemini' | 'claude', string>> = {};
 let persistedDirtyRunningIds: Record<string, boolean> = {};
 
 function canonicalPlat(raw: string | undefined): PlatformId {
@@ -67,20 +73,19 @@ function canonicalPlat(raw: string | undefined): PlatformId {
   return 'chatgpt';
 }
 
-function formatMcpEndpoint(rawUrl: string | undefined): string {
-  const clean = (rawUrl || '').trim().replace(/\/+$/, '');
-  if (!clean) return '';
-  return clean.toLowerCase().endsWith('/mcp') ? clean : `${clean}/mcp`;
+function shortenChatgptTunnelId(val: string): string {
+  const trimmed = (val || '').trim();
+  if (!trimmed) return '未配置';
+  return trimmed.length > 22 ? `${trimmed.slice(0, 13)}…${trimmed.slice(-6)}` : trimmed;
 }
 
-function shortenTunnelDisplay(val: string, isPub: boolean): string {
-  const trimmed = (val || '').trim();
-  if (!trimmed) return isPub ? '未分配公网地址' : '未配置';
-  if (isPub) {
-    const noScheme = trimmed.replace(/^https?:\/\//i, '');
-    return noScheme.length > 28 ? `${noScheme.slice(0, 18)}…${noScheme.slice(-8)}` : noScheme;
-  }
-  return trimmed.length > 22 ? `${trimmed.slice(0, 13)}…${trimmed.slice(-6)}` : trimmed;
+function truncateMiddle(rawUrl: string, maxLen = 30): string {
+  const clean = (rawUrl || '').trim().replace(/^https?:\/\//i, '');
+  if (!clean) return '';
+  if (clean.length <= maxLen) return clean;
+  const head = Math.ceil((maxLen - 1) * 0.62);
+  const tail = Math.max(6, maxLen - 1 - head);
+  return `${clean.slice(0, head)}…${clean.slice(-tail)}`;
 }
 
 export function TunnelHubPopover({
@@ -90,6 +95,7 @@ export function TunnelHubPopover({
   infra,
   discardSignal,
   onSelectTab,
+  onManagePublicTunnels,
   onClose,
   onInfraUpdated,
   onToast,
@@ -101,12 +107,29 @@ export function TunnelHubPopover({
     () => ({ ...persistedDirtyRunningIds })
   );
 
-  // Inline accordion form fields
+  // ChatGPT inline accordion form fields
   const [formName, setFormName] = useState<string>('');
   const [formTunnelId, setFormTunnelId] = useState<string>('');
-  const [formBaseUrl, setFormBaseUrl] = useState<string>('');
   const [formApiKey, setFormApiKey] = useState<string>('');
   const [formApiBaseUrl, setFormApiBaseUrl] = useState<string>('https://api.openai.com/v1');
+
+  // Decoupled local caller selection for Gemini / Claude public tunnels
+  const publicTunnels = getEffectivePublicTunnels(infra);
+  const geminiBound = resolveBoundPublicTunnel(infra, 'gemini');
+  const claudeBound = resolveBoundPublicTunnel(infra, 'claude');
+
+  const [pickedPubIdByPlat, setPickedPubIdByPlat] = useState<Record<'gemini' | 'claude', string>>(
+    () => ({
+      gemini: geminiBound.boundId,
+      claude: claudeBound.boundId,
+    })
+  );
+
+  const wasOpenRef = useRef<boolean>(open);
+  const prevBoundRef = useRef<Record<'gemini' | 'claude', string>>({
+    gemini: geminiBound.boundId,
+    claude: claudeBound.boundId,
+  });
 
   // Per-profile revealed secret & transient copy checkmark badges
   const [revealedSecrets, setRevealedSecrets] = useState<Record<string, string>>({});
@@ -114,6 +137,38 @@ export function TunnelHubPopover({
   const copyTimersRef = useRef<Record<string, number>>({});
   const prevDiscardRef = useRef<number | undefined>(discardSignal);
   const prevTabRef = useRef<TunnelHubTab>(activeTab);
+
+  // Sync local `pickedPubIdByPlat` to `boundId` when opening or when `boundId` changes externally
+  useEffect(() => {
+    const justOpened = open && !wasOpenRef.current;
+    wasOpenRef.current = open;
+
+    const geminiChanged = prevBoundRef.current.gemini !== geminiBound.boundId;
+    const claudeChanged = prevBoundRef.current.claude !== claudeBound.boundId;
+    prevBoundRef.current = {
+      gemini: geminiBound.boundId,
+      claude: claudeBound.boundId,
+    };
+
+    setPickedPubIdByPlat((prev) => {
+      const hasGeminiPicked = publicTunnels.some((t) => t.Id === prev.gemini);
+      const hasClaudePicked = publicTunnels.some((t) => t.Id === prev.claude);
+
+      const nextGemini =
+        justOpened || geminiChanged || !hasGeminiPicked
+          ? geminiBound.boundId
+          : prev.gemini;
+      const nextClaude =
+        justOpened || claudeChanged || !hasClaudePicked
+          ? claudeBound.boundId
+          : prev.claude;
+
+      if (nextGemini === prev.gemini && nextClaude === prev.claude) {
+        return prev;
+      }
+      return { gemini: nextGemini, claude: nextClaude };
+    });
+  }, [open, geminiBound.boundId, claudeBound.boundId, publicTunnels]);
 
   const updateDirtyRunningIds = (
     updater: (prev: Record<string, boolean>) => Record<string, boolean>
@@ -152,7 +207,6 @@ export function TunnelHubPopover({
     setConfirmDeleteId(null);
     setFormName('');
     setFormTunnelId('');
-    setFormBaseUrl('');
     setFormApiKey('');
     setFormApiBaseUrl('https://api.openai.com/v1');
   };
@@ -185,9 +239,8 @@ export function TunnelHubPopover({
   const allProfiles = infra.profiles?.Profiles || [];
   const activeByPlat = infra.profiles?.ActiveProfileByPlatform || {};
   const display = infra.display;
-  const pubTunnel = infra.publicTunnel;
 
-  // Sync module-level applied profile tracking against live tunnel running states
+  // Sync module-level applied ChatGPT profile tracking against live tunnel running state
   const chatgptRunning = Boolean(display?.Running);
   if (!chatgptRunning) {
     appliedChatgptProfileId = '';
@@ -203,90 +256,42 @@ export function TunnelHubPopover({
       '';
   }
 
-  const pubRunning = Boolean(pubTunnel?.Running);
-  if (!pubRunning) {
-    delete appliedPublicProfileByPlat.gemini;
-    delete appliedPublicProfileByPlat.claude;
-  } else {
-    for (const pPlat of ['gemini', 'claude'] as const) {
-      if (!appliedPublicProfileByPlat[pPlat]) {
-        const pList = allProfiles.filter((p) => canonicalPlat(p.Platform) === pPlat);
-        const matchedFromTunnel =
-          pubTunnel?.ProfileId && pList.some((p) => p.Id === pubTunnel.ProfileId)
-            ? pubTunnel.ProfileId
-            : '';
-        appliedPublicProfileByPlat[pPlat] =
-          matchedFromTunnel ||
-          activeByPlat[pPlat] ||
-          pList.find((p) => p.IsActive)?.Id ||
-          pList[0]?.Id ||
-          '';
-      }
-    }
-  }
-
-  // Clear stale dirty flags if tunnel stopped
   useEffect(() => {
-    if (!chatgptRunning && !pubRunning && Object.keys(persistedDirtyRunningIds).length > 0) {
+    if (!chatgptRunning && Object.keys(persistedDirtyRunningIds).length > 0) {
       updateDirtyRunningIds(() => ({}));
     }
-  }, [chatgptRunning, pubRunning]);
+  }, [chatgptRunning]);
 
   const isChatGpt = activeTab === 'chatgpt';
-  const isPub = activeTab === 'gemini' || activeTab === 'claude';
+  const isPubCaller = activeTab === 'gemini' || activeTab === 'claude';
 
-  const platProfiles =
-    activeTab === 'add'
-      ? []
-      : allProfiles.filter((p) => canonicalPlat(p.Platform) === activeTab);
+  const chatgptProfiles = allProfiles.filter((p) => canonicalPlat(p.Platform) === 'chatgpt');
 
-  const selectedProfileId =
-    activeTab === 'add'
-      ? ''
-      : isChatGpt
-        ? activeByPlat.chatgpt ||
-          infra.profiles?.ActiveProfileId ||
-          platProfiles.find((p) => p.IsActive)?.Id ||
-          platProfiles[0]?.Id ||
-          ''
-        : activeByPlat[activeTab] ||
-          platProfiles.find((p) => p.IsActive)?.Id ||
-          platProfiles[0]?.Id ||
-          '';
+  const selectedChatgptProfileId =
+    activeByPlat.chatgpt ||
+    infra.profiles?.ActiveProfileId ||
+    chatgptProfiles.find((p) => p.IsActive)?.Id ||
+    chatgptProfiles[0]?.Id ||
+    '';
 
-  const isRunningNow =
-    activeTab === 'add'
-      ? false
-      : activeTab === 'chatgpt'
-        ? Boolean(display?.Running)
-        : Boolean(pubTunnel?.Running);
-
-  const runningProfileId =
-    activeTab === 'add' || !isRunningNow
-      ? ''
-      : activeTab === 'chatgpt'
-        ? display?.RunningProfileId || appliedChatgptProfileId || infra.profiles?.ActiveProfileId || ''
-        : appliedPublicProfileByPlat[activeTab] || '';
+  const runningChatgptProfileId = !chatgptRunning
+    ? ''
+    : display?.RunningProfileId || appliedChatgptProfileId || infra.profiles?.ActiveProfileId || '';
 
   const editingExisting =
-    expandedId && expandedId !== '__new__'
-      ? platProfiles.find((p) => p.Id === expandedId) || null
+    isChatGpt && expandedId && expandedId !== '__new__'
+      ? chatgptProfiles.find((p) => p.Id === expandedId) || null
       : null;
 
-  // Compute unsaved edits dirty flag & sync to host guard
+  // Compute unsaved edits dirty flag for ChatGPT inline form & sync to host guard
   const isDirty = (() => {
-    if (!open || !expandedId || activeTab === 'add') return false;
+    if (!open || !isChatGpt || !expandedId) return false;
     if (expandedId === '__new__') {
-      return (
-        formTunnelId.trim().length > 0 ||
-        formBaseUrl.trim().length > 0 ||
-        formApiKey.trim().length > 0
-      );
+      return formTunnelId.trim().length > 0 || formApiKey.trim().length > 0;
     }
     if (!editingExisting) return false;
     const baseName = (editingExisting.Name || '').trim();
     const baseTid = (editingExisting.TunnelId || '').trim();
-    const basePubUrl = (editingExisting.BaseUrl || '').trim();
     const baseApiUrl = (
       editingExisting.ApiBaseUrl ||
       editingExisting.BaseUrl ||
@@ -295,12 +300,8 @@ export function TunnelHubPopover({
 
     if (formName.trim() !== baseName) return true;
     if (formApiKey.trim().length > 0) return true;
-    if (isChatGpt) {
-      if (formTunnelId.trim() !== baseTid) return true;
-      if ((formApiBaseUrl.trim() || 'https://api.openai.com/v1') !== baseApiUrl) return true;
-    } else if (formBaseUrl.trim() !== basePubUrl) {
-      return true;
-    }
+    if (formTunnelId.trim() !== baseTid) return true;
+    if ((formApiBaseUrl.trim() || 'https://api.openai.com/v1') !== baseApiUrl) return true;
     return false;
   })();
 
@@ -323,6 +324,8 @@ export function TunnelHubPopover({
     return null;
   };
 
+  // ---------------- ChatGPT Private Tunnel Handlers (100% Preserved) ----------------
+
   const openInlineEdit = (p: SafeConnectionProfile) => {
     if (expandedId === p.Id) {
       resetFormState();
@@ -332,7 +335,6 @@ export function TunnelHubPopover({
     setExpandedId(p.Id);
     setFormName(p.Name || '');
     setFormTunnelId(p.TunnelId || '');
-    setFormBaseUrl(p.BaseUrl || '');
     setFormApiKey('');
     setFormApiBaseUrl(p.ApiBaseUrl || p.BaseUrl || 'https://api.openai.com/v1');
   };
@@ -342,31 +344,26 @@ export function TunnelHubPopover({
       resetFormState();
       return;
     }
-    const nextIdx = platProfiles.length + 1;
-    const defaultLabel = isChatGpt
-      ? `隧道配置 #${nextIdx}`
-      : `${PLATFORM_LABELS[activeTab as PlatformId]} 配置 #${nextIdx}`;
+    const nextIdx = chatgptProfiles.length + 1;
     setConfirmDeleteId(null);
     setExpandedId('__new__');
-    setFormName(defaultLabel);
+    setFormName(`隧道配置 #${nextIdx}`);
     setFormTunnelId('');
-    setFormBaseUrl('');
     setFormApiKey('');
     setFormApiBaseUrl('https://api.openai.com/v1');
   };
 
-  // 1) Click Card (`handleSelectCard`): select ONLY, never restart or disconnect tunnel
-  const handleSelectCard = async (p: SafeConnectionProfile) => {
-    if (busyAction || activeTab === 'add') return;
-    if (p.Id === selectedProfileId) return;
+  const handleSelectChatgptCard = async (p: SafeConnectionProfile) => {
+    if (busyAction || !isChatGpt) return;
+    if (p.Id === selectedChatgptProfileId) return;
     setBusyAction(`sel_${p.Id}`);
     try {
       const res = await hostRpc('profile_select', {
         profileId: p.Id,
         ProfileId: p.Id,
         id: p.Id,
-        platform: activeTab,
-        Platform: activeTab,
+        platform: 'chatgpt',
+        Platform: 'chatgpt',
         reconnect: false,
         Reconnect: false,
       });
@@ -378,28 +375,23 @@ export function TunnelHubPopover({
     }
   };
 
-  // 2) Inline Edit / New Form (`保存`): save ONLY (`connectNow: false`), never start/restart tunnel
   const handleSaveInlineProfile = async (e: Event) => {
     e.preventDefault();
-    if (activeTab === 'add' || busyAction) return;
+    if (!isChatGpt || busyAction) return;
 
     const isCreating = expandedId === '__new__';
     const targetProf = isCreating ? null : editingExisting;
 
-    if (isChatGpt) {
-      if (!formTunnelId.trim()) {
-        onToast('请填写隧道编号 (tunnel_...) 或连接链接', 'warning');
-        return;
-      }
-      if (!formApiKey.trim() && !targetProf?.HasKey) {
-        onToast('首次保存配置请粘贴 OpenAI API Key', 'warning');
-        return;
-      }
+    if (!formTunnelId.trim()) {
+      onToast('请填写隧道编号 (tunnel_...) 或连接链接', 'warning');
+      return;
+    }
+    if (!formApiKey.trim() && !targetProf?.HasKey) {
+      onToast('首次保存配置请粘贴 OpenAI API Key', 'warning');
+      return;
     }
 
-    const cleanName =
-      formName.trim() ||
-      (isChatGpt ? '主号配置' : `${PLATFORM_LABELS[activeTab]} 默认配置`);
+    const cleanName = formName.trim() || '主号配置';
 
     setBusyAction('profile_save');
     try {
@@ -408,24 +400,16 @@ export function TunnelHubPopover({
         ProfileId: isCreating ? '' : targetProf?.Id || '',
         name: cleanName,
         Name: cleanName,
-        platform: activeTab,
-        Platform: activeTab,
-        kind: isChatGpt ? 'tunnel' : 'public_tunnel',
-        Kind: isChatGpt ? 'tunnel' : 'public_tunnel',
-        tunnelId: isChatGpt ? formTunnelId.trim() : '',
-        TunnelId: isChatGpt ? formTunnelId.trim() : '',
-        baseUrl: isChatGpt
-          ? formApiBaseUrl.trim() || 'https://api.openai.com/v1'
-          : formBaseUrl.trim(),
-        BaseUrl: isChatGpt
-          ? formApiBaseUrl.trim() || 'https://api.openai.com/v1'
-          : formBaseUrl.trim(),
-        apiBaseUrl: isChatGpt
-          ? formApiBaseUrl.trim() || 'https://api.openai.com/v1'
-          : '',
-        ApiBaseUrl: isChatGpt
-          ? formApiBaseUrl.trim() || 'https://api.openai.com/v1'
-          : '',
+        platform: 'chatgpt',
+        Platform: 'chatgpt',
+        kind: 'tunnel',
+        Kind: 'tunnel',
+        tunnelId: formTunnelId.trim(),
+        TunnelId: formTunnelId.trim(),
+        baseUrl: formApiBaseUrl.trim() || 'https://api.openai.com/v1',
+        BaseUrl: formApiBaseUrl.trim() || 'https://api.openai.com/v1',
+        apiBaseUrl: formApiBaseUrl.trim() || 'https://api.openai.com/v1',
+        ApiBaseUrl: formApiBaseUrl.trim() || 'https://api.openai.com/v1',
         apiKey: formApiKey.trim(),
         ApiKey: formApiKey.trim(),
         enabled: true,
@@ -439,8 +423,8 @@ export function TunnelHubPopover({
       const nextInfra = await syncInfraFromRpcResult(res);
       const savedId =
         targetProf?.Id ||
-        nextInfra?.profiles?.ActiveProfileByPlatform?.[activeTab] ||
-        (isChatGpt ? nextInfra?.profiles?.ActiveProfileId : '') ||
+        nextInfra?.profiles?.ActiveProfileByPlatform?.chatgpt ||
+        nextInfra?.profiles?.ActiveProfileId ||
         '';
 
       if (savedId) {
@@ -449,7 +433,7 @@ export function TunnelHubPopover({
           delete next[savedId];
           return next;
         });
-        if (runningProfileId && savedId === runningProfileId) {
+        if (runningChatgptProfileId && savedId === runningChatgptProfileId) {
           updateDirtyRunningIds((prev) => ({ ...prev, [savedId]: true }));
         }
       }
@@ -457,7 +441,7 @@ export function TunnelHubPopover({
       resetFormState();
       void hostRpc('set_unsaved_edits', { dirty: false }).catch(() => {});
       onToast(
-        isRunningNow
+        chatgptRunning
           ? '已保存配置（点击右下角连接生效）'
           : '已保存配置',
         'success'
@@ -469,60 +453,32 @@ export function TunnelHubPopover({
     }
   };
 
-  // 3) Bottom-Right Group Connect & Disconnect Handlers
-  const handleConnectGroup = async () => {
-    if (busyAction || activeTab === 'add') return;
-    if (isChatGpt && !selectedProfileId) {
+  const handleConnectChatgpt = async () => {
+    if (busyAction || !isChatGpt) return;
+    if (!selectedChatgptProfileId) {
       onToast('请先新增并保存一条隧道配置', 'warning');
       return;
     }
 
     setBusyAction('connect_tunnel');
     try {
-      if (isChatGpt) {
-        if (selectedProfileId) {
-          await hostRpc('profile_select', {
-            profileId: selectedProfileId,
-            ProfileId: selectedProfileId,
-            id: selectedProfileId,
-            platform: 'chatgpt',
-            Platform: 'chatgpt',
-            reconnect: false,
-            Reconnect: false,
-          });
-        }
-        const res = await hostRpc('openai_tunnel_connect', {
-          profileId: selectedProfileId,
-          ProfileId: selectedProfileId,
-        });
-        appliedChatgptProfileId = selectedProfileId;
-        updateDirtyRunningIds(() => ({}));
-        await syncInfraFromRpcResult(res);
-        onToast('已应用配置并连接 ChatGPT 隧道', 'success');
-      } else {
-        if (selectedProfileId) {
-          await hostRpc('profile_select', {
-            profileId: selectedProfileId,
-            ProfileId: selectedProfileId,
-            id: selectedProfileId,
-            platform: activeTab,
-            Platform: activeTab,
-            reconnect: false,
-            Reconnect: false,
-          });
-        }
-        const res = await hostRpc('public_tunnel_connect', {
-          platform: activeTab,
-          Platform: activeTab,
-          profileId: selectedProfileId,
-          ProfileId: selectedProfileId,
-          action: isRunningNow ? 'restart' : 'start',
-        });
-        appliedPublicProfileByPlat[activeTab] = selectedProfileId;
-        updateDirtyRunningIds(() => ({}));
-        await syncInfraFromRpcResult(res);
-        onToast(`已应用配置并连接 ${PLATFORM_LABELS[activeTab]} 隧道`, 'success');
-      }
+      await hostRpc('profile_select', {
+        profileId: selectedChatgptProfileId,
+        ProfileId: selectedChatgptProfileId,
+        id: selectedChatgptProfileId,
+        platform: 'chatgpt',
+        Platform: 'chatgpt',
+        reconnect: false,
+        Reconnect: false,
+      });
+      const res = await hostRpc('openai_tunnel_connect', {
+        profileId: selectedChatgptProfileId,
+        ProfileId: selectedChatgptProfileId,
+      });
+      appliedChatgptProfileId = selectedChatgptProfileId;
+      updateDirtyRunningIds(() => ({}));
+      await syncInfraFromRpcResult(res);
+      onToast('已应用配置并连接 ChatGPT 隧道', 'success');
     } catch (err) {
       onToast(err instanceof Error ? err.message : String(err), 'error');
     } finally {
@@ -530,24 +486,15 @@ export function TunnelHubPopover({
     }
   };
 
-  const handleDisconnectGroup = async () => {
-    if (busyAction || activeTab === 'add') return;
+  const handleDisconnectChatgpt = async () => {
+    if (busyAction || !isChatGpt) return;
     setBusyAction('disconnect_tunnel');
     try {
-      if (isChatGpt) {
-        const res = await hostRpc('openai_tunnel_disconnect');
-        appliedChatgptProfileId = '';
-        updateDirtyRunningIds(() => ({}));
-        await syncInfraFromRpcResult(res);
-        onToast('已断开 ChatGPT 隧道', 'info');
-      } else {
-        const res = await hostRpc('public_tunnel_disconnect');
-        delete appliedPublicProfileByPlat.gemini;
-        delete appliedPublicProfileByPlat.claude;
-        updateDirtyRunningIds(() => ({}));
-        await syncInfraFromRpcResult(res);
-        onToast(`已断开 ${PLATFORM_LABELS[activeTab]} 隧道`, 'info');
-      }
+      const res = await hostRpc('openai_tunnel_disconnect');
+      appliedChatgptProfileId = '';
+      updateDirtyRunningIds(() => ({}));
+      await syncInfraFromRpcResult(res);
+      onToast('已断开 ChatGPT 隧道', 'info');
     } catch (err) {
       onToast(err instanceof Error ? err.message : String(err), 'error');
     } finally {
@@ -555,29 +502,7 @@ export function TunnelHubPopover({
     }
   };
 
-  const resolveEffectivePubUrl = (p: SafeConnectionProfile): string => {
-    const customUrl = (p.TunnelId || p.BaseUrl || '').trim();
-    const livePubUrl = (pubTunnel?.PublicMcpUrl || pubTunnel?.Url || '').trim();
-    return formatMcpEndpoint(customUrl || livePubUrl);
-  };
-
-  const handleCopyTunnelEndpoint = async (p: SafeConnectionProfile) => {
-    if (isPub) {
-      const effectiveMcpUrl = resolveEffectivePubUrl(p);
-      if (!effectiveMcpUrl) {
-        onToast('当前未分配公网地址，请先启动隧道', 'warning');
-        return;
-      }
-      try {
-        await hostRpc('copy_clipboard', { text: effectiveMcpUrl });
-        markCopied(`tid_${p.Id}`);
-        onToast('已复制隧道地址到剪贴板', 'success');
-      } catch (err) {
-        onToast(err instanceof Error ? err.message : String(err), 'error');
-      }
-      return;
-    }
-
+  const handleCopyChatgptTunnelId = async (p: SafeConnectionProfile) => {
     const fullVal = (p.TunnelId || '').trim();
     if (!fullVal) {
       onToast('当前配置未填写隧道编号', 'warning');
@@ -592,21 +517,13 @@ export function TunnelHubPopover({
     }
   };
 
-  const isDefaultRelayCredential = (p: SafeConnectionProfile): boolean => {
-    return isPub && (!p.HasKey || p.MaskedKey === '尚未保存密钥');
-  };
-
-  const handleToggleRevealSecret = async (p: SafeConnectionProfile) => {
+  const handleToggleRevealChatgptSecret = async (p: SafeConnectionProfile) => {
     if (revealedSecrets[p.Id]) {
       setRevealedSecrets((prev) => {
         const next = { ...prev };
         delete next[p.Id];
         return next;
       });
-      return;
-    }
-    if (isDefaultRelayCredential(p)) {
-      setRevealedSecrets((prev) => ({ ...prev, [p.Id]: 'relaystudio' }));
       return;
     }
     try {
@@ -625,37 +542,82 @@ export function TunnelHubPopover({
     }
   };
 
-  const handleCopySecret = async (p: SafeConnectionProfile) => {
-    if (isDefaultRelayCredential(p)) {
-      try {
-        await hostRpc('copy_clipboard', { text: 'relaystudio' });
-        markCopied(`key_${p.Id}`);
-        onToast('已复制默认密钥 (relaystudio)', 'success');
-      } catch (err) {
-        onToast(err instanceof Error ? err.message : String(err), 'error');
-      }
-      return;
-    }
-
+  const handleCopyChatgptSecret = async (p: SafeConnectionProfile) => {
     try {
       const res = await hostRpc<any>('profile_get_secret', {
         profileId: p.Id,
         ProfileId: p.Id,
       });
       const secret = String(res?.secret ?? res?.Secret ?? '');
-      const isDefaultOAuth = Boolean(res?.isDefaultOAuth ?? res?.IsDefaultOAuth);
       if (!secret) {
         onToast('当前配置尚未保存密钥', 'warning');
         return;
       }
       await hostRpc('copy_clipboard', { text: secret });
       markCopied(`key_${p.Id}`);
-      onToast(
-        isDefaultOAuth ? '已复制默认密钥 (relaystudio)' : '已复制完整 Key 到剪贴板',
-        'success'
-      );
+      onToast('已复制完整 Key 到剪贴板', 'success');
     } catch (err) {
       onToast(err instanceof Error ? err.message : String(err), 'error');
+    }
+  };
+
+  // ---------------- Gemini / Claude Pure Caller Handlers ----------------
+
+  const handleCopyCallerTunnelUrl = async (tun: PublicTunnelItem) => {
+    const effective = (tun.EffectiveUrl || '').trim();
+    if (!effective) {
+      onToast('该隧道尚未启动，请先点击右下角「启动隧道」', 'warning');
+      return;
+    }
+    try {
+      await hostRpc('copy_clipboard', { text: effective });
+      markCopied(`pub_tid_${tun.Id}`);
+      onToast('已复制隧道地址到剪贴板', 'success');
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : String(err), 'error');
+    }
+  };
+
+  const handleToggleRevealOAuthHelper = (tun: PublicTunnelItem) => {
+    const flagKey = `pub_oauth_${tun.Id}`;
+    setRevealedSecrets((prev) => {
+      const next = { ...prev };
+      if (next[flagKey]) {
+        delete next[flagKey];
+      } else {
+        next[flagKey] = 'relaystudio (Client ID / Secret 通用)';
+      }
+      return next;
+    });
+  };
+
+  const handleCopyOAuthHelper = async (tun: PublicTunnelItem) => {
+    try {
+      await hostRpc('copy_clipboard', { text: 'relaystudio' });
+      markCopied(`pub_oauth_cp_${tun.Id}`);
+      onToast('已复制默认密钥 (relaystudio)', 'success');
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : String(err), 'error');
+    }
+  };
+
+  const handleBindPublicTunnel = async (
+    plat: 'gemini' | 'claude',
+    tun: PublicTunnelItem
+  ) => {
+    if (busyAction) return;
+    setBusyAction('bind_pub_tunnel');
+    try {
+      const res = await hostRpc('platform_bind_public_tunnel', {
+        platform: plat,
+        tunnelId: tun.Id,
+      });
+      await syncInfraFromRpcResult(res);
+      onToast(`✓ 已将 ${PLATFORM_LABELS[plat]} 切换至「${tun.Name}」`, 'success');
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : String(err), 'error');
+    } finally {
+      setBusyAction(null);
     }
   };
 
@@ -666,21 +628,46 @@ export function TunnelHubPopover({
   const enabledPlatforms = ORDERED_PLATFORMS.filter((p) => enabledSet.has(p));
   const missingPlatforms = PICKER_PLATFORMS.filter((pm) => !enabledSet.has(pm.id));
 
+  // Caller view state for Gemini / Claude
+  const callerBoundId =
+    activeTab === 'gemini'
+      ? geminiBound.boundId
+      : activeTab === 'claude'
+        ? claudeBound.boundId
+        : 'pub_builtin_quick';
+  const rawPickedId =
+    activeTab === 'gemini' || activeTab === 'claude'
+      ? pickedPubIdByPlat[activeTab]
+      : callerBoundId;
+  const callerPickedTun =
+    publicTunnels.find((t) => t.Id === rawPickedId) ||
+    publicTunnels.find((t) => t.Id === callerBoundId) ||
+    publicTunnels[0];
+  const callerPickedId = callerPickedTun?.Id || callerBoundId;
+
   const headerTitle =
     activeTab === 'add'
       ? '添加平台通道'
-      : `${PLATFORM_LABELS[activeTab]} 隧道配置 (${platProfiles.length})`;
+      : isChatGpt
+        ? `ChatGPT 隧道配置 (${chatgptProfiles.length})`
+        : `${PLATFORM_LABELS[activeTab]} 隧道配置 (${publicTunnels.length})`;
 
-  const primaryConnectLabel = (() => {
+  const chatgptPrimaryConnectLabel = (() => {
     if (busyAction === 'connect_tunnel') return '连接中…';
-    if (!isRunningNow) return '▶ 启动隧道';
-    if (selectedProfileId && selectedProfileId !== runningProfileId) return '▶ 切换并连接';
-    if (runningProfileId && dirtyRunningIds[runningProfileId]) return '↻ 应用并重连';
+    if (!chatgptRunning) return '▶ 启动隧道';
+    if (selectedChatgptProfileId && selectedChatgptProfileId !== runningChatgptProfileId) {
+      return '▶ 切换并连接';
+    }
+    if (runningChatgptProfileId && dirtyRunningIds[runningChatgptProfileId]) {
+      return '↻ 应用并重连';
+    }
     return '↻ 重新连接';
   })();
 
-  const renderInlineAccordionForm = (targetProf: SafeConnectionProfile | null) => {
-    const canDelete = Boolean(targetProf && platProfiles.length > 1);
+  const renderChatgptInlineForm = (targetProf: SafeConnectionProfile | null) => {
+    const canDelete = Boolean(targetProf && chatgptProfiles.length > 1);
+    const idPrefix = targetProf ? `th-cgpt-${targetProf.Id}` : 'th-cgpt-new';
+
     return (
       <form
         className="th-inline-form"
@@ -689,78 +676,83 @@ export function TunnelHubPopover({
       >
         <div className="th-form-grid">
           <div className="th-field">
-            <label className="th-field-label">配置名称</label>
+            <label className="th-field-label" htmlFor={`${idPrefix}-name`}>
+              配置名称
+            </label>
             <input
+              id={`${idPrefix}-name`}
+              name="name"
               type="text"
               className="th-input"
               required
-              placeholder={isChatGpt ? '例如：主号 / Plus 专享号' : '例如：Tailscale 固定域名'}
+              placeholder="例如：主号 / Plus 专享号"
               value={formName}
               onInput={(e) => setFormName((e.currentTarget as HTMLInputElement).value)}
             />
           </div>
 
-          {isChatGpt ? (
-            <div className="th-field">
-              <label className="th-field-label">隧道编号或链接</label>
-              <input
-                type="text"
-                className="th-input mono"
-                required
-                placeholder="粘贴 tunnel_... 编号或连接地址"
-                value={formTunnelId}
-                onInput={(e) => setFormTunnelId((e.currentTarget as HTMLInputElement).value)}
-              />
-            </div>
-          ) : (
-            <div className="th-field">
-              <label className="th-field-label">固定公网域名（可选）</label>
-              <input
-                type="text"
-                className="th-input mono"
-                placeholder="留空自动使用 Tailscale Funnel / Cloudflare Tunnel"
-                value={formBaseUrl}
-                onInput={(e) => setFormBaseUrl((e.currentTarget as HTMLInputElement).value)}
-              />
-            </div>
-          )}
-
           <div className="th-field">
-            <label className="th-field-label">
-              {isChatGpt ? 'OpenAI API Key' : 'OAuth 访问密钥（可选）'}
+            <label className="th-field-label" htmlFor={`${idPrefix}-tid`}>
+              隧道编号或链接
             </label>
             <input
+              id={`${idPrefix}-tid`}
+              name="tunnelId"
+              type="text"
+              className="th-input mono"
+              required
+              autocorrect="off"
+              autocapitalize="none"
+              spellcheck={false}
+              placeholder="粘贴 tunnel_... 编号或连接地址"
+              value={formTunnelId}
+              onInput={(e) => setFormTunnelId((e.currentTarget as HTMLInputElement).value)}
+            />
+          </div>
+
+          <div className="th-field">
+            <label className="th-field-label" htmlFor={`${idPrefix}-key`}>
+              OpenAI API Key
+            </label>
+            <input
+              id={`${idPrefix}-key`}
+              name="apiKey"
               type="password"
               className="th-input mono th-secret-input"
+              autocomplete="off"
+              autocorrect="off"
+              autocapitalize="none"
+              spellcheck={false}
               placeholder={
-                isChatGpt
-                  ? targetProf?.HasKey
-                    ? '已通过 DPAPI 加密保存，留空保持原密钥不变'
-                    : '粘贴 sk-... 密钥（仅加密保存在本机）'
-                  : targetProf?.HasKey
-                    ? '已保存自定义 OAuth 密钥，留空保持不变'
-                    : '留空默认使用 relaystudio（Client ID 与 Secret 通用）'
+                targetProf?.HasKey
+                  ? '已通过 DPAPI 加密保存，留空保持原密钥不变'
+                  : '粘贴 sk-... 密钥（仅加密保存在本机）'
               }
               value={formApiKey}
               onInput={(e) => setFormApiKey((e.currentTarget as HTMLInputElement).value)}
             />
           </div>
 
-          {isChatGpt && (
-            <details className="th-adv-details">
-              <summary className="th-adv-summary">高级选项 ▾</summary>
-              <div className="th-field" style={{ marginTop: '6px' }}>
-                <label className="th-field-label">API Base URL</label>
-                <input
-                  type="url"
-                  className="th-input mono"
-                  placeholder="https://api.openai.com/v1"
-                  value={formApiBaseUrl}
-                  onInput={(e) => setFormApiBaseUrl((e.currentTarget as HTMLInputElement).value)}
-                />
-              </div>
-            </details>
-          )}
+          <details className="th-adv-details">
+            <summary className="th-adv-summary">高级选项 ▾</summary>
+            <div className="th-field" style={{ marginTop: '6px' }}>
+              <label className="th-field-label" htmlFor={`${idPrefix}-api-url`}>
+                API Base URL
+              </label>
+              <input
+                id={`${idPrefix}-api-url`}
+                name="apiBaseUrl"
+                type="url"
+                className="th-input mono"
+                autocorrect="off"
+                autocapitalize="none"
+                spellcheck={false}
+                placeholder="https://api.openai.com/v1"
+                value={formApiBaseUrl}
+                onInput={(e) => setFormApiBaseUrl((e.currentTarget as HTMLInputElement).value)}
+              />
+            </div>
+          </details>
         </div>
 
         <div className="th-form-actions">
@@ -870,13 +862,23 @@ export function TunnelHubPopover({
               </button>
             )}
 
-            {activeTab !== 'add' && (
+            {isChatGpt && (
               <button
                 type="button"
                 className={`th-add-prof-btn ${expandedId === '__new__' ? 'is-open' : ''}`}
                 onClick={openNewProfileForm}
               >
                 {expandedId === '__new__' ? '取消新增' : '+ 新增配置'}
+              </button>
+            )}
+
+            {isPubCaller && (
+              <button
+                type="button"
+                className="th-add-prof-btn"
+                onClick={() => onManagePublicTunnels(callerPickedId)}
+              >
+                管理公网隧道 →
               </button>
             )}
 
@@ -887,12 +889,12 @@ export function TunnelHubPopover({
               title="关闭"
               onClick={onClose}
             >
-              ✕
+              ×
             </button>
           </div>
         </div>
 
-        {/* Picker Panel (`activeTab === 'add'`) */}
+        {/* ==================== Picker Panel (`activeTab === 'add'`) ==================== */}
         {activeTab === 'add' ? (
           <div className="th-picker-list">
             <div className="th-picker-hint">
@@ -945,9 +947,9 @@ export function TunnelHubPopover({
               ))
             )}
           </div>
-        ) : (
+        ) : isChatGpt ? (
+          /* ==================== ChatGPT Private Tunnel View ==================== */
           <>
-            {/* Profile Strip Cards + Inline Accordion Edit */}
             <div className="th-strips-scroll">
               {expandedId === '__new__' && (
                 <div className="th-profile-strip is-selected">
@@ -968,20 +970,20 @@ export function TunnelHubPopover({
                       收起 ▴
                     </button>
                   </div>
-                  {renderInlineAccordionForm(null)}
+                  {renderChatgptInlineForm(null)}
                 </div>
               )}
 
-              {platProfiles.length === 0 && expandedId !== '__new__' ? (
+              {chatgptProfiles.length === 0 && expandedId !== '__new__' ? (
                 <div className="th-empty-box">
                   尚未保存配置，点击右上角「+ 新增配置」添加首条连接凭据。
                 </div>
               ) : (
-                platProfiles.map((p) => {
+                chatgptProfiles.map((p) => {
                   const isRunning = Boolean(
-                    isRunningNow && runningProfileId && p.Id === runningProfileId
+                    chatgptRunning && runningChatgptProfileId && p.Id === runningChatgptProfileId
                   );
-                  const isSelected = p.Id === selectedProfileId;
+                  const isSelected = p.Id === selectedChatgptProfileId;
                   const isExpanded = expandedId === p.Id;
                   const isDirtyRunning = Boolean(dirtyRunningIds[p.Id]);
 
@@ -1001,23 +1003,14 @@ export function TunnelHubPopover({
                           ? 'is-selected'
                           : '';
 
-                  const effectivePubMcpUrl = isPub ? resolveEffectivePubUrl(p) : '';
-                  const shortTunnel = isPub
-                    ? effectivePubMcpUrl
-                      ? shortenTunnelDisplay(effectivePubMcpUrl, true)
-                      : '未分配公网地址'
-                    : shortenTunnelDisplay(p.TunnelId || '', false);
-
-                  const defaultRelayCred = isDefaultRelayCredential(p);
+                  const shortTunnel = shortenChatgptTunnelId(p.TunnelId || '');
                   const keyDisplay = revealedSecrets[p.Id]
                     ? revealedSecrets[p.Id]
-                    : defaultRelayCred
-                      ? 'relaystudio'
-                      : p.MaskedKey && p.MaskedKey !== '尚未保存密钥'
-                        ? p.MaskedKey
-                        : p.HasKey
-                          ? 'sk-••••••••'
-                          : '未配置';
+                    : p.MaskedKey && p.MaskedKey !== '尚未保存密钥'
+                      ? p.MaskedKey
+                      : p.HasKey
+                        ? 'sk-••••••••'
+                        : '未配置';
 
                   const tidCopied = Boolean(copiedFlags[`tid_${p.Id}`]);
                   const keyCopied = Boolean(copiedFlags[`key_${p.Id}`]);
@@ -1026,9 +1019,8 @@ export function TunnelHubPopover({
                     <div
                       key={p.Id}
                       className={`th-profile-strip ${stripStateClass}`.trim()}
-                      onClick={() => void handleSelectCard(p)}
+                      onClick={() => void handleSelectChatgptCard(p)}
                     >
-                      {/* Line 1 */}
                       <div className="th-strip-line1">
                         <div className="th-strip-title-wrap">
                           <span className={`th-strip-dot ${dotStateClass}`.trim()} />
@@ -1052,7 +1044,7 @@ export function TunnelHubPopover({
 
                           {!isRunning && isSelected && (
                             <span className="th-strip-badge is-selected">
-                              {isRunningNow ? '已选中 · 待连接' : '当前选中'}
+                              {chatgptRunning ? '已选中 · 待连接' : '当前选中'}
                             </span>
                           )}
                         </div>
@@ -1070,7 +1062,6 @@ export function TunnelHubPopover({
                         </button>
                       </div>
 
-                      {/* Line 2 (`10.5px` monospace) */}
                       <div
                         className="th-strip-line2 th-meta-row"
                         onClick={(e) => e.stopPropagation()}
@@ -1080,7 +1071,7 @@ export function TunnelHubPopover({
                           <button
                             type="button"
                             className={`th-link-btn ${tidCopied ? 'is-copied' : ''}`}
-                            onClick={() => void handleCopyTunnelEndpoint(p)}
+                            onClick={() => void handleCopyChatgptTunnelId(p)}
                           >
                             {tidCopied ? '✓ 已复制' : '复制'}
                           </button>
@@ -1093,80 +1084,225 @@ export function TunnelHubPopover({
                           <button
                             type="button"
                             className="th-link-btn"
-                            onClick={() => void handleToggleRevealSecret(p)}
+                            onClick={() => void handleToggleRevealChatgptSecret(p)}
                           >
                             {revealedSecrets[p.Id] ? '隐藏' : '显示完整'}
                           </button>
                           <button
                             type="button"
                             className={`th-link-btn ${keyCopied ? 'is-copied' : ''}`}
-                            onClick={() => void handleCopySecret(p)}
+                            onClick={() => void handleCopyChatgptSecret(p)}
                           >
                             {keyCopied ? '✓ 已复制' : '复制'}
                           </button>
                         </span>
                       </div>
 
-                      {/* Inline Accordion Edit Form */}
-                      {isExpanded && renderInlineAccordionForm(p)}
+                      {isExpanded && renderChatgptInlineForm(p)}
                     </div>
                   );
                 })
               )}
             </div>
 
-            {/* Popover Footer */}
+            {/* ChatGPT Popover Footer */}
             <div className="th-footer">
               <div className="th-footer-links">
-                {isChatGpt && (
-                  <div className="th-links-grid-2x2">
-                    <button
-                      type="button"
-                      className="th-ext-link"
-                      onClick={() =>
-                        void hostRpc('open_external_url', {
-                          url: 'https://platform.openai.com/settings/organization/tunnels',
-                        })
-                      }
-                    >
-                      隧道设置 ↗
-                    </button>
-                    <button
-                      type="button"
-                      className="th-ext-link"
-                      onClick={() =>
-                        void hostRpc('open_external_url', {
-                          url: display?.UiUrl || 'http://127.0.0.1:8789/ui',
-                        })
-                      }
-                    >
-                      隧道状态页 ↗
-                    </button>
-                    <button
-                      type="button"
-                      className="th-ext-link"
-                      onClick={() =>
-                        void hostRpc('open_external_url', {
-                          url: 'https://platform.openai.com/settings/organization/api-keys',
-                        })
-                      }
-                    >
-                      获取 API Key ↗
-                    </button>
-                    <button
-                      type="button"
-                      className="th-ext-link"
-                      onClick={() =>
-                        void hostRpc('open_external_url', {
-                          url: 'https://chatgpt.com/#settings/Connectors',
-                        })
-                      }
-                    >
-                      配置 MCP 工具 ↗
-                    </button>
-                  </div>
-                )}
+                <div className="th-links-grid-2x2">
+                  <button
+                    type="button"
+                    className="th-ext-link"
+                    onClick={() =>
+                      void hostRpc('open_external_url', {
+                        url: 'https://platform.openai.com/settings/organization/tunnels',
+                      })
+                    }
+                  >
+                    隧道设置 ↗
+                  </button>
+                  <button
+                    type="button"
+                    className="th-ext-link"
+                    onClick={() =>
+                      void hostRpc('open_external_url', {
+                        url: display?.UiUrl || 'http://127.0.0.1:8789/ui',
+                      })
+                    }
+                  >
+                    隧道状态页 ↗
+                  </button>
+                  <button
+                    type="button"
+                    className="th-ext-link"
+                    onClick={() =>
+                      void hostRpc('open_external_url', {
+                        url: 'https://platform.openai.com/settings/organization/api-keys',
+                      })
+                    }
+                  >
+                    获取 API Key ↗
+                  </button>
+                  <button
+                    type="button"
+                    className="th-ext-link"
+                    onClick={() =>
+                      void hostRpc('open_external_url', {
+                        url: 'https://chatgpt.com/#settings/Connectors',
+                      })
+                    }
+                  >
+                    配置 MCP 工具 ↗
+                  </button>
+                </div>
+              </div>
 
+              <div className="th-footer-btns">
+                <button
+                  type="button"
+                  className="th-btn th-btn-primary"
+                  disabled={Boolean(busyAction)}
+                  onClick={() => void handleConnectChatgpt()}
+                >
+                  {chatgptPrimaryConnectLabel}
+                </button>
+
+                {chatgptRunning && (
+                  <button
+                    type="button"
+                    className="th-btn th-btn-secondary"
+                    disabled={Boolean(busyAction)}
+                    onClick={() => void handleDisconnectChatgpt()}
+                  >
+                    断开隧道
+                  </button>
+                )}
+              </div>
+            </div>
+          </>
+        ) : (
+          /* ==================== Gemini & Claude Pure Caller View ==================== */
+          <>
+            <div className="th-strips-scroll">
+              {publicTunnels.map((tun) => {
+                const isBound = tun.Id === callerBoundId;
+                const isPicked = tun.Id === callerPickedId;
+
+                const stripStateClass =
+                  isBound && tun.Running
+                    ? 'is-active'
+                    : isPicked
+                      ? 'is-selected'
+                      : '';
+
+                const dotStateClass =
+                  isBound && tun.Running
+                    ? 'is-running'
+                    : isPicked
+                      ? 'is-selected'
+                      : tun.Running
+                        ? 'is-running-subtle'
+                        : '';
+
+                const effectiveUrl = (tun.EffectiveUrl || '').trim();
+                const shortEndpoint = effectiveUrl
+                  ? truncateMiddle(effectiveUrl)
+                  : '未启动（启动后可用）';
+
+                const tidCopied = Boolean(copiedFlags[`pub_tid_${tun.Id}`]);
+                const oauthRevealed = revealedSecrets[`pub_oauth_${tun.Id}`];
+                const oauthCopied = Boolean(copiedFlags[`pub_oauth_cp_${tun.Id}`]);
+
+                return (
+                  <div
+                    key={tun.Id}
+                    className={`th-profile-strip ${stripStateClass}`.trim()}
+                    onClick={() => {
+                      if (activeTab === 'gemini' || activeTab === 'claude') {
+                        setPickedPubIdByPlat((prev) => ({
+                          ...prev,
+                          [activeTab]: tun.Id,
+                        }));
+                      }
+                    }}
+                  >
+                    {/* Line 1: Dot + Name + Decoupled Badges (No Edit Button) */}
+                    <div className="th-strip-line1">
+                      <div className="th-strip-title-wrap">
+                        <span className={`th-strip-dot ${dotStateClass}`.trim()} />
+                        <span className="th-strip-name" title={tun.Name}>
+                          {tun.Name}
+                        </span>
+
+                        {isBound && tun.Running && (
+                          <span className="th-strip-badge is-active">
+                            当前使用 · 运行中
+                          </span>
+                        )}
+
+                        {isBound && !tun.Running && (
+                          <span className="th-strip-badge is-muted">
+                            当前使用 · 未启动
+                          </span>
+                        )}
+
+                        {!isBound && tun.Running && (
+                          <span className="th-strip-badge is-running-bg">运行中</span>
+                        )}
+
+                        {isPicked && !isBound && (
+                          <span className="th-strip-badge is-selected">当前选中</span>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Line 2: Endpoint + Web MCP OAuth Helper */}
+                    <div
+                      className="th-strip-line2 th-meta-row"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <span className="th-meta-seg">
+                        <span title={effectiveUrl || undefined}>
+                          隧道: {shortEndpoint}
+                        </span>
+                        <button
+                          type="button"
+                          className={`th-link-btn ${tidCopied ? 'is-copied' : ''}`}
+                          onClick={() => void handleCopyCallerTunnelUrl(tun)}
+                        >
+                          {tidCopied ? '✓ 已复制' : '复制'}
+                        </button>
+                      </span>
+
+                      <span className="th-meta-sep">·</span>
+
+                      <span className="th-meta-seg">
+                        <span className="th-key-val">
+                          Key: {oauthRevealed || 'relaystudio'}
+                        </span>
+                        <button
+                          type="button"
+                          className="th-link-btn"
+                          onClick={() => handleToggleRevealOAuthHelper(tun)}
+                        >
+                          {oauthRevealed ? '隐藏' : '显示完整'}
+                        </button>
+                        <button
+                          type="button"
+                          className={`th-link-btn ${oauthCopied ? 'is-copied' : ''}`}
+                          onClick={() => void handleCopyOAuthHelper(tun)}
+                        >
+                          {oauthCopied ? '✓ 已复制' : '复制'}
+                        </button>
+                      </span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Caller Popover Footer */}
+            <div className="th-footer">
+              <div className="th-footer-links">
                 {activeTab === 'gemini' && (
                   <div className="th-links-row-1x2">
                     <button
@@ -1185,7 +1321,7 @@ export function TunnelHubPopover({
                       className="th-ext-link"
                       onClick={() =>
                         void hostRpc('open_external_url', {
-                          url: 'https://gemini.google.com/extensions',
+                          url: 'https://gemini.google.com/devmode',
                         })
                       }
                     >
@@ -1223,23 +1359,38 @@ export function TunnelHubPopover({
               </div>
 
               <div className="th-footer-btns">
-                <button
-                  type="button"
-                  className="th-btn th-btn-primary"
-                  disabled={Boolean(busyAction)}
-                  onClick={() => void handleConnectGroup()}
-                >
-                  {primaryConnectLabel}
-                </button>
-
-                {isRunningNow && (
+                {!callerPickedTun?.Running ? (
+                  <button
+                    type="button"
+                    className="th-btn th-btn-primary"
+                    disabled={Boolean(busyAction)}
+                    onClick={() => {
+                      onManagePublicTunnels(callerPickedTun?.Id);
+                      onToast('请在「隧道与连接」中点击启动', 'info');
+                    }}
+                  >
+                    启动隧道
+                  </button>
+                ) : callerPickedTun.Id !== callerBoundId ? (
+                  <button
+                    type="button"
+                    className="th-btn th-btn-primary"
+                    disabled={Boolean(busyAction)}
+                    onClick={() => {
+                      if (activeTab === 'gemini' || activeTab === 'claude') {
+                        void handleBindPublicTunnel(activeTab, callerPickedTun);
+                      }
+                    }}
+                  >
+                    {busyAction === 'bind_pub_tunnel' ? '切换中…' : '切换隧道'}
+                  </button>
+                ) : (
                   <button
                     type="button"
                     className="th-btn th-btn-secondary"
-                    disabled={Boolean(busyAction)}
-                    onClick={() => void handleDisconnectGroup()}
+                    disabled
                   >
-                    断开隧道
+                    当前使用中
                   </button>
                 )}
               </div>

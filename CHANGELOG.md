@@ -4,6 +4,22 @@
 
 ---
 
+## [v1.4.0] - 2026-11-12
+
+### 新增与增强（Added & Changed）
+- **WebView2 高分屏多栏工作台与解耦式顶栏交互**：
+  - 全新 Preact + Edge WebView2 多栏工作台（支持 Per-Monitor V2 高 DPI 清晰渲染），实现顶栏胶囊平滑过渡、卡片「选中 / 保存 / 连接」三段式解耦以及浏览器控制即点即应。
+- **「设置」双标签重构与统一公网隧道池（支持多平台共用与并行在线）**：
+  - `⚙ 设置` 拆分为 **「常规设置」**（归拢为「任务与网页接力 / 本地命令行智能体 / 界面与系统启动」三大功能分区）与 **「隧道与连接」** 双标签页。
+  - 在「隧道与连接」统一总览本地引擎内核与 ChatGPT 专属隧道状态，并集中创建、启停全部公网隧道：随包内置 `bin/cloudflared.exe` 免费临时隧道开箱即连，统一极简表单兼容 Tailscale 固定域名、Cloudflare 专线 Key 与外部自有公网隧道，支持多条公网隧道并行运行与诚实故障诊断（含本机代理 Fake-IP 拦截 Tailscale 自动识别）。
+  - 顶栏 `Gemini` 与 `Claude` 面板收敛为纯粹的隧道调用视图（支持多平台共用同一条隧道或分别绑定不同隧道，校准 Gemini `devmode` 与 Claude 自定义连接器快捷入口）。
+- **公网隧道入口 OAuth 2.1 强制鉴权与 Gemini 网页端深度适配**：
+  - `:8766` 网关对经公网隧道进入的 `/mcp` 请求强制校验签名 OAuth 2.1 访问令牌并返回标准 `401 WWW-Authenticate` 挑战，本机回环与专属通道保持免检直连。
+  - 加固 `browser-bridge` 对 `gemini.google.com` 的 `<user-query>` 归一化回执核对、页面 `tsk_xxx` 提示扫描、轮次计数、Angular 状态误报过滤、多 Google 账号（`/u/<n>/`）与 Gem 会话路径保留。
+  - 过滤 Windows 10/11 微软商店空壳 `WindowsApps\python.exe` 别名，并为 `scripts/build-launcher.ps1` 补齐 WebView2 组件自动拉取。
+
+---
+
 ## [v1.3.0] - 2026-11-06
 
 ### 新增与增强（Added & Changed）

@@ -1,5 +1,5 @@
 ﻿param(
-    [string]$Version = '1.3.0'
+    [string]$Version = '1.4.0'
 )
 $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path $PSScriptRoot -Parent
@@ -44,7 +44,7 @@ try {
     # 2. Copy bin/ executables and WebView2 runtime loader/assemblies
     $binStage = Join-Path $appStage 'bin'
     [IO.Directory]::CreateDirectory($binStage) | Out-Null
-    foreach ($binFile in @('relaystudio-core.exe', 'tunnel-client.exe')) {
+    foreach ($binFile in @('relaystudio-core.exe', 'tunnel-client.exe', 'cloudflared.exe')) {
         $bSrc = Join-Path (Join-Path $repoRoot 'bin') $binFile
         if (-not (Test-Path -LiteralPath $bSrc)) {
             throw "缺少核心二进制文件: $bSrc"
@@ -101,7 +101,8 @@ try {
         $bridgeZip,
         (Join-Path $repoRoot 'RelayStudio.exe'),
         (Join-Path $repoRoot 'bin\relaystudio-core.exe'),
-        (Join-Path $repoRoot 'bin\tunnel-client.exe')
+        (Join-Path $repoRoot 'bin\tunnel-client.exe'),
+        (Join-Path $repoRoot 'bin\cloudflared.exe')
     )) {
         if (Test-Path -LiteralPath $target) {
             $h = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant()

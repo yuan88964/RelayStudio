@@ -21,6 +21,8 @@ $script:GuardianOpenAiStrikes = 0
 $script:GuardianOpenAiNextRetryUtc = [DateTime]::MinValue
 $script:GuardianPublicStrikes = 0
 $script:GuardianPublicNextRetryUtc = [DateTime]::MinValue
+$script:GuardianPublicItemStrikes = @{}
+$script:GuardianPublicItemNextRetryUtc = @{}
 $script:GuardianLastDigestSig = ''
 
 function Reset-RelayHostBridgeCaches {
@@ -40,6 +42,8 @@ function Reset-RelayHostBridgeCaches {
         $script:GuardianOpenAiNextRetryUtc = [DateTime]::MinValue
         $script:GuardianPublicStrikes = 0
         $script:GuardianPublicNextRetryUtc = [DateTime]::MinValue
+        $script:GuardianPublicItemStrikes = @{}
+        $script:GuardianPublicItemNextRetryUtc = @{}
         $script:GuardianLastDigestSig = ''
     }
 }
@@ -636,9 +640,18 @@ function Get-RelayHostInfraBundle {
     if ($DeepPublicProbe) {
         Clear-PublicMcpTunnelLogCache
     }
+    $pubPoolBundle = Get-PublicTunnelItemsWithRuntime -Context $script:HostContext -Settings $settings -EnabledPlatforms $safeProfiles.EnabledPlatforms -DeepPublicProbe:$DeepPublicProbe
+
     $pubRaw = Get-PublicMcpTunnelState $script:HostContext
     $pubRunning = [bool]$pubRaw.Running
+    $pubUrl = [string]$pubRaw.Url
+    $pubPid = [int]$pubRaw.ProcessId
+    $pubStartedAt = $(if ($null -ne $pubRaw.StartedAt) { [string]$pubRaw.StartedAt } else { '' })
     $pubStatus = [string]$pubRaw.Status
+    $pubMode = [string]$pubRaw.Mode
+    $pubModeLabel = [string]$pubRaw.ModeLabel
+    $pubProfileId = [string]$pubRaw.ProfileId
+    $pubFallbackFrom = [string]$pubRaw.FallbackFrom
     $pubPhase = [string]$pubRaw.HealthPhase
     $pubRtt = [int]$pubRaw.PublicRttMs
     $pubIngress = [string]$pubRaw.VerifiedIngressIp
@@ -662,16 +675,54 @@ function Get-RelayHostInfraBundle {
         }
     }
 
+    if (-not $pubRunning) {
+        $runningPoolItems = @($pubPoolBundle.PublicTunnels | Where-Object { $_ -and $_.Running })
+        if ($runningPoolItems.Count -gt 0) {
+            $selMap = $pubPoolBundle.SelectedByPlatform
+            $gemId = if ($selMap -and $selMap.PSObject.Properties['gemini']) { [string]$selMap.gemini } else { '' }
+            $claId = if ($selMap -and $selMap.PSObject.Properties['claude']) { [string]$selMap.claude } else { '' }
+            $activePoolItem = $null
+            foreach ($prefId in @(
+                $(if ($safeProfiles.EnabledPlatforms -contains 'gemini') { $gemId } else { '' }),
+                $(if ($safeProfiles.EnabledPlatforms -contains 'claude') { $claId } else { '' }),
+                $gemId,
+                $claId
+            )) {
+                if ($prefId) {
+                    $matchIt = $runningPoolItems | Where-Object { [string]$_.Id -eq $prefId } | Select-Object -First 1
+                    if ($null -ne $matchIt) {
+                        $activePoolItem = $matchIt
+                        break
+                    }
+                }
+            }
+            if ($null -eq $activePoolItem) {
+                $activePoolItem = $runningPoolItems[0]
+            }
+            if ($null -ne $activePoolItem) {
+                $pubRunning = $true
+                $pubUrl = [string]$activePoolItem.EffectiveUrl
+                $pubPid = [int]$activePoolItem.ProcessId
+                $pubStatus = [string]$activePoolItem.Status
+                $pubMode = [string]$activePoolItem.Mode
+                $pubModeLabel = [string]$activePoolItem.ModeLabel
+                $pubProfileId = [string]$activePoolItem.Id
+                $pubPhase = [string]$activePoolItem.HealthPhase
+                $pubRtt = [int]$activePoolItem.PublicRttMs
+            }
+        }
+    }
+
     $safePub = [pscustomobject]([ordered]@{
         Running           = $pubRunning
-        Url               = [string]$pubRaw.Url
-        ProcessId         = [int]$pubRaw.ProcessId
-        StartedAt         = $(if ($null -ne $pubRaw.StartedAt) { [string]$pubRaw.StartedAt } else { '' })
+        Url               = $pubUrl
+        ProcessId         = $pubPid
+        StartedAt         = $pubStartedAt
         Status            = $pubStatus
-        Mode              = [string]$pubRaw.Mode
-        ModeLabel         = [string]$pubRaw.ModeLabel
-        ProfileId         = [string]$pubRaw.ProfileId
-        FallbackFrom      = [string]$pubRaw.FallbackFrom
+        Mode              = $pubMode
+        ModeLabel         = $pubModeLabel
+        ProfileId         = $pubProfileId
+        FallbackFrom      = $pubFallbackFrom
         HealthPhase       = $pubPhase
         PublicRttMs       = $pubRtt
         VerifiedIngressIp = $pubIngress
@@ -702,19 +753,21 @@ function Get-RelayHostInfraBundle {
     $shieldPort = if ($settings.PSObject.Properties['shield_port'] -and [int]$settings.shield_port -gt 0) { [int]$settings.shield_port } else { 8766 }
 
     return [pscustomobject]([ordered]@{
-        shieldBaseUrl   = "http://127.0.0.1:$shieldPort"
-        studioToken     = [string]$script:StudioToken
-        profiles        = $safeProfiles
-        publicTunnel    = $safePub
-        display         = $safeDisp
-        layout          = $layout
-        engineConfig    = $safeEcfg
-        browserProfiles = [object[]]@($bProfs)
-        cliAgents       = [object[]]@($cliAgents)
-        themeMode       = $themeMode
-        systemTheme     = $sysTheme
-        effectiveTheme  = $effTheme
-        windowMaximized = $false
+        shieldBaseUrl                  = "http://127.0.0.1:$shieldPort"
+        studioToken                    = [string]$script:StudioToken
+        profiles                       = $safeProfiles
+        publicTunnel                   = $safePub
+        publicTunnels                  = [object[]]@($pubPoolBundle.PublicTunnels)
+        selectedPublicTunnelByPlatform = $pubPoolBundle.SelectedByPlatform
+        display                        = $safeDisp
+        layout                         = $layout
+        engineConfig                   = $safeEcfg
+        browserProfiles                = [object[]]@($bProfs)
+        cliAgents                      = [object[]]@($cliAgents)
+        themeMode                      = $themeMode
+        systemTheme                    = $sysTheme
+        effectiveTheme                 = $effTheme
+        windowMaximized                = $false
     })
 }
 
@@ -736,10 +789,10 @@ function Invoke-RelayHostRpcObject {
         'boot_init' {
             Reset-RelayHostBridgeCaches
             $settings = Read-ConnectionSettings $script:HostContext
+            $shieldPort = if ($settings.PSObject.Properties['shield_port'] -and [int]$settings.shield_port -gt 0) { [int]$settings.shield_port } else { 8766 }
             if ((-not $script:SkipBootServices) -and (-not $script:HostContext.Isolated)) {
                 try { [void](Start-OfficialCoreIfNeeded $script:HostContext $settings) } catch { }
                 $coreEp = try { Get-OfficialCoreEndpoint $settings } catch { 'http://127.0.0.1:8765/mcp' }
-                $shieldPort = if ($settings.PSObject.Properties['shield_port'] -and [int]$settings.shield_port -gt 0) { [int]$settings.shield_port } else { 8766 }
                 if (-not (Test-LocalUrlPortOpen "http://127.0.0.1:$shieldPort")) {
                     try { [void](Start-ReadOnlyShield $script:HostContext $settings $coreEp) } catch { }
                 }
@@ -752,31 +805,26 @@ function Invoke-RelayHostRpcObject {
                         try { [void](Start-ConnectionTunnel $script:HostContext $settings) } catch { }
                     }
                 }
-                if (($enPlats -contains 'gemini') -or ($enPlats -contains 'claude')) {
-                    $pubState = Get-PublicMcpTunnelState $script:HostContext
-                    $pubProf = $profs.Profiles | Where-Object { $_.Platform -in @('gemini', 'claude') -and $_.IsActive -and ($_.BaseUrl -or $_.PlainKey) } | Select-Object -First 1
-                    if (-not $pubProf) {
-                        $pubProf = $profs.Profiles | Where-Object { $_.Platform -in @('gemini', 'claude') -and ($_.BaseUrl -or $_.PlainKey) } | Select-Object -First 1
-                    }
-                    $hasTs = [bool](Get-TailscaleFunnelSelfUrl -Context $script:HostContext)
-                    $needPubStart = (-not $pubState.Running)
-                    if ($pubState.Running -and $pubState.Url) {
+                try { [void](Repair-RelayProcessPriority $script:HostContext $settings) } catch { }
+                $script:DisplaySummaryCache = $null
+            }
+            if (-not $script:SkipBootServices) {
+                $pubPool = Get-PublicTunnelsPool -Context $script:HostContext -Settings $settings
+                foreach ($dIt in @($pubPool.Items | Where-Object { $_ -and $_.DesiredRunning })) {
+                    $curRt = Get-PublicTunnelItemRuntimeState -Context $script:HostContext -Item $dIt
+                    $needStartItem = (-not $curRt.Running)
+                    if ($curRt.Running -and (-not $script:HostContext.Isolated) -and $curRt.EffectiveUrl -and ($dIt.Mode -in @('tailscale', 'external_url'))) {
                         try {
-                            $ec = Test-PublicMcpEdgeHealth -Url ([string]$pubState.Url) -Context $script:HostContext -TimeoutMs 8000
-                            if (-not $ec.Reachable) { $needPubStart = $true }
+                            $ec = Test-PublicMcpEdgeHealth -Url ([string]$curRt.EffectiveUrl) -Context $script:HostContext -TimeoutMs 3500
+                            if (-not $ec.Reachable) { $needStartItem = $true }
                         } catch { }
                     }
-                    if ($needPubStart -and ($pubProf -or $hasTs -or (Get-Command cloudflared.exe -ErrorAction SilentlyContinue))) {
-                        $fDom = if ($pubProf -and $pubProf.BaseUrl) { [string]$pubProf.BaseUrl } else { '' }
-                        $fTok = if ($pubProf -and $pubProf.PlainKey) { [string]$pubProf.PlainKey } else { '' }
-                        $fPid = if ($pubProf -and $pubProf.Id) { [string]$pubProf.Id } else { '' }
+                    if ($needStartItem) {
                         try {
-                            [void](Start-PublicMcpTunnel -Context $script:HostContext -FixedDomain $fDom -Token $fTok -Port $shieldPort -ProfileId $fPid -PreferTailscale:$hasTs -ForceReconnect)
+                            [void](Start-PublicTunnelItem -Context $script:HostContext -TunnelId ([string]$dIt.Id) -Port $shieldPort -SkipDesiredStateUpdate)
                         } catch { }
                     }
                 }
-                try { [void](Repair-RelayProcessPriority $script:HostContext $settings) } catch { }
-                $script:DisplaySummaryCache = $null
             }
             return (Get-RelayHostInfraBundle -ForceDisplayProbe)
         }
@@ -1141,13 +1189,83 @@ function Invoke-RelayHostRpcObject {
             return (Get-RelayHostInfraBundle -DeepPublicProbe)
         }
 
+        'public_tunnel_item_save' {
+            $tunId = [string](Get-RpcParam $Params @('tunnelId', 'TunnelId', 'id', 'Id') '')
+            $name = [string](Get-RpcParam $Params @('name', 'Name') '')
+            $baseUrl = [string](Get-RpcParam $Params @('baseUrl', 'BaseUrl', 'url', 'Url', 'fixedDomain', 'FixedDomain') '')
+            $startupKey = [string](Get-RpcParam $Params @('startupKey', 'StartupKey', 'apiKey', 'ApiKey', 'token', 'Token') '')
+            $clearKey = Get-RpcBoolParam $Params @('clearKey', 'ClearKey') $false
+            [void](Save-PublicTunnelItem -Context $script:HostContext -TunnelId $tunId -Name $name -BaseUrl $baseUrl -StartupKey $startupKey -ClearKey:$clearKey)
+            return (Get-RelayHostInfraBundle)
+        }
+
+        'public_tunnel_item_remove' {
+            $tunId = [string](Get-RpcParam $Params @('tunnelId', 'TunnelId', 'id', 'Id') '')
+            $cleanId = $tunId.Trim()
+            [void](Remove-PublicTunnelItem -Context $script:HostContext -TunnelId $cleanId)
+            if ($cleanId) {
+                [void]$script:GuardianPublicItemStrikes.Remove($cleanId)
+                [void]$script:GuardianPublicItemNextRetryUtc.Remove($cleanId)
+            }
+            return (Get-RelayHostInfraBundle)
+        }
+
+        'public_tunnel_item_connect' {
+            $settings = Read-ConnectionSettings $script:HostContext
+            $sPort = if ($settings.PSObject.Properties['shield_port'] -and [int]$settings.shield_port -gt 0) { [int]$settings.shield_port } else { 8766 }
+            $tunId = [string](Get-RpcParam $Params @('tunnelId', 'TunnelId', 'id', 'Id') 'pub_builtin_quick')
+            $cleanId = if ($tunId.Trim()) { $tunId.Trim() } else { 'pub_builtin_quick' }
+            if (-not $script:HostContext.Isolated) {
+                $coreEp = try { Get-OfficialCoreEndpoint $settings } catch { 'http://127.0.0.1:8765/mcp' }
+                if (-not (Test-LocalUrlPortOpen "http://127.0.0.1:$sPort")) {
+                    [void](Start-ReadOnlyShield $script:HostContext $settings $coreEp)
+                }
+            }
+            [void](Start-PublicTunnelItem -Context $script:HostContext -TunnelId $cleanId -Port $sPort)
+            $script:GuardianPublicItemStrikes[$cleanId] = 0
+            $script:GuardianPublicItemNextRetryUtc[$cleanId] = [DateTime]::MinValue
+            return (Get-RelayHostInfraBundle)
+        }
+
+        'public_tunnel_item_disconnect' {
+            $tunId = [string](Get-RpcParam $Params @('tunnelId', 'TunnelId', 'id', 'Id') '')
+            $cleanId = $tunId.Trim()
+            if (-not $cleanId) {
+                throw '未指定要停止的公网隧道编号。'
+            }
+            [void](Stop-PublicTunnelItem -Context $script:HostContext -TunnelId $cleanId)
+            $script:GuardianPublicItemStrikes[$cleanId] = 0
+            $script:GuardianPublicItemNextRetryUtc[$cleanId] = [DateTime]::MinValue
+            return (Get-RelayHostInfraBundle)
+        }
+
+        'public_tunnel_item_get_secret' {
+            $tunId = [string](Get-RpcParam $Params @('tunnelId', 'TunnelId', 'id', 'Id') '')
+            $plainKey = Get-PublicTunnelItemSecret -Context $script:HostContext -TunnelId $tunId
+            return [pscustomobject]([ordered]@{
+                ok     = $true
+                secret = [string]$plainKey
+            })
+        }
+
+        'public_tunnel_detect_tailscale' {
+            return (Find-LocalTailscalePublicUrl -Context $script:HostContext)
+        }
+
+        'platform_bind_public_tunnel' {
+            $plat = [string](Get-RpcParam $Params @('platform', 'Platform') '')
+            $tunId = [string](Get-RpcParam $Params @('tunnelId', 'TunnelId', 'id', 'Id') '')
+            [void](Set-PlatformPublicTunnelBinding -Context $script:HostContext -Platform $plat -TunnelId $tunId)
+            return (Get-RelayHostInfraBundle)
+        }
+
         'one_click_reconnect' {
             Reset-RelayHostBridgeCaches -ResetGuardian
             $settings = Read-ConnectionSettings $script:HostContext
+            $sPort = if ($settings.PSObject.Properties['shield_port'] -and [int]$settings.shield_port -gt 0) { [int]$settings.shield_port } else { 8766 }
             if (-not $script:HostContext.Isolated) {
                 try { [void](Start-OfficialCoreIfNeeded $script:HostContext $settings) } catch { }
                 $coreEp = try { Get-OfficialCoreEndpoint $settings } catch { 'http://127.0.0.1:8765/mcp' }
-                $sPort = if ($settings.PSObject.Properties['shield_port'] -and [int]$settings.shield_port -gt 0) { [int]$settings.shield_port } else { 8766 }
                 if (-not (Test-LocalUrlPortOpen "http://127.0.0.1:$sPort")) {
                     try { [void](Start-ReadOnlyShield $script:HostContext $settings $coreEp) } catch { }
                 }
@@ -1160,7 +1278,7 @@ function Invoke-RelayHostRpcObject {
                         try { [void](Start-ConnectionTunnel $script:HostContext $settings) } catch { }
                     }
                 }
-                if (($enPlats -contains 'gemini') -or ($enPlats -contains 'claude')) {
+                if ((Get-PublicMcpTunnelState $script:HostContext).Running) {
                     $pubProf = $profs.Profiles | Where-Object { $_.Platform -in @('gemini', 'claude') -and $_.IsActive } | Select-Object -First 1
                     $fDom = if ($pubProf) { [string]$pubProf.BaseUrl } else { '' }
                     $fTok = if ($pubProf) { [string]$pubProf.PlainKey } else { '' }
@@ -1171,6 +1289,12 @@ function Invoke-RelayHostRpcObject {
                 }
                 try { [void](Repair-RelayProcessPriority $script:HostContext $settings) } catch { }
                 $script:DisplaySummaryCache = $null
+            }
+            $pubPool = Get-PublicTunnelsPool -Context $script:HostContext -Settings $settings
+            foreach ($dIt in @($pubPool.Items | Where-Object { $_ -and $_.DesiredRunning })) {
+                try {
+                    [void](Start-PublicTunnelItem -Context $script:HostContext -TunnelId ([string]$dIt.Id) -Port $sPort -SkipDesiredStateUpdate)
+                } catch { }
             }
             return (Get-RelayHostInfraBundle -DeepPublicProbe -ForceDisplayProbe)
         }
@@ -1267,11 +1391,11 @@ function Invoke-RelayHostRpcObject {
 
         'open_handover_window' {
             $url = [string](Get-RpcParam $Params @('url', 'Url') 'https://chatgpt.com/?relay_handover=1')
-            $bProf = [string](Get-RpcParam $Params @('browserProfile', 'BrowserProfile', 'browser_profile') '')
+            $bProf = [string](Get-RpcParam $Params @('browserProfile', 'BrowserProfile', 'browser_profile', 'carrier', 'Carrier') '')
             if (-not $script:HostContext.Isolated) {
                 [void](Open-BridgeHandoverWindow -Url $url -BrowserProfile $bProf -Context $script:HostContext)
             }
-            return [pscustomobject]([ordered]@{ ok = $true })
+            return [pscustomobject]([ordered]@{ ok = $true; browserProfile = $bProf })
         }
 
         'open_workspace_folder' {
@@ -1349,6 +1473,7 @@ function Invoke-RelayHostRpcObject {
         'shutdown_all_services' {
             if (-not $script:HostContext.Isolated) {
                 try { [void](Stop-ConnectionTunnel $script:HostContext (Read-ConnectionSettings $script:HostContext)) } catch { }
+                try { Stop-AllPublicTunnelItems -Context $script:HostContext -PreserveDesiredState } catch { }
                 try { Stop-PublicMcpTunnel $script:HostContext } catch { }
                 try { Get-Process -Name 'relaystudio-core' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue } catch { }
             }
@@ -1477,36 +1602,44 @@ function Invoke-RelayHostGuardianTick {
         }
     }
 
-    # 4. Public MCP Tunnel guardian with 2-strike / 3-strike backoff
+    # 4. Unified Public Tunnel Pool guardian (non-blocking; ONLY auto-heal desired_running cloudflared items on process exit with 3-strike backoff)
     $pub = Get-PublicMcpTunnelState $script:HostContext
-    if (($enPlats -contains 'gemini') -or ($enPlats -contains 'claude')) {
-        if ($pub.Running) {
-            $script:GuardianPublicStrikes = 0
-        } elseif ($nowUtc -ge $script:GuardianPublicNextRetryUtc) {
-            $pubProf = $profs.Profiles | Where-Object { $_.Platform -in @('gemini', 'claude') -and $_.IsActive -and ($_.BaseUrl -or $_.PlainKey) } | Select-Object -First 1
-            $hasTs = [bool](Get-TailscaleFunnelSelfUrl -Context $script:HostContext)
-            if ($pubProf -or $hasTs) {
-                $okPub = $false
-                try {
-                    $fDom = if ($pubProf) { [string]$pubProf.BaseUrl } else { '' }
-                    $fTok = if ($pubProf) { [string]$pubProf.PlainKey } else { '' }
-                    $fPid = if ($pubProf) { [string]$pubProf.Id } else { '' }
-                    $stPub = Start-PublicMcpTunnel -Context $script:HostContext -FixedDomain $fDom -Token $fTok -Port $shieldPort -ProfileId $fPid -PreferTailscale:$hasTs -ForceReconnect
-                    $okPub = [bool]($stPub -and $stPub.Running)
-                } catch { $okPub = $false }
-                $pub = Get-PublicMcpTunnelState $script:HostContext
-                if ($okPub) {
-                    $script:GuardianPublicStrikes = 0
-                    $healedAny = $true
-                } else {
-                    $script:GuardianPublicStrikes++
-                    $script:GuardianPublicNextRetryUtc = $nowUtc.AddSeconds((Get-GuardianBackoffSeconds $script:GuardianPublicStrikes))
+    $pubPool = Get-PublicTunnelsPool -Context $script:HostContext -Settings $settings
+    $pubItemsSigParts = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($pIt in @($pubPool.Items)) {
+        if ($null -eq $pIt) { continue }
+        $itRt = Get-PublicTunnelItemRuntimeState -Context $script:HostContext -Item $pIt
+        if ($pIt.DesiredRunning -and ($pIt.Mode -in @('quick', 'cloudflare_key')) -and ($pIt.Mode -ne 'cloudflare_key' -or [bool]$pIt.BaseUrl)) {
+            if ($itRt.Running -and $itRt.ProcessId -gt 0) {
+                $script:GuardianPublicItemStrikes[$pIt.Id] = 0
+                $script:GuardianPublicItemNextRetryUtc[$pIt.Id] = [DateTime]::MinValue
+            } else {
+                $curStrikes = if ($script:GuardianPublicItemStrikes.ContainsKey($pIt.Id)) { [int]$script:GuardianPublicItemStrikes[$pIt.Id] } else { 0 }
+                $nextRetry = if ($script:GuardianPublicItemNextRetryUtc.ContainsKey($pIt.Id)) { [DateTime]$script:GuardianPublicItemNextRetryUtc[$pIt.Id] } else { [DateTime]::MinValue }
+                if (($curStrikes -lt 3) -and ($nowUtc -ge $nextRetry)) {
+                    $okHeal = $false
+                    try {
+                        $healedRt = Start-PublicTunnelItem -Context $script:HostContext -TunnelId ([string]$pIt.Id) -Port $shieldPort -SkipDesiredStateUpdate
+                        $okHeal = [bool]($healedRt -and $healedRt.Running)
+                        if ($healedRt) { $itRt = $healedRt }
+                    } catch { $okHeal = $false }
+                    if ($okHeal) {
+                        $script:GuardianPublicItemStrikes[$pIt.Id] = 0
+                        $script:GuardianPublicItemNextRetryUtc[$pIt.Id] = [DateTime]::MinValue
+                        $healedAny = $true
+                    } else {
+                        $curStrikes++
+                        $script:GuardianPublicItemStrikes[$pIt.Id] = $curStrikes
+                        $script:GuardianPublicItemNextRetryUtc[$pIt.Id] = $nowUtc.AddSeconds((Get-GuardianBackoffSeconds $curStrikes))
+                    }
                 }
             }
         }
+        [void]$pubItemsSigParts.Add("$($pIt.Id):$($pIt.DesiredRunning):$($itRt.Running):$($itRt.Status):$($itRt.HealthPhase):$($itRt.EffectiveUrl):$($itRt.ProcessId)")
     }
+    $pubItemsSig = $pubItemsSigParts -join ';'
 
-    $digestSig = "$($disp.Core)|$($disp.Tunnel)|$($disp.Running)|$($disp.IsFault)|$($disp.RunningProfileId)|$($disp.RunningTunnelId)|$($pub.Running)|$($pub.Status)|$($pub.HealthPhase)|$($pub.PublicRttMs)|$($pub.Url)"
+    $digestSig = "$($disp.Core)|$($disp.Tunnel)|$($disp.Running)|$($disp.IsFault)|$($disp.RunningProfileId)|$($disp.RunningTunnelId)|$($pub.Running)|$($pub.Status)|$($pub.HealthPhase)|$($pub.PublicRttMs)|$($pub.Url)|$pubItemsSig"
     $hadPrevSig = ($script:GuardianLastDigestSig -ne '')
     $sigChanged = ($hadPrevSig -and ($script:GuardianLastDigestSig -ne $digestSig))
     $script:GuardianLastDigestSig = $digestSig

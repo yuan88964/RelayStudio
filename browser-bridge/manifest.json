@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "RelayStudio Web Bridge",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "description": "RelayStudio multi-platform web conversation bridge",
   "permissions": [
     "tabs",

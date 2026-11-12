@@ -54,6 +54,25 @@ export interface PublicMcpTunnelState {
   LastCheckedUtc: string;
 }
 
+export interface PublicTunnelItem {
+  Id: string;
+  Name: string;
+  IsBuiltin: boolean;
+  BaseUrl: string;
+  EffectiveUrl: string;
+  HasKey: boolean;
+  MaskedKey: string;
+  Mode: 'quick' | 'tailscale' | 'cloudflare_key' | 'external_url' | string;
+  ModeLabel: string;
+  Running: boolean;
+  Status: string;
+  HealthPhase: 'Online' | 'Degraded' | 'Connecting' | 'Fault' | 'Offline' | string;
+  PublicRttMs: number;
+  ErrorReason: string;
+  ProcessId: number;
+  UsedByPlatforms: string[];
+}
+
 export interface ConnectionDisplaySummary {
   Endpoint: string;
   Core: string;
@@ -124,6 +143,8 @@ export interface HostInfraBundle {
   studioToken: string;        // per-boot RELAYSTUDIO_LOCAL_TOKEN (or "" if unset)
   profiles: ProfilesBundle;
   publicTunnel: PublicMcpTunnelState;
+  publicTunnels?: PublicTunnelItem[];
+  selectedPublicTunnelByPlatform?: Record<string, string>;
   display: ConnectionDisplaySummary;
   layout: WindowLayoutMemory;
   engineConfig: CoreEngineConfig;
@@ -154,6 +175,13 @@ export type HostRpcMethod =
   | 'openai_tunnel_disconnect'
   | 'public_tunnel_connect'
   | 'public_tunnel_disconnect'
+  | 'public_tunnel_item_save'
+  | 'public_tunnel_item_remove'
+  | 'public_tunnel_item_connect'
+  | 'public_tunnel_item_disconnect'
+  | 'public_tunnel_item_get_secret'
+  | 'public_tunnel_detect_tailscale'
+  | 'platform_bind_public_tunnel'
   | 'one_click_reconnect'
   | 'restart_core'
   | 'save_engine_config'
