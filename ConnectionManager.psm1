@@ -7108,7 +7108,7 @@ function Test-PublicMcpEdgeHealth {
         [string]$Url,
         $Context = $null,
         [int]$TimeoutMs = 8000,
-        [int]$SlowThresholdMs = 2500
+        [int]$SlowThresholdMs = 5000
     )
     if ($script:PublicMcpEdgeProbeOverride -is [scriptblock]) {
         return (& $script:PublicMcpEdgeProbeOverride $Url $Context $TimeoutMs $SlowThresholdMs)
@@ -9212,7 +9212,7 @@ function Start-PublicTunnelItem {
                 return (Get-PublicTunnelItemRuntimeState -Context $Context -Item $item)
             }
 
-            $edge = Test-PublicMcpEdgeHealth -Url $fixedUrl -Context $Context -TimeoutMs 3500
+            $edge = Test-PublicMcpEdgeHealth -Url $fixedUrl -Context $Context -TimeoutMs 8000
             if ($edge -and $edge.Reachable) {
                 $phase = if ($edge.Phase -eq 'Degraded') { 'Degraded' } else { 'Online' }
                 Write-PublicTunnelItemRuntimeFile -Context $Context -TunnelId $cleanId -StateData @{
@@ -9257,7 +9257,7 @@ function Start-PublicTunnelItem {
         }
 
         # Case 4: ($fixedUrl non-.ts.net && !$cleanKey) -> Mode 'external_url' ('外部公网隧道')
-        $edgeExt = Test-PublicMcpEdgeHealth -Url $fixedUrl -Context $Context -TimeoutMs 3500
+        $edgeExt = Test-PublicMcpEdgeHealth -Url $fixedUrl -Context $Context -TimeoutMs 8000
         if ($edgeExt -and $edgeExt.Reachable) {
             $extPhase = if ($edgeExt.Phase -eq 'Degraded') { 'Degraded' } else { 'Online' }
             Write-PublicTunnelItemRuntimeFile -Context $Context -TunnelId $cleanId -StateData @{
@@ -9396,7 +9396,7 @@ function Get-PublicTunnelItemsWithRuntime {
             $isFresh = ($rt.LastCheckedUtc -and [DateTimeOffset]::TryParse([string]$rt.LastCheckedUtc, [ref]$checkedDto) -and (([DateTimeOffset]::UtcNow - $checkedDto).TotalSeconds -lt 15.0))
             if (-not $isFresh) {
                 try {
-                    $edge = Test-PublicMcpEdgeHealth -Url ([string]$rt.EffectiveUrl) -Context $Context -TimeoutMs 3500
+                    $edge = Test-PublicMcpEdgeHealth -Url ([string]$rt.EffectiveUrl) -Context $Context -TimeoutMs 8000
                     if ($edge) {
                         $newRunning = [bool]$edge.Reachable
                         $newPhase = if (-not $newRunning) { 'Fault' } elseif ($edge.Phase -eq 'Degraded') { 'Degraded' } else { 'Online' }
