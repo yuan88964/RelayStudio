@@ -1,14 +1,18 @@
 import argparse
 import base64
+import contextlib
 import copy
 from datetime import datetime, timezone
 import hashlib
 import hmac
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import ipaddress
 import json
 import os
 import re
 import shutil
+import socket
+import ssl
 import subprocess
 import sys
 import threading
@@ -21,6 +25,18 @@ import uuid
 import RelayCdp
 
 
+_UPSTREAM_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+_DEFAULT_NO_PROXY_TOKENS = (
+    "localhost",
+    "127.0.0.1",
+    "::1",
+    "100.64.0.0/10",
+    "100.*",
+    "*.ts.net",
+    "*.tailscale.com",
+)
+
+
 READ_ONLY_ANNOTATIONS = {
     "title": None,
     "readOnlyHint": True,
@@ -30,6 +46,7 @@ READ_ONLY_ANNOTATIONS = {
 }
 
 _ACTIVITY_LOCK = threading.Lock()
+_ACTIVITY_MEM_CACHE: dict[str, tuple[int, int, dict]] = {}
 _CALL_SEQ_COUNTER = 0
 _WEB_BRIDGE_LOCK = threading.Lock()
 _LOG_READER_LOCK = threading.Lock()
@@ -39,11 +56,15 @@ _WEB_BRIDGE_MEM_CACHE: dict[str, dict] = {}
 _STUDIO_TASK_CACHE_LOCK = threading.Lock()
 _STUDIO_TASK_FILE_CACHE_LOCK = _STUDIO_TASK_CACHE_LOCK
 _STUDIO_TASK_FILE_CACHE: dict[str, tuple[int, int, dict]] = {}
-_STUDIO_SNAPSHOT_SLATE_LOCK = threading.Lock()
+_STUDIO_SNAPSHOT_SLATE_LOCK = threading.RLock()
 _STUDIO_SNAPSHOT_SLATE: dict = {}
 _STUDIO_STATE_MUTATION_SEQ = 0
+_STUDIO_SSE_COND = threading.Condition()
+_STUDIO_SSE_SEQ = 0
+_STUDIO_LOCAL_TOKEN_LOCK = threading.Lock()
+_STUDIO_LOCAL_TOKEN_CACHE: dict[str, tuple[int, int, str]] = {}
 HEARTBEAT_DISK_FLUSH_INTERVAL_SEC = 10.0
-SNAPSHOT_SLATE_TTL_SEC = 0.8
+SNAPSHOT_SLATE_TTL_SEC = 1.8
 _STUDIO_SNAPSHOT_TTL_SEC = SNAPSHOT_SLATE_TTL_SEC
 _CANONICAL_STUDIO_PROVIDERS = ("chatgpt", "gemini", "claude")
 
@@ -52,6 +73,15 @@ def _bump_studio_mutation_seq() -> int:
     global _STUDIO_STATE_MUTATION_SEQ
     _STUDIO_STATE_MUTATION_SEQ += 1
     return _STUDIO_STATE_MUTATION_SEQ
+
+
+def notify_studio_sse() -> int:
+    """Wake all active /studio/events SSE listeners immediately after state mutations."""
+    global _STUDIO_SSE_SEQ
+    with _STUDIO_SSE_COND:
+        _STUDIO_SSE_SEQ += 1
+        _STUDIO_SSE_COND.notify_all()
+        return _STUDIO_SSE_SEQ
 
 # Real machine side effects (cold-starting browsers / ChatGPT Desktop, background CDP ticks) are OFF by
 # default so that unit tests never touch the host; main() switches them on for the production hub.
@@ -1613,6 +1643,8 @@ def _compute_wb_logical_sig(state: dict, now_epoch: float | None = None) -> tupl
             json.dumps(
                 (
                     k,
+                    b.get("provider"),
+                    b.get("carrier"),
                     b.get("conv_uuid"),
                     b.get("browser_profile"),
                     b.get("target_mode"),
@@ -1625,6 +1657,8 @@ def _compute_wb_logical_sig(state: dict, now_epoch: float | None = None) -> tupl
                     b.get("stall_minutes"),
                     b.get("max_retries"),
                     b.get("user_locked_browser"),
+                    b.get("user_locked_carrier"),
+                    b.get("title"),
                 ),
                 ensure_ascii=False,
             ).encode("utf-8", errors="replace")
@@ -1778,6 +1812,7 @@ def _save_web_bridge_state(wb_path: str, state: dict, allow_throttle: bool = Fal
         _WB_LOGICAL_SIG_CACHE[abs_p] = (mtime_ns ^ int(now // 6), fsize, _STUDIO_STATE_MUTATION_SEQ, wb_sig, q_rev)
     except Exception:
         pass
+    notify_studio_sse()
     return True
 
 
@@ -2273,6 +2308,7 @@ def save_task_archive_state(data_root: str, session_key: str, state_val: str, re
         except Exception:
             pass
     _bump_studio_mutation_seq()
+    notify_studio_sse()
     return payload
 
 
@@ -2603,6 +2639,8 @@ def purge_archived_session(data_root: str, tasks_root: str, session_key: str) ->
                 except Exception:
                     pass
 
+    _bump_studio_mutation_seq()
+    notify_studio_sse()
     return {
         "ok": True,
         "session_key": session_key,
@@ -2761,6 +2799,7 @@ def _write_task_doc(tasks_root: str, doc: dict) -> None:
     with _STUDIO_TASK_FILE_CACHE_LOCK:
         _STUDIO_TASK_FILE_CACHE.pop(os.path.abspath(path), None)
     _bump_studio_mutation_seq()
+    notify_studio_sse()
 
 
 def mint_app_task(tasks_root: str, user_text: str, now_iso: str = "") -> dict:
@@ -3917,22 +3956,27 @@ def read_tunnel_log_incremental(tunnel_log_path: str) -> list[str]:
             state["last_stat_size"] = file_size
 
         if len(state["lines"]) > 2500:
-            # Spec v4.7 §2.1: archive the evicted head into cumulative counters before trimming (breaks the ~1007 cap).
+            # Spec v4.7 §2.1: archive the evicted head into cumulative counters before trimming.
             _archive_evicted_tunnel_lines(state, state["lines"][:-2000])
             kept = state["lines"][-2000:]
             kept_parsed = (state.get("parsed_lines") or [])[-2000:]
-            try:
+            state["lines"] = kept
+            state["parsed_lines"] = kept_parsed
+            if not _HOST_SIDE_EFFECTS_ENABLED and not state.get("replace_locked"):
                 tmp_path = f"{abs_path}.{threading.get_ident()}.tmp"
-                with open(tmp_path, "w", encoding="utf-8") as fh:
-                    fh.write("\n".join(kept) + "\n")
-                os.replace(tmp_path, abs_path)
-                state["lines"] = kept
-                state["parsed_lines"] = kept_parsed
-                state["byte_offset"] = os.path.getsize(abs_path)
-                state["last_stat_size"] = state["byte_offset"]
-            except Exception:
-                state["lines"] = kept
-                state["parsed_lines"] = kept_parsed
+                try:
+                    with open(tmp_path, "w", encoding="utf-8") as fh:
+                        fh.write("\n".join(kept) + "\n")
+                    os.replace(tmp_path, abs_path)
+                    state["byte_offset"] = os.path.getsize(abs_path)
+                    state["last_stat_size"] = state["byte_offset"]
+                except Exception:
+                    state["replace_locked"] = True
+                    try:
+                        if os.path.exists(tmp_path):
+                            os.remove(tmp_path)
+                    except Exception:
+                        pass
 
         return list(state["lines"])
 
@@ -4042,10 +4086,16 @@ def extract_mcp_call_telemetry(raw_bytes: bytes) -> dict | None:
 
 def _load_activity_file(activity_path: str) -> dict:
     if activity_path and os.path.isfile(activity_path):
+        abs_p = os.path.abspath(activity_path)
+        mtime_ns, fsize = _file_stat_sig(abs_p)
+        cached = _ACTIVITY_MEM_CACHE.get(abs_p)
+        if cached is not None and cached[0] == mtime_ns and cached[1] == fsize:
+            return copy.deepcopy(cached[2])
         try:
-            with open(activity_path, "r", encoding="utf-8") as fh:
+            with open(abs_p, "r", encoding="utf-8") as fh:
                 loaded = json.load(fh)
                 if isinstance(loaded, dict):
+                    _ACTIVITY_MEM_CACHE[abs_p] = (mtime_ns, fsize, copy.deepcopy(loaded))
                     return loaded
         except Exception:
             pass
@@ -4055,12 +4105,17 @@ def _load_activity_file(activity_path: str) -> dict:
 def _save_activity_file(activity_path: str, payload: dict) -> None:
     if not activity_path:
         return
-    os.makedirs(os.path.dirname(activity_path), exist_ok=True)
-    tmp_path = f"{activity_path}.{threading.get_ident()}.tmp"
+    abs_p = os.path.abspath(activity_path)
+    os.makedirs(os.path.dirname(abs_p), exist_ok=True)
+    tmp_path = f"{abs_p}.{threading.get_ident()}.tmp"
     with open(tmp_path, "w", encoding="utf-8") as fh:
         json.dump(payload, fh, ensure_ascii=False)
-    os.replace(tmp_path, activity_path)
+    os.replace(tmp_path, abs_p)
+    mtime_ns, fsize = _file_stat_sig(abs_p)
+    if mtime_ns > 0 or fsize > 0:
+        _ACTIVITY_MEM_CACHE[abs_p] = (mtime_ns, fsize, copy.deepcopy(payload))
     _bump_studio_mutation_seq()
+    notify_studio_sse()
 
 
 def record_tools_list_sync(activity_path: str) -> None:
@@ -4246,20 +4301,41 @@ def _format_ago_text(elapsed_sec: int) -> str:
     return f"{elapsed_sec // 86400}天前"
 
 
-def format_readable_milestone(raw_summary: str, time_iso: str = "", steps: list | None = None) -> dict:
+def format_readable_milestone(
+    raw_summary: str,
+    time_iso: str = "",
+    steps: list | None = None,
+    explicit_step_id: str = "",
+    explicit_trace: str = "",
+) -> dict:
     """Clean technical step prefixes and '||' metadata without early returns."""
     raw = str(raw_summary or "").strip()
+    init_step_id = str(explicit_step_id or "").strip()
+    trace_val = str(explicit_trace or "").strip()
     if not raw:
         t_lbl = _format_local_time_text(_parse_iso_epoch(time_iso), include_date=True)
         return {
             "Title": "记录任务检查点",
+            "label": "记录任务检查点",
             "Prose": "已记录阶段进展",
+            "Body": "已记录阶段进展",
+            "summary": "已记录阶段进展",
             "Detail": "",
             "RawText": "",
+            "raw_text": "",
+            "RawSummary": "",
+            "raw_summary": "",
             "Time": t_lbl,
             "TimeText": t_lbl,
-            "TraceText": "",
+            "time_text": t_lbl,
+            "TraceText": trace_val,
+            "trace_text": trace_val,
+            "StepId": init_step_id,
+            "step_id": init_step_id,
             "IsSuccess": True,
+            "is_success": True,
+            "IsWarning": False,
+            "is_warning": False,
             "CleanSummary": "已记录阶段进展",
         }
 
@@ -4269,23 +4345,42 @@ def format_readable_milestone(raw_summary: str, time_iso: str = "", steps: list 
     tech_part = parts[1].strip() if len(parts) > 1 else raw
 
     # 2. Iteratively strip step status prefixes
-    step_id = ""
+    step_id = init_step_id
     for _ in range(3):
         m_comp = re.match(r"^completed=\[[^\]]*\],\s*current=([a-zA-Z0-9_-]+)\s*[:：]\s*(.+)$", human_part, flags=re.IGNORECASE)
         if m_comp:
             step_id = m_comp.group(1).strip()
             human_part = m_comp.group(2).strip()
             continue
-        m_kv = re.match(r"^([a-zA-Z0-9_-]+)=(?:in_progress|completed|pending|done|blocked|failed)\s*[:：]\s*(.+)$", human_part, flags=re.IGNORECASE)
+        m_kv = re.match(r"^([a-zA-Z0-9_-]+)=(?:in_progress|completed|pending|done|blocked|failed|quarantined)\s*[:：]\s*(.+)$", human_part, flags=re.IGNORECASE)
         if m_kv:
             step_id = m_kv.group(1).strip()
             human_part = m_kv.group(2).strip()
             continue
-        m_kw = re.match(r"^(?:pass|done|completed|in_progress|step\s*\d+)\s*[:：]\s*(.+)$", human_part, flags=re.IGNORECASE)
+        m_step = re.match(r"^(?:step\s*|步骤\s*)([a-zA-Z0-9_-]+)\s*[:：.]\s*(.+)$", human_part, flags=re.IGNORECASE)
+        if m_step:
+            if not step_id:
+                step_id = m_step.group(1).strip()
+            human_part = m_step.group(2).strip()
+            continue
+        m_kw = re.match(r"^(?:pass|done|completed|in_progress)\s*[:：]\s*(.+)$", human_part, flags=re.IGNORECASE)
         if m_kw:
             human_part = m_kw.group(1).strip()
             continue
         break
+
+    if not step_id and tech_part:
+        m_tech_curr = re.search(r"\bcurrent=([a-zA-Z0-9_-]+)\b", tech_part, flags=re.IGNORECASE)
+        if m_tech_curr:
+            step_id = m_tech_curr.group(1).strip()
+        else:
+            m_tech_kv = re.search(
+                r"(?<![a-zA-Z0-9_-])([a-zA-Z0-9_-]+)=(?:in_progress|completed|done|blocked|failed|quarantined)\b",
+                tech_part,
+                flags=re.IGNORECASE,
+            )
+            if m_tech_kv and m_tech_kv.group(1).lower() not in ("gate", "status", "result", "state"):
+                step_id = m_tech_kv.group(1).strip()
 
     # Scrub any residual internal state tokens if embedded
     human_part = re.sub(r"\b[a-zA-Z0-9_-]+=(?:in_progress|completed|pending)\s*[:：]?\s*", "", human_part)
@@ -4325,15 +4420,29 @@ def format_readable_milestone(raw_summary: str, time_iso: str = "", steps: list 
     t_epoch = _parse_iso_epoch(time_iso)
     time_text = _format_local_time_text(t_epoch, include_date=True) if t_epoch > 0 else (time_iso or "刚刚")
     is_success = not bool(re.search(r"失败|阻塞|仍红|1fail|[1-9]F", raw))
+    is_warning = not is_success
     return {
         "Title": title,
+        "label": title,
         "Prose": prose,
+        "Body": prose,
+        "summary": prose,
         "Detail": tech_part,
         "RawText": tech_part,
+        "raw_text": tech_part,
+        "RawSummary": raw,
+        "raw_summary": raw,
         "Time": time_text,
         "TimeText": time_text,
-        "TraceText": "",
+        "time_text": time_text,
+        "TraceText": trace_val,
+        "trace_text": trace_val,
+        "StepId": step_id,
+        "step_id": step_id,
         "IsSuccess": is_success,
+        "is_success": is_success,
+        "IsWarning": is_warning,
+        "is_warning": is_warning,
         "CleanSummary": human_part or title,
     }
 
@@ -4576,21 +4685,56 @@ def _build_session_queue_slice(queue_list: list | None, session_key: str, now_ep
     pending_queue_out = []
     sent_msgs = []
     has_claimed = False
+
+    def _serialize_queue_item(m: dict, eff_status: str, status_txt: str, default_mode: str) -> dict:
+        full_prompt = str(m.get("prompt") or m.get("text") or m.get("display_text") or "")
+        display_txt = str(
+            (m.get("display_text") if m.get("app_initiated") else "")
+            or m.get("display_text")
+            or m.get("text")
+            or m.get("prompt")
+            or ""
+        )
+        created_iso = str(m.get("created_at") or "")
+        claimed_iso = str(m.get("claimed_at") or "")
+        delivered_iso = str(m.get("delivered_at") or "")
+        ref_iso = delivered_iso or created_iso
+        m_time_txt = _format_local_time_text(_parse_iso_epoch(ref_iso), include_date=True)
+        defer_flag = bool(m.get("defer_until_stopped", False))
+        conv_uuid = str(m.get("conv_uuid") or "")
+        return {
+            "id": str(m.get("id") or ""),
+            "session_key": session_key,
+            "prompt": full_prompt,
+            "display_text": display_txt,
+            "DisplayText": display_txt,
+            "text": display_txt,
+            "status": eff_status,
+            "StatusText": status_txt,
+            "status_text": status_txt,
+            "mode": str(m.get("mode") or default_mode),
+            "created_at": created_iso,
+            "CreatedAt": created_iso,
+            "claimed_at": claimed_iso,
+            "ClaimedAt": claimed_iso,
+            "delivered_at": delivered_iso,
+            "DeliveredAt": delivered_iso,
+            "defer_until_stopped": defer_flag,
+            "DeferUntilStopped": defer_flag,
+            "time": m_time_txt,
+            "TimeText": m_time_txt,
+            "time_text": m_time_txt,
+            "target_model": str(m.get("target_model") or ""),
+            "reasoning_effort": str(m.get("reasoning_effort") or ""),
+            "browser_profile": str(m.get("browser_profile") or ""),
+            "provider": str(m.get("provider") or ""),
+            "ConvUuid": conv_uuid,
+            "conv_uuid": conv_uuid,
+        }
+
     for m in q_items:
         if isinstance(m, dict) and str(m.get("session_key") or "") == session_key and str(m.get("status") or "") == "pending":
-            m_txt = str((m.get("display_text") if m.get("app_initiated") else "") or m.get("prompt") or m.get("text") or "")
-            m_time_txt = _format_local_time_text(_parse_iso_epoch(str(m.get("created_at") or "")), include_date=True)
-            pending_queue_out.append({
-                "Id": str(m.get("id") or ""),
-                "Prompt": m_txt,
-                "Text": m_txt,
-                "Status": "pending",
-                "StatusText": "排队待发",
-                "Mode": str(m.get("mode") or "custom_message"),
-                "Time": m_time_txt,
-                "TimeText": m_time_txt,
-                "DeferUntilStopped": bool(m.get("defer_until_stopped")),
-            })
+            pending_queue_out.append(_serialize_queue_item(m, "pending", "排队待发", "custom_message"))
     for m in reversed(q_items):
         if isinstance(m, dict) and str(m.get("session_key") or "") == session_key:
             m_status = str(m.get("status") or "pending")
@@ -4611,19 +4755,7 @@ def _build_session_queue_slice(queue_list: list | None, session_key: str, now_ep
                 if m_status == "unconfirmed"
                 else "排队待发"
             )
-            m_txt = str((m.get("display_text") if m.get("app_initiated") else "") or m.get("prompt") or m.get("text") or "")
-            m_time_txt = _format_local_time_text(_parse_iso_epoch(str(m.get("created_at") or "")), include_date=True)
-            sent_msgs.append({
-                "Id": str(m.get("id") or ""),
-                "Prompt": m_txt,
-                "Text": m_txt,
-                "Status": m_status,
-                "StatusText": m_status_txt,
-                "Mode": str(m.get("mode") or "in_place_wakeup"),
-                "Time": m_time_txt,
-                "TimeText": m_time_txt,
-                "ConvUuid": str(m.get("conv_uuid") or ""),
-            })
+            sent_msgs.append(_serialize_queue_item(m, m_status, m_status_txt, "in_place_wakeup"))
     return {
         "SessionKey": session_key,
         "PendingQueue": pending_queue_out,
@@ -4750,18 +4882,17 @@ def build_studio_snapshot(data_root: str, tasks_root: str, web_bridge_path: str 
         os.path.abspath(tasks_root) if tasks_root else "",
         os.path.abspath(wb_path) if wb_path else "",
     )
-    if not since_sig:
-        with _STUDIO_SNAPSHOT_SLATE_LOCK:
-            cached_ws_roots = _STUDIO_SNAPSHOT_SLATE.get("ws_roots") or ()
-            if (
-                _STUDIO_SNAPSHOT_SLATE.get("key") == slate_key
-                and _STUDIO_SNAPSHOT_SLATE.get("mutation_seq") == _STUDIO_STATE_MUTATION_SEQ
-                and _STUDIO_SNAPSHOT_SLATE.get("sig") == cur_sig
-                and 0.0 <= (now_epoch - float(_STUDIO_SNAPSHOT_SLATE.get("ts") or 0.0)) <= _STUDIO_SNAPSHOT_TTL_SEC
-                and _STUDIO_SNAPSHOT_SLATE.get("pipe_mtimes") == tuple(_probe_pipeline_state_mtime(r, now_epoch) for r in cached_ws_roots)
-                and isinstance(_STUDIO_SNAPSHOT_SLATE.get("snapshot"), dict)
-            ):
-                return copy.deepcopy(_STUDIO_SNAPSHOT_SLATE["snapshot"])
+    with _STUDIO_SNAPSHOT_SLATE_LOCK:
+        cached_ws_roots = _STUDIO_SNAPSHOT_SLATE.get("ws_roots") or ()
+        if (
+            _STUDIO_SNAPSHOT_SLATE.get("key") == slate_key
+            and _STUDIO_SNAPSHOT_SLATE.get("mutation_seq") == _STUDIO_STATE_MUTATION_SEQ
+            and _STUDIO_SNAPSHOT_SLATE.get("sig") == cur_sig
+            and 0.0 <= (now_epoch - float(_STUDIO_SNAPSHOT_SLATE.get("ts") or 0.0)) <= _STUDIO_SNAPSHOT_TTL_SEC
+            and _STUDIO_SNAPSHOT_SLATE.get("pipe_mtimes") == tuple(_probe_pipeline_state_mtime(r, now_epoch) for r in cached_ws_roots)
+            and isinstance(_STUDIO_SNAPSHOT_SLATE.get("snapshot"), dict)
+        ):
+            return copy.deepcopy(_STUDIO_SNAPSHOT_SLATE["snapshot"])
 
     lines = read_tunnel_log_incremental(tunnel_log_path)
     act_doc = _load_activity_file(activity_path)
@@ -5236,14 +5367,15 @@ def build_studio_snapshot(data_root: str, tasks_root: str, web_bridge_path: str 
             st_upd_iso = str(st.get("updated_at") or "").strip()
             st_upd_txt = _format_local_time_text(_parse_iso_epoch(st_upd_iso), include_date=False) if st_upd_iso else ""
             ui_steps.append({
-                "Id": st_id,
-                "Title": st_title,
-                "Status": st_status,
+                "id": st_id,
+                "title": st_title,
+                "status": st_status,
                 "StatusText": status_txt,
                 "StatusLabel": status_lbl,
                 "BadgeBg": badge_bg,
                 "BadgeFg": badge_fg,
                 "UpdatedText": st_upd_txt,
+                "updated_at": st_upd_iso,
                 "IsCompleted": is_term,
                 "IsQuarantined": is_quar,
                 "IsCurrent": is_curr,
@@ -5251,7 +5383,7 @@ def build_studio_snapshot(data_root: str, tasks_root: str, web_bridge_path: str 
 
         if not current_step_title:
             if ui_steps:
-                current_step_title = ui_steps[-1]["Title"] if done_steps == len(ui_steps) else ui_steps[0]["Title"]
+                current_step_title = ui_steps[-1]["title"] if done_steps == len(ui_steps) else ui_steps[0]["title"]
             else:
                 current_step_title = "等待或自由工具调用中"
 
@@ -5268,18 +5400,41 @@ def build_studio_snapshot(data_root: str, tasks_root: str, web_bridge_path: str 
             cp_sum = str(cp.get("summary") or cp.get("title") or "").strip()
             cp_time = str(cp.get("created_at") or cp.get("time") or "").strip()
             cp_type = str(cp.get("type") or "checkpoint").strip()
+            cp_step = str(cp.get("step_id") or cp.get("StepId") or cp.get("step") or "").strip()
+            cp_trace = str(cp.get("trace_text") or cp.get("TraceText") or cp.get("trace") or "").strip()
             if not cp_sum:
                 continue
-            fmt = format_readable_milestone(cp_sum, cp_time, raw_steps)
+            fmt = format_readable_milestone(
+                cp_sum,
+                cp_time,
+                raw_steps,
+                explicit_step_id=cp_step,
+                explicit_trace=cp_trace,
+            )
             milestones.append({
                 "Title": fmt["Title"],
+                "label": fmt["Title"],
                 "Prose": fmt["Prose"],
+                "Body": fmt["Body"],
+                "summary": fmt["Body"],
                 "Detail": fmt["Detail"],
                 "RawText": fmt["RawText"],
+                "raw_text": fmt["RawText"],
+                "RawSummary": fmt["RawSummary"],
+                "raw_summary": fmt["RawSummary"],
                 "Time": fmt["Time"],
                 "TimeText": fmt["TimeText"],
+                "time_text": fmt["TimeText"],
+                "CreatedAt": cp_time,
+                "created_at": cp_time,
                 "TraceText": fmt["TraceText"],
+                "trace_text": fmt["TraceText"],
+                "StepId": fmt["StepId"],
+                "step_id": fmt["StepId"],
                 "IsSuccess": fmt["IsSuccess"],
+                "is_success": fmt["IsSuccess"],
+                "IsWarning": fmt["IsWarning"],
+                "is_warning": fmt["IsWarning"],
             })
             checkpoints_out.append({
                 "Summary": fmt["CleanSummary"],
@@ -5303,15 +5458,31 @@ def build_studio_snapshot(data_root: str, tasks_root: str, web_bridge_path: str 
         clean_latest = latest_fmt["CleanSummary"]
         if not milestones and clean_latest:
             t_lbl = _format_local_time_text(item["LastEpoch"], include_date=True)
+            last_iso_str = str(item["LastIso"] or "")
             milestones.append({
                 "Title": "最新阶段状态",
+                "label": "最新阶段状态",
                 "Prose": clean_latest,
+                "Body": clean_latest,
+                "summary": clean_latest,
                 "Detail": "",
                 "RawText": raw_latest_summary,
+                "raw_text": raw_latest_summary,
+                "RawSummary": raw_latest_summary,
+                "raw_summary": raw_latest_summary,
                 "Time": t_lbl,
                 "TimeText": t_lbl,
-                "TraceText": "",
-                "IsSuccess": True,
+                "time_text": t_lbl,
+                "CreatedAt": last_iso_str,
+                "created_at": last_iso_str,
+                "TraceText": latest_fmt["TraceText"],
+                "trace_text": latest_fmt["TraceText"],
+                "StepId": latest_fmt["StepId"],
+                "step_id": latest_fmt["StepId"],
+                "IsSuccess": latest_fmt["IsSuccess"],
+                "is_success": latest_fmt["IsSuccess"],
+                "IsWarning": latest_fmt["IsWarning"],
+                "is_warning": latest_fmt["IsWarning"],
             })
 
         b_entry = _ensure_binding_entry(bindings.get(key), default_cfg=ar_cfg)
@@ -5734,12 +5905,1248 @@ def _build_handover_prompt_from_task_id(task_id: str, tasks_root: str, user_text
     return str(user_text or "请继续").strip()
 
 
+_PUBLIC_TUNNEL_GUARD_LOCK = threading.Lock()
+_PUBLIC_TUNNEL_WORKER_LOCK = threading.Lock()
+_PUBLIC_TUNNEL_GUARD_STATE: dict[str, object] = {
+    "last_check_ts": 0.0,
+    "next_check_ts": 0.0,
+    "fail_streak": 0,
+    "degraded_streak": 0,
+    "reconnect_attempts": 0,
+    "tripped": False,
+    "session_sig": None,
+}
+_PUBLIC_DOH_LOCK = threading.Lock()
+_PUBLIC_DOH_CACHE: dict[str, tuple[float, list[str]]] = {}
+_PUBLIC_DOH_TTL_SEC = 300.0
+_PUBLIC_EDGE_PROBE_IMPL = None
+
+_NON_PUBLIC_IPV4_NETWORKS = (
+    ipaddress.ip_network("0.0.0.0/8"),
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("100.64.0.0/10"),
+    ipaddress.ip_network("127.0.0.0/8"),
+    ipaddress.ip_network("169.254.0.0/16"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+    ipaddress.ip_network("198.18.0.0/15"),
+    ipaddress.ip_network("224.0.0.0/4"),
+    ipaddress.ip_network("240.0.0.0/4"),
+)
+
+if os.name == "nt":
+    import ctypes as _ctypes
+    from ctypes import wintypes as _wintypes
+
+    _WIN32_KERNEL32 = _ctypes.WinDLL("kernel32", use_last_error=True)
+    _WIN32_CreateFileW = _WIN32_KERNEL32.CreateFileW
+    _WIN32_CreateFileW.argtypes = [
+        _wintypes.LPCWSTR,
+        _wintypes.DWORD,
+        _wintypes.DWORD,
+        _wintypes.LPVOID,
+        _wintypes.DWORD,
+        _wintypes.DWORD,
+        _wintypes.HANDLE,
+    ]
+    _WIN32_CreateFileW.restype = _wintypes.HANDLE
+    _WIN32_CloseHandle = _WIN32_KERNEL32.CloseHandle
+    _WIN32_CloseHandle.argtypes = [_wintypes.HANDLE]
+    _WIN32_CloseHandle.restype = _wintypes.BOOL
+    _WIN32_OpenProcess = _WIN32_KERNEL32.OpenProcess
+    _WIN32_OpenProcess.argtypes = [_wintypes.DWORD, _wintypes.BOOL, _wintypes.DWORD]
+    _WIN32_OpenProcess.restype = _wintypes.HANDLE
+    _WIN32_GetProcessTimes = _WIN32_KERNEL32.GetProcessTimes
+    _WIN32_GetProcessTimes.argtypes = [
+        _wintypes.HANDLE,
+        _ctypes.POINTER(_wintypes.FILETIME),
+        _ctypes.POINTER(_wintypes.FILETIME),
+        _ctypes.POINTER(_wintypes.FILETIME),
+        _ctypes.POINTER(_wintypes.FILETIME),
+    ]
+    _WIN32_GetProcessTimes.restype = _wintypes.BOOL
+
+
+@contextlib.contextmanager
+def _try_acquire_public_tunnel_file_lock(data_root: str):
+    """Attempt a non-blocking (0ms wait) exclusive lock on public-mcp-tunnel.lock (Manual Always Wins)."""
+    if not data_root:
+        yield False
+        return
+    try:
+        os.makedirs(data_root, exist_ok=True)
+    except Exception:
+        yield False
+        return
+    lock_path = os.path.join(data_root, "public-mcp-tunnel.lock")
+    if os.name == "nt":
+        handle = _WIN32_CreateFileW(lock_path, 0xC0000000, 0, None, 4, 0x80, None)
+        if handle is None or handle in (0, -1, 0xFFFFFFFF, 0xFFFFFFFFFFFFFFFF):
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            try:
+                _WIN32_CloseHandle(handle)
+            except Exception:
+                pass
+        return
+
+    import fcntl
+    fh = None
+    try:
+        fh = open(lock_path, "a+b")
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except Exception:
+        if fh is not None:
+            try:
+                fh.close()
+            except Exception:
+                pass
+        yield False
+        return
+    try:
+        yield True
+    finally:
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        except Exception:
+            pass
+        try:
+            fh.close()
+        except Exception:
+            pass
+
+
+def _write_public_tunnel_state_atomic(state_file: str, payload: dict) -> bool:
+    """Atomically write UTF-8 JSON (without BOM) to public-mcp-tunnel.json."""
+    if not state_file or not isinstance(payload, dict):
+        return False
+    parent_dir = os.path.dirname(os.path.abspath(state_file))
+    os.makedirs(parent_dir, exist_ok=True)
+    tmp_path = f"{state_file}.tmp.{os.getpid()}.{uuid.uuid4().hex[:8]}"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, state_file)
+        return True
+    except Exception:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass
+        return False
+
+
+def _canonical_public_tunnel_mode(saved: dict) -> str:
+    raw_mode = str(saved.get("Mode") or "").strip()
+    if raw_mode == "cloudflared":
+        return "cloudflared_named" if str(saved.get("FixedUrl") or "").strip() else "cloudflared_quick"
+    return raw_mode
+
+
+def _build_public_tunnel_telemetry_payload(
+    saved: dict,
+    health_phase: str,
+    rtt_ms: int = 0,
+    ingress_ip: str = "",
+    discovered_url: str = "",
+    checked_utc: str = "",
+) -> dict:
+    """Merge edge health telemetry into public-mcp-tunnel.json while preserving all existing keys."""
+    out = dict(saved)
+    eff_mode = _canonical_public_tunnel_mode(out)
+    fixed_url = str(out.get("FixedUrl") or "").strip()
+    if fixed_url:
+        out["Url"] = fixed_url
+    elif eff_mode == "cloudflared_quick" and not fixed_url:
+        out["Url"] = str(discovered_url or out.get("Url") or "").strip()
+    else:
+        out["Url"] = str(out.get("Url") or "").strip()
+
+    phase = health_phase if health_phase in ("Online", "Degraded", "Offline") else "Offline"
+    out["HealthPhase"] = phase
+    out["Running"] = phase in ("Online", "Degraded")
+    out["Status"] = {"Online": "在线", "Degraded": "偏慢", "Offline": "离线"}[phase]
+    out["PublicRttMs"] = int(max(0, rtt_ms)) if phase in ("Online", "Degraded") else 0
+    out["VerifiedIngressIp"] = str(ingress_ip or "") if phase in ("Online", "Degraded") else ""
+    out["LastCheckedUtc"] = str(checked_utc or _utc_now_iso())
+    return out
+
+
+def _compute_tunnel_session_sig(data_root: str, saved: dict) -> tuple:
+    mode = _canonical_public_tunnel_mode(saved)
+    url = str(saved.get("FixedUrl") or saved.get("Url") or "").strip()
+    pid = int(saved.get("ProcessId") or saved.get("Pid") or 0)
+    start_ticks = int(saved.get("StartTicks") or 0)
+    return (os.path.abspath(data_root), mode, url, pid, start_ticks)
+
+
+def _get_process_start_ticks(pid: int) -> int:
+    if pid <= 0:
+        return 0
+    if os.name == "nt":
+        try:
+            handle = _WIN32_OpenProcess(0x1000, False, int(pid))
+            if handle:
+                try:
+                    c_ft = _wintypes.FILETIME()
+                    e_ft = _wintypes.FILETIME()
+                    k_ft = _wintypes.FILETIME()
+                    u_ft = _wintypes.FILETIME()
+                    if _WIN32_GetProcessTimes(
+                        handle,
+                        _ctypes.byref(c_ft),
+                        _ctypes.byref(e_ft),
+                        _ctypes.byref(k_ft),
+                        _ctypes.byref(u_ft),
+                    ):
+                        ft_val = (int(c_ft.dwHighDateTime) << 32) | int(c_ft.dwLowDateTime)
+                        if ft_val > 0:
+                            return ft_val + 504911232000000000
+                finally:
+                    _WIN32_CloseHandle(handle)
+        except Exception:
+            pass
+    return 0
+
+
+def _normalize_proxy_url(raw_value: object) -> str:
+    val = str(raw_value or "").strip()
+    if not val:
+        return ""
+    if "=" in val and "://" not in val:
+        segments = [seg.strip() for seg in val.split(";") if seg.strip()]
+        picked = ""
+        for prefix in ("https=", "http=", "socks=", "socks5="):
+            for seg in segments:
+                if seg.lower().startswith(prefix):
+                    picked = seg.split("=", 1)[1].strip()
+                    if prefix.startswith("socks") and "://" not in picked:
+                        picked = f"socks5://{picked}"
+                    break
+            if picked:
+                break
+        if not picked and segments:
+            first = segments[0]
+            picked = first.split("=", 1)[1].strip() if "=" in first else first
+        val = picked
+    if not val:
+        return ""
+    if "://" not in val:
+        val = f"http://{val}"
+    try:
+        parsed = urllib.parse.urlsplit(val)
+        if not parsed.hostname or not parsed.port:
+            return ""
+        scheme = (parsed.scheme or "http").lower()
+        return f"{scheme}://{parsed.hostname}:{parsed.port}"
+    except Exception:
+        return ""
+
+
+def _get_windows_system_proxy_url() -> str:
+    if os.name != "nt":
+        return ""
+    try:
+        import winreg
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Internet Settings",
+        ) as key:
+            enabled, _ = winreg.QueryValueEx(key, "ProxyEnable")
+            if int(enabled or 0) != 1:
+                return ""
+            server, _ = winreg.QueryValueEx(key, "ProxyServer")
+            return _normalize_proxy_url(server)
+    except Exception:
+        return ""
+
+
+def _is_local_proxy_port_open(proxy_url: str, timeout_sec: float = 0.15) -> bool:
+    try:
+        parsed = urllib.parse.urlsplit(proxy_url)
+        host = (parsed.hostname or "").lower()
+        port = int(parsed.port or 0)
+        if port <= 0:
+            return False
+        if host not in ("127.0.0.1", "localhost", "::1"):
+            return True
+        target_host = "127.0.0.1" if host == "localhost" else host
+        with socket.create_connection((target_host, port), timeout=timeout_sec):
+            return True
+    except Exception:
+        return False
+
+
+def resolve_effective_outbound_proxy_env(
+    data_root: str = "",
+    base_env: dict | None = None,
+    system_proxy_override: str | None = None,
+    outbound_proxy_setting: str = "",
+) -> dict[str, object]:
+    """Seam 1 (Outbound Proxy Seam): dynamically resolve live proxy or fall back to direct/TUN."""
+    env_src = dict(base_env) if base_env is not None else dict(os.environ)
+    pref = str(outbound_proxy_setting or "").strip()
+    if not pref and data_root:
+        settings_path = os.path.join(data_root, "settings.json")
+        if os.path.isfile(settings_path):
+            try:
+                with open(settings_path, "r", encoding="utf-8-sig") as fh:
+                    s_doc = json.load(fh)
+                if isinstance(s_doc, dict):
+                    pref = str(s_doc.get("outbound_proxy") or "").strip()
+            except Exception:
+                pref = ""
+    if not pref:
+        pref = "auto"
+
+    existing_no_proxy = str(env_src.get("NO_PROXY") or env_src.get("no_proxy") or "").strip()
+    merged_tokens: list[str] = []
+    for raw_tok in ([t.strip() for t in existing_no_proxy.split(",") if t.strip()] + list(_DEFAULT_NO_PROXY_TOKENS)):
+        if raw_tok and raw_tok not in merged_tokens:
+            merged_tokens.append(raw_tok)
+    no_proxy_str = ",".join(merged_tokens)
+
+    if pref.lower() in ("direct", "none", "off"):
+        return {
+            "Mode": "direct",
+            "ProxyUrl": "",
+            "NoProxy": no_proxy_str,
+            "Source": "settings_direct",
+            "Env": {
+                "HTTP_PROXY": "",
+                "HTTPS_PROXY": "",
+                "ALL_PROXY": "",
+                "http_proxy": "",
+                "https_proxy": "",
+                "all_proxy": "",
+                "NO_PROXY": no_proxy_str,
+                "no_proxy": no_proxy_str,
+            },
+        }
+
+    candidates: list[tuple[str, str]] = []
+    if pref.lower() != "auto":
+        norm_pref = _normalize_proxy_url(pref)
+        if norm_pref:
+            candidates.append(("settings_custom", norm_pref))
+
+    sys_proxy = (
+        _normalize_proxy_url(system_proxy_override)
+        if system_proxy_override is not None
+        else _get_windows_system_proxy_url()
+    )
+    if sys_proxy:
+        candidates.append(("system_proxy", sys_proxy))
+
+    for env_key in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"):
+        norm_env = _normalize_proxy_url(env_src.get(env_key, ""))
+        if norm_env:
+            candidates.append((f"env:{env_key}", norm_env))
+
+    chosen_url = ""
+    chosen_src = "direct_no_proxy"
+    seen_urls: set[str] = set()
+    for src_name, cand_url in candidates:
+        if cand_url in seen_urls:
+            continue
+        seen_urls.add(cand_url)
+        if _is_local_proxy_port_open(cand_url):
+            chosen_url = cand_url
+            chosen_src = src_name
+            break
+
+    if not chosen_url and base_env is None and pref.lower() == "auto":
+        for fb_url in ("http://127.0.0.1:7897", "http://127.0.0.1:7898", "http://127.0.0.1:7890"):
+            if fb_url in seen_urls:
+                continue
+            if _is_local_proxy_port_open(fb_url):
+                chosen_url = fb_url
+                chosen_src = f"local_port_scan:{fb_url}"
+                break
+
+    if chosen_url:
+        return {
+            "Mode": "proxy",
+            "ProxyUrl": chosen_url,
+            "NoProxy": no_proxy_str,
+            "Source": chosen_src,
+            "Env": {
+                "HTTP_PROXY": chosen_url,
+                "HTTPS_PROXY": chosen_url,
+                "ALL_PROXY": chosen_url,
+                "http_proxy": chosen_url,
+                "https_proxy": chosen_url,
+                "all_proxy": chosen_url,
+                "NO_PROXY": no_proxy_str,
+                "no_proxy": no_proxy_str,
+            },
+        }
+
+    mode_val = "direct_fallback" if seen_urls else "direct"
+    src_val = "dead_local_proxy_fallback" if seen_urls else "direct_no_proxy"
+    return {
+        "Mode": mode_val,
+        "ProxyUrl": "",
+        "NoProxy": no_proxy_str,
+        "Source": src_val,
+        "Env": {
+            "HTTP_PROXY": "",
+            "HTTPS_PROXY": "",
+            "ALL_PROXY": "",
+            "http_proxy": "",
+            "https_proxy": "",
+            "all_proxy": "",
+            "NO_PROXY": no_proxy_str,
+            "no_proxy": no_proxy_str,
+        },
+    }
+
+
+def _is_pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        try:
+            import ctypes
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            STILL_ACTIVE = 259
+            handle = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
+            if not handle:
+                return False
+            try:
+                exit_code = ctypes.c_ulong()
+                if ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                    return int(exit_code.value) == STILL_ACTIVE
+                return True
+            finally:
+                ctypes.windll.kernel32.CloseHandle(handle)
+        except Exception:
+            return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except Exception:
+        return False
+
+
+def _is_public_edge_ipv4(ip_str: str) -> bool:
+    """Strictly accept public IPv4 addresses; reject loopback, RFC1918, CGNAT/Tailscale, Fake-IP, link-local."""
+    try:
+        addr = ipaddress.IPv4Address(str(ip_str or "").strip())
+    except Exception:
+        return False
+    for net in _NON_PUBLIC_IPV4_NETWORKS:
+        if addr in net:
+            return False
+    return True
+
+
+def _fetch_doh_json(doh_url: str, timeout_sec: float, openers: list) -> dict | None:
+    headers = {
+        "Accept": "application/dns-json",
+        "User-Agent": "RelayStudio-EdgeProbe/1.0",
+    }
+    for opener in openers:
+        req = urllib.request.Request(doh_url, method="GET", headers=headers)
+        try:
+            with opener.open(req, timeout=timeout_sec) as resp:
+                if int(resp.status) == 200:
+                    doc = json.loads(resp.read().decode("utf-8", errors="replace"))
+                    if isinstance(doc, dict):
+                        return doc
+        except Exception:
+            continue
+    return None
+
+
+def _resolve_public_edge_ipv4s(hostname: str, timeout_sec: float = 2.0, data_root: str = "") -> list[str]:
+    """Resolve public edge IPv4s via DoH (bypassing OS MagicDNS 100.x hairpin and Clash Fake-IP)."""
+    host = str(hostname or "").strip().strip("[]").lower()
+    if not host:
+        return []
+    if host == "localhost":
+        return ["127.0.0.1"]
+    try:
+        lit_ip = ipaddress.IPv4Address(host)
+        if lit_ip.is_loopback:
+            return [str(lit_ip)]
+        return [str(lit_ip)] if _is_public_edge_ipv4(str(lit_ip)) else []
+    except Exception:
+        pass
+
+    now_ts = time.time()
+    with _PUBLIC_DOH_LOCK:
+        cached = _PUBLIC_DOH_CACHE.get(host)
+        if cached and cached[0] > now_ts and cached[1]:
+            return list(cached[1])
+
+    openers = []
+    try:
+        proxy_res = resolve_effective_outbound_proxy_env(data_root=data_root)
+        proxy_url = str(proxy_res.get("ProxyUrl") or "").strip()
+        if proxy_url:
+            openers.append(urllib.request.build_opener(urllib.request.ProxyHandler({"https": proxy_url, "http": proxy_url})))
+    except Exception:
+        pass
+    openers.append(_UPSTREAM_OPENER)
+
+    q_host = urllib.parse.quote(host)
+    doh_endpoints = (
+        f"https://dns.google/resolve?name={q_host}&type=A",
+        f"https://cloudflare-dns.com/dns-query?name={q_host}&type=A",
+    )
+    for doh_url in doh_endpoints:
+        doc = _fetch_doh_json(doh_url, timeout_sec=max(0.5, float(timeout_sec)), openers=openers)
+        if not isinstance(doc, dict):
+            continue
+        answers = doc.get("Answer")
+        if not isinstance(answers, list):
+            continue
+        ips: list[str] = []
+        for ans in answers:
+            if not isinstance(ans, dict) or int(ans.get("type") or 0) != 1:
+                continue
+            cand = str(ans.get("data") or "").strip()
+            if _is_public_edge_ipv4(cand) and cand not in ips:
+                ips.append(cand)
+        if ips:
+            with _PUBLIC_DOH_LOCK:
+                _PUBLIC_DOH_CACHE[host] = (time.time() + _PUBLIC_DOH_TTL_SEC, list(ips))
+            return ips
+    return []
+
+
+def _probe_public_mcp_edge_health(
+    url: str,
+    timeout_sec: float = 8.0,
+    slow_threshold_ms: int = 2500,
+    data_root: str = "",
+) -> dict:
+    """Real Public-Edge SNI Health Probe bypassing OS MagicDNS local 100.x hairpin."""
+    if callable(_PUBLIC_EDGE_PROBE_IMPL):
+        return _PUBLIC_EDGE_PROBE_IMPL(
+            url,
+            timeout_sec=timeout_sec,
+            slow_threshold_ms=slow_threshold_ms,
+            data_root=data_root,
+        )
+
+    clean_url = str(url or "").strip()
+    if not clean_url:
+        return {"ok": False, "phase": "Offline", "rtt_ms": 0, "ingress_ip": "", "reason": "empty_url"}
+
+    try:
+        parsed = urllib.parse.urlsplit(clean_url)
+        scheme = (parsed.scheme or "https").lower()
+        host = (parsed.hostname or "").strip()
+        port = int(parsed.port or (443 if scheme == "https" else 80))
+    except Exception:
+        return {"ok": False, "phase": "Offline", "rtt_ms": 0, "ingress_ip": "", "reason": "invalid_url"}
+
+    if not host:
+        return {"ok": False, "phase": "Offline", "rtt_ms": 0, "ingress_ip": "", "reason": "invalid_url"}
+
+    doh_timeout = min(3.0, max(1.0, float(timeout_sec) * 0.5))
+    ips = _resolve_public_edge_ipv4s(host, timeout_sec=doh_timeout, data_root=data_root)
+    if not ips:
+        return {"ok": False, "phase": "Offline", "rtt_ms": 0, "ingress_ip": "", "reason": "doh_unresolved"}
+
+    host_hdr = host if (scheme == "https" and port == 443) or (scheme == "http" and port == 80) else f"{host}:{port}"
+    req_bytes = (
+        f"GET /.well-known/oauth-protected-resource HTTP/1.1\r\n"
+        f"Host: {host_hdr}\r\n"
+        f"User-Agent: RelayStudio-EdgeProbe/1.0\r\n"
+        f"Connection: close\r\n\r\n"
+    ).encode("ascii", errors="ignore")
+
+    last_reason = "edge_unreachable"
+    for ip in ips[:2]:
+        t0 = time.perf_counter()
+        deadline = t0 + float(timeout_sec)
+        raw_sock = None
+        conn_sock = None
+        try:
+            rem = max(0.1, deadline - time.perf_counter())
+            raw_sock = socket.create_connection((ip, port), timeout=rem)
+            if scheme == "https":
+                ssl_ctx = ssl.create_default_context()
+                rem = max(0.1, deadline - time.perf_counter())
+                raw_sock.settimeout(rem)
+                conn_sock = ssl_ctx.wrap_socket(raw_sock, server_hostname=host)
+            else:
+                conn_sock = raw_sock
+
+            rem = max(0.1, deadline - time.perf_counter())
+            conn_sock.settimeout(rem)
+            conn_sock.sendall(req_bytes)
+
+            buf = bytearray()
+            while b"\n" not in buf and len(buf) < 1024:
+                rem = deadline - time.perf_counter()
+                if rem <= 0:
+                    raise TimeoutError("edge_probe_read_timeout")
+                conn_sock.settimeout(max(0.05, rem))
+                chunk = conn_sock.recv(512)
+                if not chunk:
+                    break
+                buf.extend(chunk)
+
+            rtt_ms = max(0, int((time.perf_counter() - t0) * 1000))
+            status_line = bytes(buf).splitlines()[0].decode("iso-8859-1", errors="replace") if buf else ""
+            parts = status_line.split()
+            status_code = int(parts[1]) if len(parts) >= 2 and parts[0].startswith("HTTP/") and parts[1].isdigit() else 0
+            if status_code in (200, 401, 405):
+                phase = "Online" if rtt_ms <= int(slow_threshold_ms) else "Degraded"
+                return {
+                    "ok": True,
+                    "phase": phase,
+                    "rtt_ms": rtt_ms,
+                    "ingress_ip": ip,
+                    "status_code": status_code,
+                }
+            last_reason = f"http_{status_code}" if status_code else "empty_response"
+        except Exception as exc:
+            last_reason = type(exc).__name__
+        finally:
+            if conn_sock is not None:
+                try:
+                    conn_sock.close()
+                except Exception:
+                    pass
+            elif raw_sock is not None:
+                try:
+                    raw_sock.close()
+                except Exception:
+                    pass
+
+    return {"ok": False, "phase": "Offline", "rtt_ms": 0, "ingress_ip": "", "reason": last_reason}
+
+
+def _probe_local_shieldz_healthy(port: int, timeout_sec: float = 1.2) -> bool:
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{int(port)}/shieldz",
+        method="GET",
+        headers={"User-Agent": "RelayStudio-Guardian/1.0"},
+    )
+    try:
+        with _UPSTREAM_OPENER.open(req, timeout=timeout_sec) as resp:
+            return int(resp.status) == 200
+    except Exception:
+        return False
+
+
+def _probe_public_mcp_url_reachable(url: str, timeout_sec: float = 3.5, data_root: str = "") -> bool:
+    clean_url = str(url or "").strip()
+    if not clean_url:
+        return False
+    if clean_url.startswith(("http://127.0.0.1", "http://localhost", "http://[::1]")):
+        try:
+            req = urllib.request.Request(clean_url, method="GET", headers={"User-Agent": "RelayStudio-Guardian/1.0"})
+            with _UPSTREAM_OPENER.open(req, timeout=timeout_sec) as resp:
+                return int(resp.status) in (200, 401, 405)
+        except urllib.error.HTTPError as err:
+            return int(err.code) in (200, 401, 405)
+        except Exception:
+            return False
+    res = _probe_public_mcp_edge_health(clean_url, timeout_sec=timeout_sec, data_root=data_root)
+    return bool(res.get("ok"))
+
+
+def _spawn_cloudflared_quick_tunnel(
+    data_root: str,
+    listen_port: int = 8766,
+    profile_id: str = "",
+    fallback_from: str = "",
+    write_state: bool = True,
+) -> dict:
+    repo_root = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        os.path.join(repo_root, "bin", "cloudflared.exe"),
+        os.path.join(repo_root, "runtime", "cloudflared.exe"),
+        shutil.which("cloudflared.exe") or "",
+        shutil.which("cloudflared") or "",
+        os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "cloudflared", "cloudflared.exe"),
+        os.path.join(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"), "cloudflared", "cloudflared.exe"),
+    ]
+    cf_bin = next((c for c in candidates if c and os.path.isfile(c)), "")
+    if not cf_bin:
+        return {"ok": False, "error": "cloudflared_not_found"}
+
+    os.makedirs(data_root, exist_ok=True)
+    log_path = os.path.join(data_root, "public-mcp-tunnel.log")
+    state_file = os.path.join(data_root, "public-mcp-tunnel.json")
+    try:
+        with open(log_path, "w", encoding="utf-8") as fh:
+            fh.write("")
+    except Exception:
+        pass
+
+    proxy_res = resolve_effective_outbound_proxy_env(data_root=data_root)
+    child_env = dict(os.environ)
+    for k, v in (proxy_res.get("Env") or {}).items():
+        if v:
+            child_env[k] = str(v)
+        else:
+            child_env.pop(k, None)
+
+    creationflags = 0x08000000 if os.name == "nt" else 0  # CREATE_NO_WINDOW
+    try:
+        proc = subprocess.Popen(
+            [
+                cf_bin,
+                "tunnel",
+                "--protocol",
+                "http2",
+                "--no-chunked-encoding",
+                "--url",
+                f"http://127.0.0.1:{listen_port}",
+                "--no-autoupdate",
+                "--logfile",
+                log_path,
+            ],
+            env=child_env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=creationflags,
+        )
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+    matched_base = ""
+    deadline = time.time() + 12.0
+    url_pat = re.compile(r"https://[a-zA-Z0-9-]+\.trycloudflare\.com")
+    while time.time() < deadline:
+        if proc.poll() is not None:
+            break
+        if os.path.isfile(log_path):
+            try:
+                with open(log_path, "r", encoding="utf-8", errors="ignore") as fh:
+                    m = url_pat.search(fh.read())
+                    if m:
+                        matched_base = m.group(0)
+                        break
+            except Exception:
+                pass
+        time.sleep(0.25)
+
+    if not matched_base:
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+        return {"ok": False, "error": "cloudflared_url_timeout"}
+
+    mcp_url = f"{matched_base.rstrip('/')}/mcp"
+    start_ticks = _get_process_start_ticks(int(proc.pid))
+    state_payload = _build_public_tunnel_telemetry_payload(
+        {
+            "Mode": "cloudflared_quick",
+            "ProcessId": int(proc.pid),
+            "StartTicks": start_ticks,
+            "FixedUrl": "",
+            "ClientPath": cf_bin,
+            "FallbackFrom": str(fallback_from or ""),
+            "Port": int(listen_port),
+            "ProfileId": str(profile_id or ""),
+        },
+        health_phase="Online",
+        rtt_ms=0,
+        ingress_ip="",
+        discovered_url=mcp_url,
+    )
+    if write_state:
+        _write_public_tunnel_state_atomic(state_file, state_payload)
+    return {
+        "ok": True,
+        "url": mcp_url,
+        "pid": int(proc.pid),
+        "start_ticks": start_ticks,
+        "client_path": cf_bin,
+        "mode": "cloudflared_quick",
+        "state_payload": state_payload,
+    }
+
+
+def _offline_backoff_seconds(reconnect_attempts: int, tripped: bool) -> float:
+    if tripped or reconnect_attempts >= 3:
+        return 180.0
+    if reconnect_attempts == 2:
+        return 60.0
+    if reconnect_attempts == 1:
+        return 30.0
+    return 20.0
+
+
+def _resolve_tailscale_exe_path(saved: dict) -> str:
+    explicit_ts = str(saved.get("TailscalePath") or "").strip()
+    if explicit_ts and os.path.isfile(explicit_ts):
+        return explicit_ts
+    candidates = [
+        shutil.which("tailscale.exe") or "",
+        shutil.which("tailscale") or "",
+        os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "Tailscale", "tailscale.exe"),
+        os.path.join(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"), "Tailscale", "tailscale.exe"),
+    ]
+    found = next((c for c in candidates if c and os.path.isfile(c)), "")
+    if found:
+        return found
+    return explicit_ts or "tailscale.exe"
+
+
+def _read_public_tunnel_state_dict(state_file: str) -> dict | None:
+    if not os.path.isfile(state_file):
+        return None
+    try:
+        with open(state_file, "r", encoding="utf-8-sig") as fh:
+            doc = json.load(fh)
+        return doc if isinstance(doc, dict) else None
+    except Exception:
+        return None
+
+
+def _guardian_check_public_tunnel(data_root: str, listen_port: int = 8766, force: bool = False) -> dict:
+    """Periodically check public MCP tunnel health in background without touching WPF UI thread."""
+    if not data_root:
+        return {"ok": False, "action": "no_data_root"}
+
+    state_file = os.path.join(data_root, "public-mcp-tunnel.json")
+    if not os.path.isfile(state_file):
+        with _PUBLIC_TUNNEL_GUARD_LOCK:
+            if _PUBLIC_TUNNEL_GUARD_STATE.get("session_sig") is not None:
+                _PUBLIC_TUNNEL_GUARD_STATE["session_sig"] = None
+                _PUBLIC_TUNNEL_GUARD_STATE["fail_streak"] = 0
+                _PUBLIC_TUNNEL_GUARD_STATE["degraded_streak"] = 0
+                _PUBLIC_TUNNEL_GUARD_STATE["reconnect_attempts"] = 0
+                _PUBLIC_TUNNEL_GUARD_STATE["tripped"] = False
+                _PUBLIC_TUNNEL_GUARD_STATE["next_check_ts"] = 0.0
+        return {"ok": True, "action": "no_state_file"}
+
+    # Non-blocking 0ms peek: if PowerShell UI currently holds public-mcp-tunnel.lock, yield immediately.
+    with _try_acquire_public_tunnel_file_lock(data_root) as lock_free:
+        if not lock_free:
+            return {"ok": True, "action": "lock_busy_yielded"}
+
+    saved = _read_public_tunnel_state_dict(state_file)
+    if saved is None:
+        return {"ok": True, "action": "read_error"}
+
+    session_sig = _compute_tunnel_session_sig(data_root, saved)
+    now_ts = time.time()
+    with _PUBLIC_TUNNEL_GUARD_LOCK:
+        if _PUBLIC_TUNNEL_GUARD_STATE.get("session_sig") != session_sig:
+            _PUBLIC_TUNNEL_GUARD_STATE["session_sig"] = session_sig
+            _PUBLIC_TUNNEL_GUARD_STATE["fail_streak"] = 0
+            _PUBLIC_TUNNEL_GUARD_STATE["degraded_streak"] = 0
+            _PUBLIC_TUNNEL_GUARD_STATE["reconnect_attempts"] = 0
+            _PUBLIC_TUNNEL_GUARD_STATE["tripped"] = False
+            _PUBLIC_TUNNEL_GUARD_STATE["next_check_ts"] = 0.0
+
+        next_ts = float(_PUBLIC_TUNNEL_GUARD_STATE.get("next_check_ts") or 0.0)
+        if not force and now_ts < next_ts:
+            return {"ok": True, "action": "throttled"}
+        _PUBLIC_TUNNEL_GUARD_STATE["last_check_ts"] = now_ts
+
+    mode = _canonical_public_tunnel_mode(saved)
+    fixed_url = str(saved.get("FixedUrl") or "").strip()
+    url = fixed_url or str(saved.get("Url") or "").strip()
+    pid = int(saved.get("ProcessId") or saved.get("Pid") or 0)
+    port = int(saved.get("Port") or listen_port or 8766)
+    profile_id = str(saved.get("ProfileId") or "").strip()
+    fallback_from = str(saved.get("FallbackFrom") or "").strip()
+
+    # Local Shield Busy Guard: never blame or restart the public tunnel if local :8766 is momentarily busy.
+    if not _probe_local_shieldz_healthy(port, timeout_sec=1.2):
+        with _PUBLIC_TUNNEL_GUARD_LOCK:
+            _PUBLIC_TUNNEL_GUARD_STATE["next_check_ts"] = time.time() + 15.0
+        return {"ok": True, "action": "local_shield_busy_skip_check", "url": url}
+
+    # Quick tunnel without discovered URL yet
+    if mode in ("cloudflared_quick", "") and not url and not fixed_url:
+        if pid > 0 and _is_pid_alive(pid):
+            log_path = os.path.join(data_root, "public-mcp-tunnel.log")
+            if os.path.isfile(log_path):
+                try:
+                    with open(log_path, "r", encoding="utf-8", errors="ignore") as fh:
+                        m = re.search(r"https://[a-zA-Z0-9-]+\.trycloudflare\.com", fh.read())
+                        if m:
+                            url = f"{m.group(0).rstrip('/')}/mcp"
+                except Exception:
+                    pass
+            if not url:
+                with _PUBLIC_TUNNEL_GUARD_LOCK:
+                    _PUBLIC_TUNNEL_GUARD_STATE["next_check_ts"] = time.time() + 15.0
+                return {"ok": True, "action": "cloudflared_alive", "pid": pid}
+        else:
+            with _PUBLIC_TUNNEL_GUARD_LOCK:
+                rec_attempts = int(_PUBLIC_TUNNEL_GUARD_STATE.get("reconnect_attempts") or 0)
+                is_tripped = bool(_PUBLIC_TUNNEL_GUARD_STATE.get("tripped"))
+            if is_tripped or rec_attempts >= 3:
+                with _PUBLIC_TUNNEL_GUARD_LOCK:
+                    _PUBLIC_TUNNEL_GUARD_STATE["tripped"] = True
+                    _PUBLIC_TUNNEL_GUARD_STATE["next_check_ts"] = time.time() + 180.0
+                return {"ok": False, "action": "circuit_breaker_tripped", "reconnect_attempts": rec_attempts}
+
+            respawn = _spawn_cloudflared_quick_tunnel(
+                data_root=data_root,
+                listen_port=port,
+                profile_id=profile_id,
+                fallback_from=fallback_from,
+                write_state=False,
+            )
+            with _try_acquire_public_tunnel_file_lock(data_root) as acquired:
+                if not acquired:
+                    if respawn.get("pid"):
+                        try:
+                            os.kill(int(respawn["pid"]), 9)
+                        except Exception:
+                            pass
+                    return {"ok": True, "action": "lock_busy_yielded"}
+                cur_saved = _read_public_tunnel_state_dict(state_file)
+                if cur_saved is None or _compute_tunnel_session_sig(data_root, cur_saved) != session_sig:
+                    return {"ok": True, "action": "manual_state_changed_yielded"}
+                with _PUBLIC_TUNNEL_GUARD_LOCK:
+                    rec_attempts = int(_PUBLIC_TUNNEL_GUARD_STATE.get("reconnect_attempts") or 0) + 1
+                    is_tripped = rec_attempts >= 3
+                    _PUBLIC_TUNNEL_GUARD_STATE["reconnect_attempts"] = rec_attempts
+                    _PUBLIC_TUNNEL_GUARD_STATE["tripped"] = is_tripped
+                    if respawn.get("ok") and isinstance(respawn.get("state_payload"), dict):
+                        new_payload = dict(cur_saved)
+                        new_payload.update(respawn["state_payload"])
+                        _write_public_tunnel_state_atomic(state_file, new_payload)
+                        _PUBLIC_TUNNEL_GUARD_STATE["session_sig"] = _compute_tunnel_session_sig(data_root, new_payload)
+                        _PUBLIC_TUNNEL_GUARD_STATE["fail_streak"] = 0
+                        _PUBLIC_TUNNEL_GUARD_STATE["degraded_streak"] = 0
+                        _PUBLIC_TUNNEL_GUARD_STATE["reconnect_attempts"] = 0
+                        _PUBLIC_TUNNEL_GUARD_STATE["tripped"] = False
+                        _PUBLIC_TUNNEL_GUARD_STATE["next_check_ts"] = time.time() + 60.0
+                    else:
+                        off_payload = _build_public_tunnel_telemetry_payload(cur_saved, "Offline")
+                        _write_public_tunnel_state_atomic(state_file, off_payload)
+                        _PUBLIC_TUNNEL_GUARD_STATE["session_sig"] = _compute_tunnel_session_sig(data_root, off_payload)
+                        _PUBLIC_TUNNEL_GUARD_STATE["next_check_ts"] = time.time() + _offline_backoff_seconds(rec_attempts, is_tripped)
+            return {"ok": bool(respawn.get("ok")), "action": "cloudflared_respawned", "detail": respawn}
+
+    if not url:
+        return {"ok": True, "action": "noop"}
+
+    process_dead = mode in ("cloudflared_quick", "cloudflared_named") and pid > 0 and not _is_pid_alive(pid)
+    if process_dead:
+        probe_res = {"ok": False, "phase": "Offline", "rtt_ms": 0, "ingress_ip": "", "reason": "process_dead"}
+    else:
+        # Network/DoH/TLS edge probe MUST run outside public-mcp-tunnel.lock!
+        probe_res = _probe_public_mcp_edge_health(url, timeout_sec=8.0, data_root=data_root)
+
+    probe_phase = str(probe_res.get("phase") or ("Online" if probe_res.get("ok") else "Offline"))
+    rtt_ms = int(probe_res.get("rtt_ms") or 0)
+    ingress_ip = str(probe_res.get("ingress_ip") or "")
+
+    # Branch 1: Online
+    if probe_phase == "Online":
+        with _PUBLIC_TUNNEL_GUARD_LOCK:
+            _PUBLIC_TUNNEL_GUARD_STATE["fail_streak"] = 0
+            _PUBLIC_TUNNEL_GUARD_STATE["degraded_streak"] = 0
+            _PUBLIC_TUNNEL_GUARD_STATE["reconnect_attempts"] = 0
+            _PUBLIC_TUNNEL_GUARD_STATE["tripped"] = False
+            _PUBLIC_TUNNEL_GUARD_STATE["next_check_ts"] = time.time() + 60.0
+
+        already_steady_online = (
+            saved.get("HealthPhase") == "Online"
+            and saved.get("Status") == "在线"
+            and saved.get("Running") is True
+            and bool(str(saved.get("Url") or "").strip())
+        )
+        wrote_state = False
+        if not already_steady_online:
+            with _try_acquire_public_tunnel_file_lock(data_root) as acquired:
+                if not acquired:
+                    return {"ok": True, "action": "lock_busy_yielded"}
+                cur_saved = _read_public_tunnel_state_dict(state_file)
+                if cur_saved is None or _compute_tunnel_session_sig(data_root, cur_saved) != session_sig:
+                    return {"ok": True, "action": "manual_state_changed_yielded"}
+                merged = _build_public_tunnel_telemetry_payload(
+                    cur_saved,
+                    health_phase="Online",
+                    rtt_ms=rtt_ms,
+                    ingress_ip=ingress_ip,
+                    discovered_url=url if (mode == "cloudflared_quick" and not fixed_url) else "",
+                )
+                wrote_state = _write_public_tunnel_state_atomic(state_file, merged)
+                with _PUBLIC_TUNNEL_GUARD_LOCK:
+                    _PUBLIC_TUNNEL_GUARD_STATE["session_sig"] = _compute_tunnel_session_sig(data_root, merged)
+        return {
+            "ok": True,
+            "action": "healthy_online",
+            "phase": "Online",
+            "url": url,
+            "rtt_ms": rtt_ms,
+            "ingress_ip": ingress_ip,
+            "wrote_state": wrote_state,
+        }
+
+    # Branch 2: Degraded (reachable over public edge, but slow > 2500ms; NEVER restart tunnel!)
+    if probe_phase == "Degraded":
+        with _PUBLIC_TUNNEL_GUARD_LOCK:
+            _PUBLIC_TUNNEL_GUARD_STATE["fail_streak"] = 0
+            deg_streak = int(_PUBLIC_TUNNEL_GUARD_STATE.get("degraded_streak") or 0) + 1
+            _PUBLIC_TUNNEL_GUARD_STATE["degraded_streak"] = deg_streak
+            _PUBLIC_TUNNEL_GUARD_STATE["reconnect_attempts"] = 0
+            _PUBLIC_TUNNEL_GUARD_STATE["tripped"] = False
+            _PUBLIC_TUNNEL_GUARD_STATE["next_check_ts"] = time.time() + 45.0
+
+        was_offline = saved.get("HealthPhase") == "Offline" or saved.get("Running") is False
+        if deg_streak < 2 and not was_offline:
+            return {
+                "ok": True,
+                "action": "degraded_debounce_hold",
+                "phase": "Degraded",
+                "degraded_streak": deg_streak,
+                "rtt_ms": rtt_ms,
+                "url": url,
+            }
+
+        already_steady_degraded = (
+            saved.get("HealthPhase") == "Degraded"
+            and saved.get("Status") == "偏慢"
+            and saved.get("Running") is True
+            and bool(str(saved.get("Url") or "").strip())
+        )
+        wrote_state = False
+        if not already_steady_degraded:
+            with _try_acquire_public_tunnel_file_lock(data_root) as acquired:
+                if not acquired:
+                    return {"ok": True, "action": "lock_busy_yielded"}
+                cur_saved = _read_public_tunnel_state_dict(state_file)
+                if cur_saved is None or _compute_tunnel_session_sig(data_root, cur_saved) != session_sig:
+                    return {"ok": True, "action": "manual_state_changed_yielded"}
+                merged = _build_public_tunnel_telemetry_payload(
+                    cur_saved,
+                    health_phase="Degraded",
+                    rtt_ms=rtt_ms,
+                    ingress_ip=ingress_ip,
+                    discovered_url=url if (mode == "cloudflared_quick" and not fixed_url) else "",
+                )
+                wrote_state = _write_public_tunnel_state_atomic(state_file, merged)
+                with _PUBLIC_TUNNEL_GUARD_LOCK:
+                    _PUBLIC_TUNNEL_GUARD_STATE["session_sig"] = _compute_tunnel_session_sig(data_root, merged)
+        return {
+            "ok": True,
+            "action": "degraded_persisted",
+            "phase": "Degraded",
+            "degraded_streak": deg_streak,
+            "rtt_ms": rtt_ms,
+            "url": url,
+            "wrote_state": wrote_state,
+        }
+
+    # Branch 3: Offline (edge unreachable or local cloudflared process dead)
+    with _PUBLIC_TUNNEL_GUARD_LOCK:
+        _PUBLIC_TUNNEL_GUARD_STATE["degraded_streak"] = 0
+        streak = int(_PUBLIC_TUNNEL_GUARD_STATE.get("fail_streak") or 0) + 1
+        _PUBLIC_TUNNEL_GUARD_STATE["fail_streak"] = streak
+        rec_attempts = int(_PUBLIC_TUNNEL_GUARD_STATE.get("reconnect_attempts") or 0)
+        is_tripped = bool(_PUBLIC_TUNNEL_GUARD_STATE.get("tripped"))
+
+    # 2-Strike Debounce: on 1st failure (when process is still alive / tailscale), hold current file state and re-check in 15s!
+    if streak == 1 and not process_dead:
+        with _PUBLIC_TUNNEL_GUARD_LOCK:
+            _PUBLIC_TUNNEL_GUARD_STATE["next_check_ts"] = time.time() + 15.0
+        return {
+            "ok": False,
+            "action": "debounce_hold",
+            "phase": "Offline",
+            "fail_streak": streak,
+            "url": url,
+        }
+
+    # Confirmed Offline (fail_streak >= 2 or process_dead): persist Offline (preserving FixedUrl!) and apply 3-strike circuit breaker.
+    ts_funnel_spawn_ok = False
+    need_quick_respawn = False
+
+    with _try_acquire_public_tunnel_file_lock(data_root) as acquired:
+        if not acquired:
+            return {"ok": True, "action": "lock_busy_yielded"}
+        cur_saved = _read_public_tunnel_state_dict(state_file)
+        if cur_saved is None or _compute_tunnel_session_sig(data_root, cur_saved) != session_sig:
+            return {"ok": True, "action": "manual_state_changed_yielded"}
+
+        already_offline = (
+            cur_saved.get("HealthPhase") == "Offline"
+            and cur_saved.get("Status") == "离线"
+            and cur_saved.get("Running") is False
+        )
+        if not already_offline:
+            offline_payload = _build_public_tunnel_telemetry_payload(
+                cur_saved,
+                health_phase="Offline",
+                discovered_url=url if (mode == "cloudflared_quick" and not fixed_url) else "",
+            )
+            _write_public_tunnel_state_atomic(state_file, offline_payload)
+            cur_saved = offline_payload
+            session_sig = _compute_tunnel_session_sig(data_root, cur_saved)
+            with _PUBLIC_TUNNEL_GUARD_LOCK:
+                _PUBLIC_TUNNEL_GUARD_STATE["session_sig"] = session_sig
+
+        if rec_attempts < 3 and not is_tripped:
+            rec_attempts += 1
+            if rec_attempts >= 3:
+                is_tripped = True
+            with _PUBLIC_TUNNEL_GUARD_LOCK:
+                _PUBLIC_TUNNEL_GUARD_STATE["reconnect_attempts"] = rec_attempts
+                _PUBLIC_TUNNEL_GUARD_STATE["tripped"] = is_tripped
+
+            if mode in ("tailscale", "tailscale_funnel"):
+                ts_exe = _resolve_tailscale_exe_path(cur_saved)
+                creationflags = 0x08000000 if os.name == "nt" else 0  # CREATE_NO_WINDOW
+                try:
+                    cp = subprocess.run(
+                        [ts_exe, "funnel", "--bg", str(port)],
+                        stdin=subprocess.DEVNULL,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        timeout=4.0,
+                        creationflags=creationflags,
+                        check=False,
+                    )
+                    ts_funnel_spawn_ok = cp.returncode == 0
+                except Exception:
+                    ts_funnel_spawn_ok = False
+            elif mode == "cloudflared_quick" and not str(cur_saved.get("FixedUrl") or "").strip():
+                if pid > 0 and _is_pid_alive(pid):
+                    try:
+                        if os.name == "nt":
+                            subprocess.run(
+                                ["taskkill", "/F", "/PID", str(pid)],
+                                stdin=subprocess.DEVNULL,
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL,
+                                timeout=2.0,
+                                creationflags=0x08000000,
+                                check=False,
+                            )
+                        else:
+                            os.kill(pid, 15)
+                    except Exception:
+                        pass
+                need_quick_respawn = True
+
+    # Re-probe Tailscale Funnel OUTSIDE public-mcp-tunnel.lock if `tailscale funnel --bg` succeeded!
+    if ts_funnel_spawn_ok:
+        reprobe = _probe_public_mcp_edge_health(url, timeout_sec=8.0, data_root=data_root)
+        if reprobe.get("ok"):
+            rec_phase = str(reprobe.get("phase") or "Online")
+            rec_rtt = int(reprobe.get("rtt_ms") or 0)
+            rec_ip = str(reprobe.get("ingress_ip") or "")
+            with _try_acquire_public_tunnel_file_lock(data_root) as acquired2:
+                if not acquired2:
+                    return {"ok": True, "action": "lock_busy_yielded"}
+                cur_saved2 = _read_public_tunnel_state_dict(state_file)
+                if cur_saved2 is None or _compute_tunnel_session_sig(data_root, cur_saved2) != session_sig:
+                    return {"ok": True, "action": "manual_state_changed_yielded"}
+                rec_payload = _build_public_tunnel_telemetry_payload(
+                    cur_saved2,
+                    health_phase=rec_phase,
+                    rtt_ms=rec_rtt,
+                    ingress_ip=rec_ip,
+                )
+                _write_public_tunnel_state_atomic(state_file, rec_payload)
+                with _PUBLIC_TUNNEL_GUARD_LOCK:
+                    _PUBLIC_TUNNEL_GUARD_STATE["session_sig"] = _compute_tunnel_session_sig(data_root, rec_payload)
+                    _PUBLIC_TUNNEL_GUARD_STATE["fail_streak"] = 0
+                    _PUBLIC_TUNNEL_GUARD_STATE["degraded_streak"] = 1 if rec_phase == "Degraded" else 0
+                    _PUBLIC_TUNNEL_GUARD_STATE["reconnect_attempts"] = 0
+                    _PUBLIC_TUNNEL_GUARD_STATE["tripped"] = False
+                    _PUBLIC_TUNNEL_GUARD_STATE["next_check_ts"] = time.time() + (60.0 if rec_phase == "Online" else 45.0)
+            return {
+                "ok": True,
+                "action": "tailscale_reconnected",
+                "phase": rec_phase,
+                "url": url,
+                "rtt_ms": rec_rtt,
+                "ingress_ip": rec_ip,
+            }
+
+    if need_quick_respawn:
+        respawn = _spawn_cloudflared_quick_tunnel(
+            data_root=data_root,
+            listen_port=port,
+            profile_id=profile_id,
+            fallback_from=fallback_from,
+            write_state=False,
+        )
+        if respawn.get("ok") and isinstance(respawn.get("state_payload"), dict):
+            with _try_acquire_public_tunnel_file_lock(data_root) as acquired2:
+                if not acquired2:
+                    if respawn.get("pid"):
+                        try:
+                            os.kill(int(respawn["pid"]), 9)
+                        except Exception:
+                            pass
+                    return {"ok": True, "action": "lock_busy_yielded"}
+                cur_saved2 = _read_public_tunnel_state_dict(state_file)
+                if cur_saved2 is None or _compute_tunnel_session_sig(data_root, cur_saved2) != session_sig:
+                    return {"ok": True, "action": "manual_state_changed_yielded"}
+                new_payload = dict(cur_saved2)
+                new_payload.update(respawn["state_payload"])
+                _write_public_tunnel_state_atomic(state_file, new_payload)
+                with _PUBLIC_TUNNEL_GUARD_LOCK:
+                    _PUBLIC_TUNNEL_GUARD_STATE["session_sig"] = _compute_tunnel_session_sig(data_root, new_payload)
+                    _PUBLIC_TUNNEL_GUARD_STATE["fail_streak"] = 0
+                    _PUBLIC_TUNNEL_GUARD_STATE["degraded_streak"] = 0
+                    _PUBLIC_TUNNEL_GUARD_STATE["reconnect_attempts"] = 0
+                    _PUBLIC_TUNNEL_GUARD_STATE["tripped"] = False
+                    _PUBLIC_TUNNEL_GUARD_STATE["next_check_ts"] = time.time() + 60.0
+            return {"ok": True, "action": "cloudflared_respawned", "detail": respawn}
+
+    with _PUBLIC_TUNNEL_GUARD_LOCK:
+        _PUBLIC_TUNNEL_GUARD_STATE["next_check_ts"] = time.time() + _offline_backoff_seconds(rec_attempts, is_tripped)
+
+    return {
+        "ok": False,
+        "action": "circuit_breaker_tripped" if is_tripped else "offline_persisted",
+        "phase": "Offline",
+        "url": url,
+        "fail_streak": streak,
+        "reconnect_attempts": rec_attempts,
+        "tripped": is_tripped,
+    }
+
+
+def _trigger_public_tunnel_guardian_async(data_root: str, listen_port: int = 8766) -> bool:
+    """Spawn a non-blocking daemon worker for public tunnel checks so run_guardian_tick never stalls."""
+    if not data_root or _PUBLIC_TUNNEL_WORKER_LOCK.locked():
+        return False
+
+    def _worker() -> None:
+        if not _PUBLIC_TUNNEL_WORKER_LOCK.acquire(blocking=False):
+            return
+        try:
+            _guardian_check_public_tunnel(data_root=data_root, listen_port=listen_port)
+        except Exception:
+            pass
+        finally:
+            _PUBLIC_TUNNEL_WORKER_LOCK.release()
+
+    threading.Thread(target=_worker, name="PublicTunnelGuardianWorker", daemon=True).start()
+    return True
+
+
 def _run_host_maintenance(wb_path: str, tasks_root: str) -> None:
     """Spec v4.1 Q7: cold-start closed hosts (minimized, no focus) and pump the Desktop CDP bridge."""
     if not _HOST_SIDE_EFFECTS_ENABLED:
         return
     try:
         cold_start_pending_hosts(wb_path, tasks_root=tasks_root)
+    except Exception:
+        pass
+    try:
+        if wb_path:
+            data_root = os.path.dirname(os.path.dirname(os.path.abspath(wb_path)))
+            _trigger_public_tunnel_guardian_async(data_root=data_root)
     except Exception:
         pass
     if not DesktopAppBridge._tick_lock.locked():
@@ -8449,6 +9856,14 @@ def _open_session_web_tab(wb_path: str, payload: dict) -> dict:
 
 
 def handle_studio_action(data_root: str, tasks_root: str, wb_path: str, payload: dict) -> dict:
+    res = _handle_studio_action_impl(data_root, tasks_root, wb_path, payload)
+    if isinstance(res, dict) and res.get("ok"):
+        _bump_studio_mutation_seq()
+    notify_studio_sse()
+    return res
+
+
+def _handle_studio_action_impl(data_root: str, tasks_root: str, wb_path: str, payload: dict) -> dict:
     action = str(payload.get("action") or "").strip().lower()
     if action == "set_composer_config":
         action = "set_task_composer_config"
@@ -8569,10 +9984,16 @@ def handle_studio_action(data_root: str, tasks_root: str, wb_path: str, payload:
                 aliases_map[session_key] = clean_title
             else:
                 aliases_map.pop(session_key, None)
+            prev_alias_mtime_ns = _file_stat_sig(alias_path)[0]
             tmp_alias = f"{alias_path}.{threading.get_ident()}.tmp"
             with open(tmp_alias, "w", encoding="utf-8") as fh:
                 json.dump({"schema_version": 1, "aliases": aliases_map}, fh, ensure_ascii=False, indent=2)
             os.replace(tmp_alias, alias_path)
+            if prev_alias_mtime_ns > 0 and _file_stat_sig(alias_path)[0] == prev_alias_mtime_ns:
+                try:
+                    os.utime(alias_path, ns=(prev_alias_mtime_ns + 1000, prev_alias_mtime_ns + 1000))
+                except OSError:
+                    pass
         return {"ok": True, "action": "set_alias", "session_key": session_key, "title": clean_title}
 
     if action == "set_auto_wakeup":
@@ -9096,7 +10517,53 @@ _OAUTH_SHIM_KEY = hashlib.sha256(
     b"RelayStudio-OAuth21-Shim-v1-" + os.path.abspath(__file__).encode("utf-8")
 ).digest()
 _OAUTH_CLIENTS: dict[str, dict] = {}
+_OAUTH_CLIENTS_DISK_SIG: dict[str, tuple[int, int]] = {}
 _USED_AUTH_CODES: set[str] = set()
+
+
+def _load_oauth_clients_locked(data_root: str) -> None:
+    """Lazy-load persisted dynamic OAuth client registrations under _OAUTH_LOCK."""
+    if not data_root:
+        return
+    clients_path = os.path.join(os.path.abspath(data_root), "oauth-clients.json")
+    if not os.path.isfile(clients_path):
+        return
+    try:
+        st = os.stat(clients_path)
+        sig = (int(st.st_mtime_ns), int(st.st_size))
+        if _OAUTH_CLIENTS and _OAUTH_CLIENTS_DISK_SIG.get(clients_path) == sig:
+            return
+        with open(clients_path, "r", encoding="utf-8-sig") as fh:
+            loaded = json.load(fh)
+        if isinstance(loaded, dict):
+            for cid, rec in loaded.items():
+                if cid and isinstance(rec, dict):
+                    _OAUTH_CLIENTS[str(cid)] = rec
+        _OAUTH_CLIENTS_DISK_SIG[clients_path] = sig
+    except Exception:
+        pass
+
+
+def _save_oauth_clients_locked(data_root: str) -> None:
+    """Atomically persist _OAUTH_CLIENTS to data_root/oauth-clients.json under _OAUTH_LOCK."""
+    if not data_root:
+        return
+    abs_root = os.path.abspath(data_root)
+    clients_path = os.path.join(abs_root, "oauth-clients.json")
+    tmp_path = f"{clients_path}.tmp.{os.getpid()}.{uuid.uuid4().hex[:8]}"
+    try:
+        os.makedirs(abs_root, exist_ok=True)
+        with open(tmp_path, "w", encoding="utf-8") as fh:
+            json.dump(_OAUTH_CLIENTS, fh, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, clients_path)
+        st = os.stat(clients_path)
+        _OAUTH_CLIENTS_DISK_SIG[clients_path] = (int(st.st_mtime_ns), int(st.st_size))
+    except Exception:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass
 _OAUTH_SUPPORTED_SCOPES = ["mcp", "openid", "offline_access"]
 _OAUTH_PROTECTED_RESOURCE_PATHS = (
     "/.well-known/oauth-protected-resource",
@@ -9181,11 +10648,195 @@ def _is_allowed_oauth_redirect_uri(redirect_uri: str) -> bool:
     return False
 
 
+_HOP_BY_HOP_HEADERS = frozenset({
+    "connection",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailer",
+    "trailers",
+    "transfer-encoding",
+    "upgrade",
+})
+
+
+def _extract_hop_by_hop_set(headers) -> set[str]:
+    hop = set(_HOP_BY_HOP_HEADERS)
+    if not headers:
+        return hop
+    try:
+        conn_vals = headers.get_all("Connection") if hasattr(headers, "get_all") else [headers.get("Connection")]
+        for raw in (conn_vals or []):
+            if not raw:
+                continue
+            for tok in str(raw).split(","):
+                clean = tok.strip().lower()
+                if clean:
+                    hop.add(clean)
+    except Exception:
+        pass
+    return hop
+
+
+_FORBIDDEN_PUBLIC_TUNNEL_HEADERS = (
+    "X-Forwarded-For",
+    "X-Forwarded-Host",
+    "X-Forwarded-Proto",
+    "Tailscale-Funnel-Request",
+    "Cf-Connecting-Ip",
+    "Cf-Ray",
+    "Forwarded",
+)
+_LOOPBACK_PEER_IPS = frozenset({"127.0.0.1", "::1", "::ffff:127.0.0.1"})
+_LOOPBACK_HOST_NAMES = frozenset({"127.0.0.1", "localhost", "[::1]", "::1"})
+
+
+def _classify_control_plane_route(req_path: str) -> tuple[bool, bool]:
+    """Return (is_control_plane, require_studio_token) for local Studio & Web-Bridge routes."""
+    norm_p = re.sub(r"/+", "/", str(req_path or "/"))
+    if norm_p == "/studio" or norm_p.startswith("/studio/") or norm_p == "/__studio__" or norm_p.startswith("/__studio__/"):
+        return (True, True)
+    if norm_p == "/web-bridge" or norm_p.startswith("/web-bridge/"):
+        return (True, False)
+    return (False, False)
+
+
+def _extract_host_without_port(raw_host: str) -> str:
+    h = str(raw_host or "").strip()
+    if not h:
+        return ""
+    if h.startswith("["):
+        end_idx = h.find("]")
+        if end_idx == -1:
+            return h.lower()
+        rest = h[end_idx + 1 :]
+        if rest == "" or (rest.startswith(":") and rest[1:].isdigit()):
+            return h[: end_idx + 1].lower()
+        return h.lower()
+    if h.count(":") > 1:
+        return h.lower()
+    if ":" in h:
+        host_part, port_part = h.rsplit(":", 1)
+        if port_part == "" or port_part.isdigit():
+            return host_part.lower()
+    return h.lower()
+
+
+def _resolve_expected_studio_local_token(server) -> str:
+    srv_tok = str(getattr(server, "studio_local_token", "") or "").strip()
+    if srv_tok:
+        return srv_tok
+    env_tok = str(os.environ.get("RELAYSTUDIO_LOCAL_TOKEN", "") or "").strip()
+    if env_tok:
+        return env_tok
+    data_root = str(getattr(server, "data_root", "") or "").strip()
+    if not data_root:
+        return ""
+    tok_path = os.path.abspath(os.path.join(data_root, "studio-local.token"))
+    try:
+        st = os.stat(tok_path)
+    except OSError:
+        with _STUDIO_LOCAL_TOKEN_LOCK:
+            _STUDIO_LOCAL_TOKEN_CACHE.pop(tok_path, None)
+        return ""
+    mtime_ns = st.st_mtime_ns
+    fsize = st.st_size
+    with _STUDIO_LOCAL_TOKEN_LOCK:
+        cached = _STUDIO_LOCAL_TOKEN_CACHE.get(tok_path)
+        if cached is not None and cached[0] == mtime_ns and cached[1] == fsize:
+            return cached[2]
+    try:
+        with open(tok_path, "r", encoding="utf-8-sig") as fh:
+            disk_tok = fh.read().strip()
+    except OSError:
+        return ""
+    with _STUDIO_LOCAL_TOKEN_LOCK:
+        _STUDIO_LOCAL_TOKEN_CACHE[tok_path] = (mtime_ns, fsize, disk_tok)
+    return disk_tok
+
+
 class ShieldHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
+    timeout = 15
 
     def log_message(self, format, *args):
         return
+
+    def handle(self):
+        try:
+            super().handle()
+        except (ConnectionResetError, BrokenPipeError, TimeoutError, OSError):
+            self.close_connection = True
+
+    def _read_request_body(
+        self,
+        default: bytes | None = b"",
+        max_bytes: int = 16 * 1024 * 1024,
+        raise_on_error: bool = False,
+    ) -> bytes | None:
+        """Unified request body reader supporting both Content-Length and RFC 9112 §7.1 Transfer-Encoding: chunked."""
+        te_vals = self.headers.get_all("Transfer-Encoding") if hasattr(self.headers, "get_all") else [self.headers.get("Transfer-Encoding")]
+        te_combined = ",".join(str(v or "") for v in (te_vals or []) if v).lower()
+        is_chunked = "chunked" in [t.strip() for t in te_combined.split(",") if t.strip()]
+
+        try:
+            if is_chunked:
+                # RFC 9112 §6.3: When Transfer-Encoding is present, ignore/reject conflicting Content-Length and decode chunks.
+                chunks: list[bytes] = []
+                total_bytes = 0
+                while True:
+                    line = self.rfile.readline(65537)
+                    if not line or len(line) > 65536:
+                        raise ValueError("Malformed or truncated chunk size line")
+                    size_token = line.strip().split(b";", 1)[0].strip()
+                    if not size_token:
+                        raise ValueError("Empty chunk size token")
+                    try:
+                        chunk_size = int(size_token, 16)
+                    except ValueError as exc:
+                        raise ValueError("Invalid hex chunk size") from exc
+                    if chunk_size < 0 or (total_bytes + chunk_size) > max_bytes:
+                        raise ValueError(f"Chunked body exceeds max_bytes ({max_bytes})")
+                    if chunk_size == 0:
+                        # Consume optional trailer-section until terminating CRLF
+                        while True:
+                            tr_line = self.rfile.readline(65537)
+                            if not tr_line or tr_line in (b"\r\n", b"\n"):
+                                break
+                        break
+                    chunk_data = self.rfile.read(chunk_size)
+                    if len(chunk_data) != chunk_size:
+                        raise ValueError("Unexpected EOF inside chunk data")
+                    chunks.append(chunk_data)
+                    total_bytes += chunk_size
+                    crlf = self.rfile.readline(65537)
+                    if crlf not in (b"\r\n", b"\n"):
+                        raise ValueError("Missing CRLF after chunk data")
+                joined = b"".join(chunks)
+                if not joined and default is not None and default != b"":
+                    return default
+                return joined
+
+            raw_cl = str(self.headers.get("Content-Length") or "").strip()
+            if raw_cl:
+                content_length = int(raw_cl.split(",", 1)[0].strip())
+                if content_length < 0 or content_length > max_bytes:
+                    raise ValueError(f"Invalid Content-Length: {content_length}")
+                if content_length > 0:
+                    data = self.rfile.read(content_length)
+                    if len(data) != content_length:
+                        raise ValueError("Unexpected EOF reading Content-Length body")
+                    return data
+            return default
+        except Exception as exc:
+            self._force_close_connection = True
+            self.close_connection = True
+            if raise_on_error:
+                if isinstance(exc, ValueError):
+                    raise
+                raise ValueError(str(exc)) from exc
+            return default
 
     def _resolve_public_base_url(self) -> str:
         fwd_host = str(self.headers.get("X-Forwarded-Host") or "").split(",", 1)[0].strip()
@@ -9204,7 +10855,18 @@ class ShieldHandler(BaseHTTPRequestHandler):
         if not origin:
             self.send_header("Access-Control-Allow-Origin", "http://127.0.0.1")
         elif (
-            origin in ("https://chatgpt.com", "https://chat.openai.com", "https://gemini.google.com", "https://claude.ai", "app://-", "http://127.0.0.1", "http://localhost")
+            origin
+            in (
+                "https://chatgpt.com",
+                "https://chat.openai.com",
+                "https://gemini.google.com",
+                "https://claude.ai",
+                "app://-",
+                "http://127.0.0.1",
+                "http://localhost",
+                "https://studio.relaystudio.local",
+                "http://studio.relaystudio.local",
+            )
             or origin.startswith("chrome-extension://")
             or origin.startswith("extension://")
             or origin.startswith("http://127.0.0.1:")
@@ -9213,7 +10875,74 @@ class ShieldHandler(BaseHTTPRequestHandler):
             self.send_header("Access-Control-Allow-Origin", origin)
             self.send_header("Vary", "Origin")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, HEAD, DELETE, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, Accept, Mcp-Session-Id, MCP-Protocol-Version")
+        self.send_header(
+            "Access-Control-Allow-Headers",
+            "Content-Type, X-Studio-Token, Authorization, Accept, Cache-Control, Last-Event-ID, Mcp-Session-Id, MCP-Protocol-Version",
+        )
+        self.send_header("Access-Control-Allow-Private-Network", "true")
+
+    def _check_local_control_plane_guard(
+        self,
+        parsed_url,
+        require_studio_token: bool,
+        head_only: bool = False,
+    ) -> bool:
+        """Isolate local control-plane routes (/studio/*, /__studio__/*, /web-bridge/*) from public tunnels."""
+        def _deny(err_code: str) -> bool:
+            if self.headers and (self.headers.get("Content-Length") or self.headers.get("Transfer-Encoding")):
+                try:
+                    self._read_request_body(default=b"", max_bytes=262144, raise_on_error=True)
+                except ValueError:
+                    self._force_close_connection = True
+                    self.close_connection = True
+            self._send_json(403, {"ok": False, "error": err_code}, head_only=head_only)
+            return False
+
+        peer_ip = str((self.client_address[0] if self.client_address else "") or "").strip().lower()
+        if peer_ip not in _LOOPBACK_PEER_IPS:
+            return _deny("forbidden_non_loopback")
+
+        if self.headers:
+            for hdr_name in _FORBIDDEN_PUBLIC_TUNNEL_HEADERS:
+                vals = self.headers.get_all(hdr_name) if hasattr(self.headers, "get_all") else [self.headers.get(hdr_name)]
+                if any(str(v or "").strip() for v in (vals or [])):
+                    return _deny("forbidden_public_tunnel")
+
+            host_vals = self.headers.get_all("Host") if hasattr(self.headers, "get_all") else [self.headers.get("Host")]
+            non_empty_hosts = [str(v).strip() for v in (host_vals or []) if v is not None and str(v).strip()]
+            if len(non_empty_hosts) > 1:
+                return _deny("forbidden_host")
+            if len(non_empty_hosts) == 1:
+                host_only = _extract_host_without_port(non_empty_hosts[0])
+                if host_only not in _LOOPBACK_HOST_NAMES:
+                    return _deny("forbidden_host")
+
+        if require_studio_token:
+            expected_token = _resolve_expected_studio_local_token(self.server)
+            if expected_token:
+                hdr_tok = str(self.headers.get("X-Studio-Token") or "").strip() if self.headers else ""
+                if hdr_tok:
+                    candidate_tok = hdr_tok
+                else:
+                    qs = urllib.parse.parse_qs(parsed_url.query)
+                    candidate_tok = str((qs.get("studio_token") or [""])[0] or "").strip()
+                if not candidate_tok or not hmac.compare_digest(
+                    candidate_tok.encode("utf-8"),
+                    expected_token.encode("utf-8"),
+                ):
+                    return _deny("invalid_studio_token")
+
+        return True
+
+    def _apply_connection_header(self):
+        conn_hdr = str(self.headers.get("Connection") or "").strip().lower()
+        req_ver = str(getattr(self, "request_version", "HTTP/1.0") or "HTTP/1.0")
+        if getattr(self, "_force_close_connection", False) or "close" in conn_hdr or req_ver < "HTTP/1.1":
+            self.send_header("Connection", "close")
+            self.close_connection = True
+        else:
+            self.send_header("Connection", "keep-alive")
+            self.close_connection = False
 
     def _send_json(self, status_code: int, payload: dict, extra_headers: dict | None = None, head_only: bool = False):
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -9224,11 +10953,10 @@ class ShieldHandler(BaseHTTPRequestHandler):
             for hk, hv in extra_headers.items():
                 self.send_header(str(hk), str(hv))
         self.send_header("Content-Length", "0" if head_only else str(len(body)))
-        self.send_header("Connection", "close")
+        self._apply_connection_header()
         self.end_headers()
         if not head_only:
             self.wfile.write(body)
-        self.close_connection = True
 
     def _log_oauth_event(self, event: str, detail: dict | None = None):
         try:
@@ -9287,8 +11015,7 @@ class ShieldHandler(BaseHTTPRequestHandler):
         )
 
     def _handle_oauth_register(self):
-        content_length = int(self.headers.get("Content-Length", "0") or "0")
-        raw = self.rfile.read(content_length) if content_length > 0 else b"{}"
+        raw = self._read_request_body(default=b"{}") or b"{}"
         try:
             req_data = json.loads(raw.decode("utf-8"))
             if not isinstance(req_data, dict):
@@ -9318,8 +11045,11 @@ class ShieldHandler(BaseHTTPRequestHandler):
             "client_name": str(req_data.get("client_name") or "RelayStudio MCP Client"),
             "scope": str(req_data.get("scope") or "mcp openid offline_access"),
         }
+        data_root = getattr(self.server, "data_root", "")
         with _OAUTH_LOCK:
+            _load_oauth_clients_locked(data_root)
             _OAUTH_CLIENTS[client_id] = record
+            _save_oauth_clients_locked(data_root)
         self._log_oauth_event("oauth_register", {"client_id": client_id, "redirect_uris": redirect_uris})
         self._send_json(201, record, extra_headers={"Cache-Control": "no-store", "Pragma": "no-cache"})
 
@@ -9327,8 +11057,7 @@ class ShieldHandler(BaseHTTPRequestHandler):
         parsed_url = urllib.parse.urlsplit(self.path)
         params = urllib.parse.parse_qs(parsed_url.query, keep_blank_values=True)
         if method == "POST":
-            content_length = int(self.headers.get("Content-Length", "0") or "0")
-            raw = self.rfile.read(content_length) if content_length > 0 else b""
+            raw = self._read_request_body(default=b"") or b""
             try:
                 post_params = urllib.parse.parse_qs(raw.decode("utf-8"), keep_blank_values=True)
                 for k, v in post_params.items():
@@ -9340,11 +11069,13 @@ class ShieldHandler(BaseHTTPRequestHandler):
             vals = params.get(key)
             return str(vals[0]) if vals else default
 
+        data_root = getattr(self.server, "data_root", "")
         client_id = _first("client_id", "rs_default_client").strip() or "rs_default_client"
         redirect_uri = _first("redirect_uri", "").strip()
+        with _OAUTH_LOCK:
+            _load_oauth_clients_locked(data_root)
+            c_info = _OAUTH_CLIENTS.get(client_id) or {}
         if not redirect_uri:
-            with _OAUTH_LOCK:
-                c_info = _OAUTH_CLIENTS.get(client_id) or {}
             r_list = c_info.get("redirect_uris") or []
             if r_list:
                 redirect_uri = str(r_list[0])
@@ -9390,9 +11121,8 @@ class ShieldHandler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.send_header("Pragma", "no-cache")
         self.send_header("Content-Length", "0")
-        self.send_header("Connection", "close")
+        self._apply_connection_header()
         self.end_headers()
-        self.close_connection = True
 
     def _issue_access_token_response(self, client_id: str, scope: str, refresh_token: str, extra_headers: dict):
         now_ts = int(time.time())
@@ -9413,8 +11143,7 @@ class ShieldHandler(BaseHTTPRequestHandler):
         )
 
     def _handle_oauth_token(self):
-        content_length = int(self.headers.get("Content-Length", "0") or "0")
-        raw = self.rfile.read(content_length) if content_length > 0 else b""
+        raw = self._read_request_body(default=b"") or b""
         ctype = str(self.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
         form: dict[str, str] = {}
         if ctype == "application/json":
@@ -9430,6 +11159,10 @@ class ShieldHandler(BaseHTTPRequestHandler):
                 form = {str(k): str(v[0]) for k, v in parsed_form.items() if v}
             except Exception:
                 pass
+
+        data_root = getattr(self.server, "data_root", "")
+        with _OAUTH_LOCK:
+            _load_oauth_clients_locked(data_root)
 
         grant_type = str(form.get("grant_type") or "").strip()
         self._log_oauth_event("oauth_token", {"grant_type": grant_type, "client_id": str(form.get("client_id") or "")})
@@ -9508,14 +11241,102 @@ class ShieldHandler(BaseHTTPRequestHandler):
             extra_headers=no_store,
         )
 
+    def _handle_studio_events(self, parsed_url, qs: dict):
+        since_sig = str((qs.get("since_sig") or qs.get("since_rev") or [""])[0] or "").strip()
+        raw_max = str((qs.get("max_events") or ["0"])[0] or "0").strip()
+        try:
+            max_events = max(0, int(raw_max))
+        except ValueError:
+            max_events = 0
+
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache, no-store")
+        self.send_header("X-Accel-Buffering", "no")
+        self.send_header("Connection", "keep-alive")
+        self._send_cors_headers()
+        self.end_headers()
+        self.close_connection = True
+
+        def _write_sse_frame(event_name: str, payload: dict) -> None:
+            frame = f"event: {event_name}\ndata: {json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}\n\n".encode("utf-8")
+            self.wfile.write(frame)
+            self.wfile.flush()
+
+        try:
+            with _STUDIO_SSE_COND:
+                seen_sse_seq = _STUDIO_SSE_SEQ
+            snap = build_studio_snapshot(
+                self.server.data_root,
+                self.server.tasks_root,
+                self.server.web_bridge_path,
+                since_sig=since_sig,
+            )
+            _write_sse_frame("snapshot", snap)
+            last_sig = str(snap.get("rev") or "")
+            last_q_rev = str(snap.get("queue_rev") or _get_wb_logical_sigs(self.server.web_bridge_path)[1] or "")
+            events_sent = 1
+            last_io_ts = time.monotonic()
+            if max_events == 1:
+                return
+
+            while not getattr(self.server, "_sse_stop", False) and not getattr(self.server, "_BaseServer__shutdown_request", False):
+                with _STUDIO_SSE_COND:
+                    if (
+                        _STUDIO_SSE_SEQ == seen_sse_seq
+                        and not getattr(self.server, "_sse_stop", False)
+                        and not getattr(self.server, "_BaseServer__shutdown_request", False)
+                    ):
+                        _STUDIO_SSE_COND.wait(timeout=1.0)
+                    seen_sse_seq = _STUDIO_SSE_SEQ
+                if getattr(self.server, "_sse_stop", False) or getattr(self.server, "_BaseServer__shutdown_request", False):
+                    break
+
+                cur_sig = _compute_studio_state_sig(self.server.data_root, self.server.tasks_root, self.server.web_bridge_path)
+                _, cur_q_rev = _get_wb_logical_sigs(self.server.web_bridge_path)
+                if cur_sig != last_sig:
+                    snap = build_studio_snapshot(self.server.data_root, self.server.tasks_root, self.server.web_bridge_path)
+                    _write_sse_frame("snapshot", snap)
+                    last_sig = str(snap.get("rev") or cur_sig)
+                    last_q_rev = str(snap.get("queue_rev") or cur_q_rev)
+                    events_sent += 1
+                    last_io_ts = time.monotonic()
+                elif cur_q_rev != last_q_rev:
+                    digest = build_queue_digest(self.server.web_bridge_path)
+                    _write_sse_frame("queue_digest", digest)
+                    last_q_rev = str(digest.get("queue_rev") or cur_q_rev)
+                    events_sent += 1
+                    last_io_ts = time.monotonic()
+                elif (time.monotonic() - last_io_ts) >= 15.0:
+                    self.wfile.write(b": keepalive\n\n")
+                    self.wfile.flush()
+                    last_io_ts = time.monotonic()
+
+                if max_events > 0 and events_sent >= max_events:
+                    break
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, TimeoutError, OSError):
+            pass
+        finally:
+            self.close_connection = True
+
     def do_OPTIONS(self):
+        parsed_url = urllib.parse.urlsplit(self.path)
+        is_cp, _ = _classify_control_plane_route(parsed_url.path)
+        if is_cp:
+            if not self._check_local_control_plane_guard(parsed_url, require_studio_token=False):
+                return
         self.send_response(204)
         self._send_cors_headers()
         self.send_header("Content-Length", "0")
+        self._apply_connection_header()
         self.end_headers()
 
     def do_HEAD(self):
         parsed_url = urllib.parse.urlsplit(self.path)
+        is_cp, req_tok = _classify_control_plane_route(parsed_url.path)
+        if is_cp:
+            if not self._check_local_control_plane_guard(parsed_url, require_studio_token=req_tok, head_only=True):
+                return
         req_path = parsed_url.path.rstrip("/") or "/"
         if req_path in _OAUTH_PROTECTED_RESOURCE_PATHS:
             self._handle_oauth_protected_resource(head_only=True)
@@ -9556,6 +11377,11 @@ class ShieldHandler(BaseHTTPRequestHandler):
         norm_path = req_path.rstrip("/") or "/"
         qs = urllib.parse.parse_qs(parsed_url.query)
 
+        is_cp, req_tok = _classify_control_plane_route(req_path)
+        if is_cp:
+            if not self._check_local_control_plane_guard(parsed_url, require_studio_token=req_tok):
+                return
+
         if norm_path in _OAUTH_PROTECTED_RESOURCE_PATHS:
             self._handle_oauth_protected_resource(head_only=False)
             return
@@ -9566,6 +11392,10 @@ class ShieldHandler(BaseHTTPRequestHandler):
 
         if norm_path in _OAUTH_AUTHORIZE_PATHS:
             self._handle_oauth_authorize(method="GET")
+            return
+
+        if req_path in ("/studio/events", "/__studio__/events") or req_path.startswith("/studio/events/") or req_path.startswith("/__studio__/events/"):
+            self._handle_studio_events(parsed_url, qs)
             return
 
         if req_path in ("/studio/snapshot", "/__studio__/snapshot") or self.path.startswith("/studio/snapshot") or self.path.startswith("/__studio__/snapshot"):
@@ -9579,7 +11409,13 @@ class ShieldHandler(BaseHTTPRequestHandler):
             self._send_json(200, snap)
             return
 
-        if req_path in ("/studio/queue-digest", "/__studio__/queue-digest") or self.path.startswith("/studio/queue-digest") or self.path.startswith("/__studio__/queue-digest"):
+        if (
+            req_path in ("/studio/queue-digest", "/__studio__/queue-digest", "/studio/queue_digest", "/__studio__/queue_digest")
+            or self.path.startswith("/studio/queue-digest")
+            or self.path.startswith("/__studio__/queue-digest")
+            or self.path.startswith("/studio/queue_digest")
+            or self.path.startswith("/__studio__/queue_digest")
+        ):
             since_rev = str((qs.get("since_rev") or qs.get("since_sig") or [""])[0] or "").strip()
             digest = build_queue_digest(self.server.web_bridge_path, since_rev=since_rev)
             self._send_json(200, digest)
@@ -9591,10 +11427,52 @@ class ShieldHandler(BaseHTTPRequestHandler):
             self._send_json(200, state)
             return
 
+        if is_cp:
+            self._send_json(404, {"ok": False, "error": "unknown control-plane endpoint"})
+            return
+
         self._forward("GET")
+
+    def _check_mcp_oauth_guard(self) -> bool:
+        """Challenge expired or invalid RelayStudio OAuth rs_at Bearer tokens on POST /mcp with 401."""
+        auth_hdr = str(self.headers.get("Authorization") or "").strip()
+        if not auth_hdr:
+            return True
+        bearer_tok = auth_hdr[7:].strip() if auth_hdr.lower().startswith("bearer ") else ""
+        if not bearer_tok.startswith("rs_at"):
+            return True
+        tok_data = _verify_oauth_envelope(bearer_tok, "rs_at")
+        valid_tok = bool(tok_data and int(tok_data.get("expires_at") or 0) >= int(time.time()))
+        if valid_tok:
+            return True
+        try:
+            self._read_request_body(default=b"", raise_on_error=True)
+        except ValueError:
+            self._force_close_connection = True
+            self.close_connection = True
+        self._log_oauth_event(
+            "post_mcp_token_expired",
+            {
+                "has_auth": True,
+                "token_decoded": bool(tok_data),
+                "client_id": str((tok_data or {}).get("client_id") or ""),
+            },
+        )
+        base_url = self._resolve_public_base_url()
+        challenge = f'Bearer realm="mcp", resource_metadata="{base_url}/.well-known/oauth-protected-resource"'
+        self._send_json(
+            401,
+            {"error": "invalid_token", "error_description": "Access token expired or invalid."},
+            extra_headers={"WWW-Authenticate": challenge, "Cache-Control": "no-store"},
+        )
+        return False
 
     def do_POST(self):
         parsed_url = urllib.parse.urlsplit(self.path)
+        is_cp, req_tok = _classify_control_plane_route(parsed_url.path)
+        if is_cp:
+            if not self._check_local_control_plane_guard(parsed_url, require_studio_token=req_tok):
+                return
         norm_path = parsed_url.path.rstrip("/") or "/"
         if norm_path in _OAUTH_REGISTER_PATHS:
             self._handle_oauth_register()
@@ -9607,10 +11485,10 @@ class ShieldHandler(BaseHTTPRequestHandler):
             return
         if norm_path == "/":
             self.path = "/mcp"
+            norm_path = "/mcp"
 
         if self.path.startswith("/studio/action") or self.path.startswith("/__studio__/action") or self.path.startswith("/studio/session-binding") or self.path.startswith("/__studio__/session-binding"):
-            content_length = int(self.headers.get("Content-Length", "0"))
-            raw = self.rfile.read(content_length) if content_length > 0 else b"{}"
+            raw = self._read_request_body(default=b"{}") or b"{}"
             try:
                 payload = json.loads(raw.decode("utf-8"))
             except Exception:
@@ -9626,14 +11504,28 @@ class ShieldHandler(BaseHTTPRequestHandler):
             self._handle_web_bridge_post()
             return
 
+        if is_cp:
+            self._send_json(404, {"ok": False, "error": "unknown control-plane endpoint"})
+            return
+
+        if norm_path == "/mcp" or self.path.startswith("/mcp"):
+            if not self._check_mcp_oauth_guard():
+                return
+
         self._forward("POST")
 
     def do_DELETE(self):
+        parsed_url = urllib.parse.urlsplit(self.path)
+        is_cp, req_tok = _classify_control_plane_route(parsed_url.path)
+        if is_cp:
+            if not self._check_local_control_plane_guard(parsed_url, require_studio_token=req_tok):
+                return
+            self._send_json(404, {"ok": False, "error": "unknown control-plane endpoint"})
+            return
         self._forward("DELETE")
 
     def _handle_web_bridge_post(self):
-        content_length = int(self.headers.get("Content-Length", "0"))
-        raw = self.rfile.read(content_length) if content_length > 0 else b"{}"
+        raw = self._read_request_body(default=b"{}") or b"{}"
         try:
             payload = json.loads(raw.decode("utf-8"))
             if not isinstance(payload, dict):
@@ -9713,8 +11605,14 @@ class ShieldHandler(BaseHTTPRequestHandler):
         self._send_json(404, {"ok": False, "error": "unknown web-bridge endpoint"})
 
     def _forward(self, method: str):
-        content_length = int(self.headers.get("Content-Length", "0"))
-        body = self.rfile.read(content_length) if content_length > 0 else None
+        try:
+            default_body = b"" if method in ("POST", "PUT", "PATCH") else None
+            body = self._read_request_body(default=default_body, raise_on_error=True)
+        except ValueError as exc:
+            self._force_close_connection = True
+            self.close_connection = True
+            self._send_json(400, {"error": f"Invalid request body framing: {exc}"})
+            return
 
         is_tools_list = False
         is_tools_call = False
@@ -9755,11 +11653,11 @@ class ShieldHandler(BaseHTTPRequestHandler):
                         if native_resp is not None:
                             self.send_response(200)
                             self.send_header("Content-Type", "application/json")
+                            self._send_cors_headers()
                             self.send_header("Content-Length", str(len(native_resp)))
-                            self.send_header("Connection", "close")
+                            self._apply_connection_header()
                             self.end_headers()
                             self.wfile.write(native_resp)
-                            self.close_connection = True
                             return
 
                         active_entry = record_shield_activity(getattr(self.server, "activity_path", ""), body)
@@ -9767,11 +11665,16 @@ class ShieldHandler(BaseHTTPRequestHandler):
                 pass
 
         target_url = self.server.upstream_base + self.path
+        req_hop_by_hop = _extract_hop_by_hop_set(self.headers)
         headers = {}
         for k, v in self.headers.items():
-            if k.lower() in ("host", "content-length", "connection"):
+            k_low = k.lower()
+            if k_low in req_hop_by_hop or k_low in ("host", "content-length"):
                 continue
             headers[k] = v
+
+        if body is not None:
+            headers["Content-Length"] = str(len(body))
 
         if method == "POST" and self.path.startswith("/mcp"):
             accept_val = ""
@@ -9786,7 +11689,7 @@ class ShieldHandler(BaseHTTPRequestHandler):
 
         req = urllib.request.Request(target_url, data=body, headers=headers, method=method)
         try:
-            with urllib.request.urlopen(req, timeout=620) as resp:
+            with _UPSTREAM_OPENER.open(req, timeout=620) as resp:
                 resp_bytes = resp.read()
                 if is_tools_list:
                     resp_bytes = rewrite_tools_list_payload(resp_bytes)
@@ -9812,26 +11715,54 @@ class ShieldHandler(BaseHTTPRequestHandler):
                     if reconcile_tid:
                         reconcile_delivered_by_activity(getattr(self.server, "web_bridge_path", ""), reconcile_tid)
 
+                resp_hop_by_hop = _extract_hop_by_hop_set(resp.headers)
                 self.send_response(resp.status)
+                self._send_cors_headers()
                 for k, v in resp.headers.items():
-                    if k.lower() in ("content-length", "transfer-encoding", "connection"):
+                    k_low = k.lower()
+                    if (
+                        k_low in resp_hop_by_hop
+                        or k_low in (
+                            "content-length",
+                            "date",
+                            "server",
+                            "access-control-allow-origin",
+                            "access-control-allow-methods",
+                            "access-control-allow-headers",
+                            "vary",
+                        )
+                    ):
                         continue
                     self.send_header(k, v)
                 self.send_header("Content-Length", str(len(resp_bytes)))
-                self.send_header("Connection", "close")
+                self._apply_connection_header()
                 self.end_headers()
                 self.wfile.write(resp_bytes)
-                self.close_connection = True
         except urllib.error.HTTPError as err:
             err_bytes = err.read() if err.fp else b""
             if is_tools_call:
                 complete_shield_activity(getattr(self.server, "activity_path", ""), active_entry, err_bytes)
+            err_hop_by_hop = _extract_hop_by_hop_set(err.headers)
             self.send_response(err.code)
+            self._send_cors_headers()
             for k, v in err.headers.items():
-                if k.lower() in ("content-length", "transfer-encoding", "connection"):
+                k_low = k.lower()
+                if (
+                    k_low in err_hop_by_hop
+                    or k_low in (
+                        "content-length",
+                        "date",
+                        "server",
+                        "access-control-allow-origin",
+                        "access-control-allow-methods",
+                        "access-control-allow-headers",
+                        "vary",
+                    )
+                ):
                     continue
                 self.send_header(k, v)
             self.send_header("Content-Length", str(len(err_bytes)))
+            self._apply_connection_header()
             self.end_headers()
             self.wfile.write(err_bytes)
         except Exception as exc:
@@ -9840,7 +11771,9 @@ class ShieldHandler(BaseHTTPRequestHandler):
             msg = json.dumps({"error": f"Shield proxy error: {exc}"}).encode("utf-8")
             self.send_response(502)
             self.send_header("Content-Type", "application/json")
+            self._send_cors_headers()
             self.send_header("Content-Length", str(len(msg)))
+            self._apply_connection_header()
             self.end_headers()
             self.wfile.write(msg)
 
@@ -9857,12 +11790,15 @@ class ShieldServer(ThreadingHTTPServer):
         tasks_root: str = "",
         data_root: str = "",
         start_guardian: bool = False,
+        studio_local_token: str = "",
     ):
         super().__init__(server_address, ShieldHandler)
         self.upstream_url = upstream_url
         parsed = urllib.parse.urlsplit(upstream_url)
         self.upstream_base = f"{parsed.scheme}://{parsed.netloc}"
         self.activity_path = activity_path
+        self.studio_local_token = str(studio_local_token or "").strip()
+        self._sse_stop = False
         if data_root:
             self.data_root = os.path.abspath(data_root)
         elif activity_path:
@@ -9889,8 +11825,16 @@ class ShieldServer(ThreadingHTTPServer):
             except Exception:
                 pass
 
-    def server_close(self):
+    def shutdown(self):
+        self._sse_stop = True
         self._guardian_stop.set()
+        notify_studio_sse()
+        super().shutdown()
+
+    def server_close(self):
+        self._sse_stop = True
+        self._guardian_stop.set()
+        notify_studio_sse()
         super().server_close()
 
 

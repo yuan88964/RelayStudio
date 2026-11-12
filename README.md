@@ -42,7 +42,7 @@ RelayStudio 将**会话窗口视为随时可替换的临时执行器，将本地
 | **原生单步任务账本**<br>（Spec v4.6） | 缺少持久化步骤状态，或受制于繁琐的多步复盘结单校验 | **`:8766` 原生 `task_manage` 引擎**：精简为 `create / update / checkpoint / list / get / block / resume` 7 个动作，支持 `pending`、`in_progress`（含 `two_strike_stop` 净室接力中间态）、`completed`、`quarantined`；所有步骤进入终态后一步自动结单并关停催工 |
 | **解耦式停顿守护与五维自愈**<br>（Spec v4.7） | 超时后需人工输入“继续”、后台标签页遭 Chrome 5 分钟休眠断流，或因盲目定时重发打断慢测试与深度思考 | **独立停顿时长 × 重试上限 + 五维生命体征自愈**：支持按任务配置停顿阈值与重试上限；内置 DOM 报错雷达与后台保活信号、全工具在途冻结计时，并在任务卡片直观展示「网关 · 宿主 · 页面 · 模型 · 步进」五维状态，遇流式断流或连接异常自动先原窗唤醒再升级接力 |
 | **跨窗口交接与档位继承** | 上下文膨胀后需手动整理进度重开会话，易丢失当前模型与思考力度 | **两阶段账本交接与旧窗归档**：自动提取本地 `tsk_*.json` 进度与规格指针拉起新会话；默认 `inherit` 模式在原窗唤醒时不触碰模型设置，升级新窗交接时自动快照并还原原窗口的模型与思考强度，随后对旧窗口执行停止生成与归档 |
-| **多栏工作区与三态主题** | 命令行滚动原始 JSON 日志，多任务并行时难以直观追踪进度与提交 | **GPU 加速 4 分栏工作台 + 三态主题记忆**：右侧支持最多 4 分栏并列监控与平滑过渡动画；内置 `跟随系统 / 浅色 / 深色` 三态主题记忆（支持顶栏 `☀/🌙` 一键切换、`Ctrl+Shift+D` 快捷键，右键点击图标恢复跟随系统） |
+| **多栏工作区与三态主题** | 命令行滚动原始 JSON 日志，多任务并行时难以直观追踪进度与提交 | **Edge WebView2 硬件加速 4 分栏工作台 + SSE 实时推送**：复用 Windows 10/11 内置 Edge WebView2 合成渲染管线与 `:8766` SSE 增量推送（托盘隐藏自动挂起零 GPU 占用，亦保留 `--legacy` 传统界面回退）；内置 `跟随系统 / 浅色 / 深色` 三态主题记忆（支持顶栏 `☀/🌙` 一键切换、`Ctrl+Shift+D` 快捷键，右键恢复跟随系统） |
 | **规则与深模块技能路由** | 每次开新窗需重复粘贴开发规范，网页端无法直接复用本地 `SKILL.md` | **开局自动注入 `AGENTS.md` + 内置 16 项工程与图解技能**：启动时自动挂载 `builtin-skills/` 至 `engine-data/`（支持 NTFS 软链接/硬链接直连本地 Obsidian 知识库，本机零重复挂载），按需加载技能正文，平时不额外占用上下文 |
 
 ---
@@ -128,10 +128,13 @@ RelayStudio 将**会话窗口视为随时可替换的临时执行器，将本地
 git clone https://github.com/yuan88964/RelayStudio.git
 cd RelayStudio
 
-# 2. 调用 Windows 系统自带 .NET Framework csc.exe 本地编译无黑框启动器 RelayStudio.exe
+# 2. 构建 WebView2 前端静态工作台资源（ui-src -> ui，便携包用户无需此步）
+Push-Location .\ui-src; npm install; npm run build; Pop-Location
+
+# 3. 准备 WebView2 互操作组件（bin\webview2\*.dll）并调用系统自带 .NET Framework csc.exe 编译 RelayStudio.exe
 powershell -ExecutionPolicy Bypass -File .\scripts\build-launcher.ps1
 
-# 3. 准备上游开源运行时二进制至 .\bin\ 目录（开源组件，无需闭源依赖）：
+# 4. 准备上游开源运行时二进制至 .\bin\ 目录（开源组件，无需闭源依赖）：
 #    - bin\tunnel-client.exe : 下载官方开源 cloudflare/cloudflared (cloudflared-windows-amd64.exe) 重命名放入
 #    - bin\relaystudio-core.exe : 由 Apache-2.0 开源仓库 uvwt/agentdock 执行 cargo build --release 编译放入
 

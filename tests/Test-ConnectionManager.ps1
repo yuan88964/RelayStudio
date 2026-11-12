@@ -161,6 +161,131 @@ if ($PublicTunnelOnly) {
     $bpStats2 = Get-BrowserProfilesCacheStats
     Assert ($bpStats2.Misses -eq 2 -and $bpAfterSettingsEdit[0].Id -eq 'Edge:Default') 'Get-AvailableBrowserProfiles detects settings.json mtime/size change and refreshes default carrier order without -ForceRefresh'
 
+    # Seam 1 (Resolve-EffectiveOutboundProxyEnv), Seam 2 (Get-StudioHubBaseUrl), and Option B Auto-Fallback (Tailscale -> Cloudflare HTTP/2)
+    $deadProxyEnv = @{ HTTPS_PROXY = 'http://127.0.0.1:59997'; HTTP_PROXY = 'http://127.0.0.1:59997' }
+    $resolvedDead = Resolve-EffectiveOutboundProxyEnv -Context $ctx -BaseEnv $deadProxyEnv -SystemProxyOverride ''
+    Assert ($resolvedDead.Mode -eq 'direct_fallback' -and $resolvedDead.ProxyUrl -eq '' -and $resolvedDead.Env['HTTPS_PROXY'] -eq '' -and $resolvedDead.NoProxy -match '\*\.ts\.net' -and $resolvedDead.NoProxy -match '100\.64\.0\.0/10') 'Resolve-EffectiveOutboundProxyEnv strips dead local proxy port and falls back to direct/TUN mode with *.ts.net and 100.64.0.0/10 in NO_PROXY'
+    $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
+    $listener.Start()
+    $liveProxyPort = ([Net.IPEndPoint]$listener.LocalEndpoint).Port
+    try {
+        $resolvedLive = Resolve-EffectiveOutboundProxyEnv -Context $ctx -BaseEnv $deadProxyEnv -SystemProxyOverride "127.0.0.1:$liveProxyPort"
+        Assert ($resolvedLive.Mode -eq 'proxy' -and $resolvedLive.ProxyUrl -eq "http://127.0.0.1:$liveProxyPort" -and $resolvedLive.Env['HTTPS_PROXY'] -eq "http://127.0.0.1:$liveProxyPort") "Resolve-EffectiveOutboundProxyEnv dynamically adopts live SystemProxyOverride port ($liveProxyPort)"
+    } finally { $listener.Stop() }
+    $directSettings = [pscustomobject]@{ outbound_proxy = 'direct'; shield_port = 18766 }
+    $resolvedDirect = Resolve-EffectiveOutboundProxyEnv -Context $ctx -Settings $directSettings -BaseEnv $deadProxyEnv -SystemProxyOverride "127.0.0.1:$liveProxyPort"
+    Assert ($resolvedDirect.Mode -eq 'direct' -and $resolvedDirect.ProxyUrl -eq '') 'Resolve-EffectiveOutboundProxyEnv honors explicit outbound_proxy=direct setting'
+    Assert ((Get-StudioHubBaseUrl -Context $ctx -Settings $directSettings) -eq 'http://127.0.0.1:18766') 'Get-StudioHubBaseUrl resolves custom shield_port seam instead of hardcoded 8766'
+
+    $fakeFailTsCmd = Join-Path $testRoot 'fake-tailscale-fail.cmd'
+    [IO.File]::WriteAllText($fakeFailTsCmd, "@echo off`r`nexit /b 1`r`n", [Text.Encoding]::ASCII)
+    try {
+        $fbTunnel = Start-PublicMcpTunnel -Context $ctx -FixedDomain 'https://dead-funnel.tail9999.ts.net' -TailscalePath $fakeFailTsCmd -ClientPath $exe
+        Assert ((-not $fbTunnel.Running) -and $fbTunnel.Mode -eq 'tailscale' -and $fbTunnel.Url -eq 'https://dead-funnel.tail9999.ts.net/mcp' -and $fbTunnel.HealthPhase -eq 'Offline' -and $fbTunnel.Status -eq '离线' -and $fbTunnel.FallbackFrom -eq '') "URL Stability Invariant: Start-PublicMcpTunnel preserves fixed *.ts.net URL in Offline state and NEVER downgrades to cloudflared_quick (Mode=$($fbTunnel.Mode), Url=$($fbTunnel.Url), Phase=$($fbTunnel.HealthPhase))"
+    } finally { Stop-PublicMcpTunnel $ctx }
+
+    # Edge Health Seam (8000ms default timeout, Degraded 3.6s-5.6s cellular RTT, zero-network Get-PublicMcpTunnelState cache, IPv4 filter, and lock retry)
+    $modRef = Get-Module ConnectionManager
+    $ipFilterOk = & $modRef {
+        (-not (Test-IsPublicRoutableIpv4 '127.0.0.1')) -and
+        (-not (Test-IsPublicRoutableIpv4 '10.1.2.3')) -and
+        (-not (Test-IsPublicRoutableIpv4 '192.168.1.5')) -and
+        (-not (Test-IsPublicRoutableIpv4 '172.16.0.1')) -and
+        (-not (Test-IsPublicRoutableIpv4 '172.31.255.254')) -and
+        (-not (Test-IsPublicRoutableIpv4 '100.64.0.1')) -and
+        (-not (Test-IsPublicRoutableIpv4 '100.100.100.100')) -and
+        (-not (Test-IsPublicRoutableIpv4 '100.127.255.254')) -and
+        (-not (Test-IsPublicRoutableIpv4 '198.18.0.2')) -and
+        (-not (Test-IsPublicRoutableIpv4 '198.19.254.1')) -and
+        (Test-IsPublicRoutableIpv4 '100.63.255.1') -and
+        (Test-IsPublicRoutableIpv4 '100.128.0.1') -and
+        (Test-IsPublicRoutableIpv4 '103.84.155.153') -and
+        (Test-IsPublicRoutableIpv4 '8.8.8.8')
+    }
+    Assert $ipFilterOk 'Test-IsPublicRoutableIpv4 rejects loopback, RFC1918, Tailscale CGNAT (100.64/10), and Mihomo Fake-IP (198.18/15) while accepting public IPv4'
+
+    $observedTimeoutMs = 0
+    $observedSlowMs = 0
+    try {
+        Set-PublicMcpEdgeProbeOverride {
+            param($Url, $ProbeCtx, $TimeoutMs, $SlowThresholdMs)
+            return [pscustomobject]@{ Reachable = $false; Phase = 'Offline'; PublicRttMs = 0; IngressIp = '' }
+        }
+        $extOffline = Start-PublicMcpTunnel -Context $ctx -FixedDomain 'https://mcp.custom-fixed.example' -ClientPath $exe
+        Assert ((-not $extOffline.Running) -and $extOffline.Mode -eq 'external_fixed' -and $extOffline.Url -eq 'https://mcp.custom-fixed.example/mcp' -and $extOffline.HealthPhase -eq 'Offline' -and $extOffline.Status -eq '离线') 'Start-PublicMcpTunnel never downgrades custom FixedDomain to cloudflared_quick when edge health probe reports Offline'
+        Stop-PublicMcpTunnel $ctx
+
+        $probeRecordFile = Join-Path $testRoot 'edge-probe-args.txt'
+        Set-PublicMcpEdgeProbeOverride ([scriptblock]::Create(@"
+            param(`$Url, `$ProbeCtx, `$TimeoutMs, `$SlowThresholdMs)
+            [IO.File]::WriteAllText('$($probeRecordFile.Replace("'", "''"))', "`$TimeoutMs|`$SlowThresholdMs")
+            return [pscustomobject]@{ Reachable = `$true; Phase = 'Degraded'; PublicRttMs = 4200; IngressIp = '103.84.155.153' }
+"@))
+        $degState = Start-PublicMcpTunnel -Context $ctx -FixedDomain 'https://cell-box.tail9999.ts.net' -TailscalePath $fakeTsCmd -ClientPath $exe
+        $recordedArgs = ([IO.File]::ReadAllText($probeRecordFile) -split '\|')
+        $observedTimeoutMs = [int]$recordedArgs[0]
+        $observedSlowMs = [int]$recordedArgs[1]
+        Assert ($observedTimeoutMs -eq 8000 -and $observedSlowMs -eq 2500) "Start-PublicMcpTunnel invokes Test-PublicMcpEdgeHealth with calibrated 8000ms timeout and 2500ms slow threshold (actual=$observedTimeoutMs/$observedSlowMs)"
+        Assert ($degState.Running -and $degState.Mode -eq 'tailscale' -and $degState.Url -eq 'https://cell-box.tail9999.ts.net/mcp' -and $degState.HealthPhase -eq 'Degraded' -and $degState.Status -eq '偏慢' -and $degState.PublicRttMs -eq 4200 -and $degState.VerifiedIngressIp -eq '103.84.155.153') 'Cellular 4200ms Tailscale Funnel RTT is recorded as Running=true, HealthPhase=Degraded, Status=偏慢, PublicRttMs=4200'
+
+        # Verify Get-PublicMcpTunnelState performs ZERO network calls (<10ms) and preserves HealthPhase + PublicRttMs across cache misses and hits
+        Set-PublicMcpEdgeProbeOverride { throw 'Get-PublicMcpTunnelState MUST NOT invoke network edge probe!' }
+        Clear-PublicMcpTunnelLogCache
+        $swState = [Diagnostics.Stopwatch]::StartNew()
+        $sMiss = Get-PublicMcpTunnelState $ctx
+        $sHit1 = Get-PublicMcpTunnelState $ctx
+        $sHit2 = Get-PublicMcpTunnelState $ctx
+        $swState.Stop()
+        $sCacheStats = Get-PublicMcpTunnelLogCacheStats
+        Assert ($sMiss.HealthPhase -eq 'Degraded' -and $sMiss.PublicRttMs -eq 4200 -and $sHit1.HealthPhase -eq 'Degraded' -and $sHit1.PublicRttMs -eq 4200 -and $sHit2.Status -eq '偏慢' -and $sCacheStats.Misses -eq 1 -and $sCacheStats.Hits -ge 2 -and $swState.ElapsedMilliseconds -lt 50) "Get-PublicMcpTunnelState reads local state with zero network I/O and preserves HealthPhase=Degraded & PublicRttMs=4200 across cache hits (Elapsed=$($swState.ElapsedMilliseconds)ms)"
+
+        # Verify Stop-PublicMcpTunnel waits cleanly on a briefly-held public-mcp-tunnel.lock instead of failing with IOException
+        $lockFile = Join-Path $ctx.DataRoot 'public-mcp-tunnel.lock'
+        $readyFlag = Join-Path $testRoot 'lock-held.flag'
+        if (Test-Path -LiteralPath $readyFlag) { Remove-Item -LiteralPath $readyFlag -Force }
+        $holderPs = [powershell]::Create()
+        try {
+            [void]$holderPs.AddScript({
+                param($LockPath, $FlagPath)
+                $fs = [IO.File]::Open($LockPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+                try {
+                    [IO.File]::WriteAllText($FlagPath, 'held')
+                    Start-Sleep -Milliseconds 320
+                } finally {
+                    $fs.Dispose()
+                }
+            }).AddArgument($lockFile).AddArgument($readyFlag)
+            $holderHandle = $holderPs.BeginInvoke()
+            $waitDeadline = [DateTime]::UtcNow.AddSeconds(3)
+            while (-not (Test-Path -LiteralPath $readyFlag) -and [DateTime]::UtcNow -lt $waitDeadline) {
+                Start-Sleep -Milliseconds 15
+            }
+            Assert (Test-Path -LiteralPath $readyFlag) 'Background test holder acquired public-mcp-tunnel.lock'
+            Stop-PublicMcpTunnel $ctx
+            [void]$holderPs.EndInvoke($holderHandle)
+            Assert (-not (Get-PublicMcpTunnelState $ctx).Running -and -not (Test-Path -LiteralPath (Join-Path $ctx.DataRoot 'public-mcp-tunnel.json'))) 'Stop-PublicMcpTunnel waits cleanly for briefly-held public-mcp-tunnel.lock and removes state without IOException'
+        } finally {
+            $holderPs.Dispose()
+        }
+    } finally {
+        Set-PublicMcpEdgeProbeOverride $null
+        Stop-PublicMcpTunnel $ctx
+    }
+
+    # Verify UTF-8 BOM preservation and PowerShell AST clean parse on all 3 PowerShell files
+    foreach ($psFile in @(
+        (Join-Path $managerRoot 'ConnectionManager.psm1'),
+        (Join-Path $managerRoot '连接管理.ps1'),
+        (Join-Path $managerRoot 'tests\Test-ConnectionManager.ps1')
+    )) {
+        $rawBytes = [IO.File]::ReadAllBytes($psFile)
+        $hasUtf8Bom = ($rawBytes.Length -ge 3 -and $rawBytes[0] -eq 0xEF -and $rawBytes[1] -eq 0xBB -and $rawBytes[2] -eq 0xBF)
+        $astTokens = $null
+        $astErrors = $null
+        [void][System.Management.Automation.Language.Parser]::ParseFile($psFile, [ref]$astTokens, [ref]$astErrors)
+        $leafName = Split-Path $psFile -Leaf
+        Assert ($hasUtf8Bom -and @($astErrors).Count -eq 0) "File $leafName preserves UTF-8 BOM ($hasUtf8Bom) and parses with 0 PowerShell AST errors (errors=$(@($astErrors).Count))"
+    }
 
     Write-Output "PASS public tunnel: $script:passed"
     return
@@ -570,7 +695,11 @@ try {
 
     $resetLayout = Reset-WindowLayoutMemory $layoutCtx
 
-    Assert ($resetLayout.WinWidth -eq 1180 -and $resetLayout.RailCollapsed -eq $false -and $resetLayout.Panes.Count -eq 1) 'Reset-WindowLayoutMemory restores default layout'
+    Assert ($resetLayout.WinWidth -eq 1320 -and $resetLayout.WinHeight -eq 840 -and $resetLayout.RailCollapsed -eq $false -and $resetLayout.Panes.Count -eq 1) 'Reset-WindowLayoutMemory restores default 1320x840 layout'
+
+    Save-WindowLayoutMemory $layoutCtx ([pscustomobject]@{ WinWidth = 4200; WinHeight = 2800; RailWidth = 260; RailCollapsed = $false; ShowArchived = $true; ThemeMode = 'system'; HiddenRightPane = $null; Panes = $resetLayout.Panes })
+    $clampedHiLayout = Get-WindowLayoutMemory $layoutCtx
+    Assert ($clampedHiLayout.WinWidth -eq 3840 -and $clampedHiLayout.WinHeight -eq 2400) 'Window layout memory clamps upper bounds to 3840x2400'
 
     # ---- Spec Module 1 (Hazards 1-5): ConnectionManager.psm1 Guards & Multi-Platform Capsule CRUD ----
     $guardBinDir = Join-Path $testRoot 'guard-cli-bin'
@@ -1128,7 +1257,12 @@ try {
     $expandedPopH = [double]$script:controls.KeyPopoverBorder.ActualHeight
     $segBtnAfterExpand = $script:capsuleSegmentButtons['claude']
     Assert ([object]::ReferenceEquals($segBtnBeforeExpand, $segBtnAfterExpand) -and $expandedPopH -gt ($collapsedPopH + 100) -and $script:controls.PopoverFooterBorder.ActualHeight -gt 20) "Expanding card on Claude/Gemini reuses capsule button instance and expands KeyPopoverBorder height without clipping footer (collapsed=$collapsedPopH, expanded=$expandedPopH)"
-    Assert ($script:controls.TunnelInputPlaceholder.Visibility -eq 'Visible' -and $script:controls.KeyInputPlaceholder.Visibility -eq 'Visible') 'Empty TunnelInput and KeyInput display muted watermark placeholders'
+    Assert ($script:controls.TunnelInputPlaceholder.Visibility -eq 'Visible' -and $script:controls.KeyInputPlaceholder.Visibility -eq 'Visible' -and $script:controls.KeyInputPlaceholder.Text -match 'relaystudio') 'Empty TunnelInput and KeyInput display muted watermark placeholders with default OAuth Key (relaystudio) hint'
+    $firstCardBorder = $script:controls.ProfilesListPanel.Children[0]
+    $firstCardSubRow = $firstCardBorder.Child.Children[1]
+    $keySepText = ($firstCardSubRow.Children | Where-Object { $_ -is [Windows.Controls.TextBlock] -and $_.Text -match 'Key:' } | Select-Object -First 1).Text
+    $copyKeyBtnOnCard = ($firstCardSubRow.Children | Where-Object { $_ -is [Windows.Controls.Button] } | Select-Object -Last 1)
+    Assert ($keySepText -match 'Key:\s*relaystudio' -and $copyKeyBtnOnCard.Tag.Val -eq 'relaystudio' -and $copyKeyBtnOnCard.Tag.IsDefaultOAuth -eq $true) "Unconfigured Claude/Gemini card displays default Key: relaystudio and binds one-click copy (actual=$keySepText)"
     $script:controls.TunnelInput.Text = 'https://claude-box.tail9999.ts.net'
     $script:controls.KeyInput.Text = 'cf-token-123456'
     Assert ($script:controls.TunnelInputPlaceholder.Visibility -eq 'Collapsed' -and $script:controls.KeyInputPlaceholder.Visibility -eq 'Collapsed') 'Typing into TunnelInput and KeyInput automatically hides watermark placeholders'
@@ -1416,7 +1550,7 @@ try {
 
     # Spec v4.0: Verify Desktop:ChatGPT target in Get-AvailableBrowserProfiles, model labels with English slug, 未开启思考 initial display, and model<->effort auto-switching
     $availProfilesV4 = @(Get-AvailableBrowserProfiles)
-    Assert (@($availProfilesV4 | Where-Object { $_.Id -eq 'Desktop:ChatGPT' -and $_.Label -match 'ChatGPT 桌面端' }).Count -eq 1) 'Spec v4.0: Get-AvailableBrowserProfiles includes Desktop:ChatGPT (💻 ChatGPT 桌面端)'
+    Assert (@($availProfilesV4 | Where-Object { $_.Id -eq 'Desktop:ChatGPT' -and $_.Label -eq 'ChatGPT 桌面端' }).Count -eq 1) 'Spec v4.0: Get-AvailableBrowserProfiles includes Desktop:ChatGPT with clean label ChatGPT 桌面端'
     Sync-ComposerModelAndEffortCombos -StateInfo $podA.Tag -AvailModels $dynModelsTest -CurModel 'inherit' -WebModel 'gpt-6' -CurEffort 'inherit' -WebEffort 'none'
     $v4ModelLabels = @($podA.Tag.ModelCombo.Items | ForEach-Object { [string]$_.Content })
     Assert (($v4ModelLabels -contains '🤖 GPT-6 Pro (gpt-6-pro)') -and ([string]$podA.Tag.EffortCombo.Items[0].Content -eq '🧠 默认 (none)')) 'Spec v4.0 + Scheme A: ModelCombo always includes English slug in parens and EffortCombo shows raw English none when WebEffort is none'
@@ -1807,6 +1941,96 @@ try {
     Export-WindowRender (Join-Path $EvidenceRoot 'RelayStudio连接管理-高级设置下部.png')
 
     Select-WindowTab 'Live'
+
+    # Verify Seam 1 (Resolve-EffectiveOutboundProxyEnv) & Seam 2 (Get-StudioHubBaseUrl) in main suite
+    $mainDeadEnv = @{ HTTPS_PROXY = 'http://127.0.0.1:59998'; HTTP_PROXY = 'http://127.0.0.1:59998' }
+    $mainProxyRes = Resolve-EffectiveOutboundProxyEnv -Context $script:context -BaseEnv $mainDeadEnv -SystemProxyOverride ''
+    Assert ($mainProxyRes.Mode -eq 'direct_fallback' -and $mainProxyRes.ProxyUrl -eq '' -and $mainProxyRes.NoProxy -match '\*\.ts\.net') 'Main suite: Resolve-EffectiveOutboundProxyEnv strips dead local proxy port and preserves *.ts.net in NO_PROXY'
+    Assert ((Get-StudioHubBaseUrl -Context $script:context -Settings ([pscustomobject]@{ shield_port = 18766 })) -eq 'http://127.0.0.1:18766') 'Main suite: Get-StudioHubBaseUrl seam resolves custom shield_port'
+
+    # Main suite: URL Stability Invariant, Edge Health Seam (8000ms / Degraded), Lock Retry, UI Dirty-Checking & UTF-8 BOM + PS AST check
+    $mainFakeTsOk = Join-Path $testRoot 'main-fake-ts-ok.cmd'
+    [IO.File]::WriteAllText($mainFakeTsOk, "@echo off`r`nif `"%1`"==`"status`" (`r`n  echo {`"BackendState`":`"Running`",`"Self`":{`"DNSName`":`"main-box.tail9999.ts.net.`"}}`r`n  exit /b 0`r`n)`r`nexit /b 0`r`n", [Text.Encoding]::ASCII)
+    $mainFakeCf = Join-Path $testRoot 'main-fake-cf.cmd'
+    [IO.File]::WriteAllText($mainFakeCf, "@echo off`r`nexit /b 0`r`n", [Text.Encoding]::ASCII)
+    try {
+        Set-PublicMcpEdgeProbeOverride {
+            param($Url, $ProbeCtx, $TimeoutMs, $SlowThresholdMs)
+            return [pscustomobject]@{ Reachable = $false; Phase = 'Offline'; PublicRttMs = 0; IngressIp = '' }
+        }
+        $mainFixedOff = Start-PublicMcpTunnel -Context $script:context -FixedDomain 'https://main-box.tail9999.ts.net' -TailscalePath $mainFakeTsOk -ClientPath $mainFakeCf
+        Assert ((-not $mainFixedOff.Running) -and $mainFixedOff.Mode -eq 'tailscale' -and $mainFixedOff.Url -eq 'https://main-box.tail9999.ts.net/mcp' -and $mainFixedOff.HealthPhase -eq 'Offline' -and $mainFixedOff.Status -eq '离线' -and $mainFixedOff.FallbackFrom -eq '') 'Main suite: Fixed *.ts.net domain never downgrades to cloudflared_quick when public edge is Offline'
+
+        $mainProbeArgsFile = Join-Path $testRoot 'main-probe-args.txt'
+        Set-PublicMcpEdgeProbeOverride ([scriptblock]::Create(@"
+            param(`$Url, `$ProbeCtx, `$TimeoutMs, `$SlowThresholdMs)
+            [IO.File]::WriteAllText('$($mainProbeArgsFile.Replace("'", "''"))', "`$TimeoutMs|`$SlowThresholdMs")
+            return [pscustomobject]@{ Reachable = `$true; Phase = 'Degraded'; PublicRttMs = 4650; IngressIp = '103.84.155.153' }
+"@))
+        $mainDeg = Start-PublicMcpTunnel -Context $script:context -FixedDomain 'https://main-box.tail9999.ts.net' -TailscalePath $mainFakeTsOk -ClientPath $mainFakeCf -ForceReconnect
+        $mainArgsParts = ([IO.File]::ReadAllText($mainProbeArgsFile) -split '\|')
+        Assert ([int]$mainArgsParts[0] -eq 8000 -and [int]$mainArgsParts[1] -eq 2500 -and $mainDeg.Running -and $mainDeg.HealthPhase -eq 'Degraded' -and $mainDeg.Status -eq '偏慢' -and $mainDeg.PublicRttMs -eq 4650) 'Main suite: 4650ms cellular RTT with 8000ms default timeout lands in Degraded (偏慢) state'
+
+        # Verify UI dirty-check guards: Apply-WindowTheme signature guard & Sync-TopBarTunnelCapsuleState Degraded amber dot + no-op repeat tick
+        Apply-WindowTheme -Force
+        $resRefBefore = $script:window.Resources
+        Apply-WindowTheme
+        Assert ([object]::ReferenceEquals($resRefBefore, $script:window.Resources)) 'Apply-WindowTheme signature guard skips replacing Window.Resources when theme/accent/platform is unchanged'
+
+        [void](Add-CapsulePlatform -Context $script:context -Platform 'claude')
+        Close-AllTopPopovers
+        $script:lastTopBarCapsuleSig = ''
+        $sentinelChild = New-Object Windows.Controls.Border
+        [void]$script:controls.ProfilesListPanel.Children.Add($sentinelChild)
+        Refresh-FormState
+        $claudeCapBtn = $script:capsuleSegmentButtons['claude']
+        $claudeCapDot = $claudeCapBtn.Content.Children[0]
+        $sigAfterFirstTick = $script:lastTopBarCapsuleSig
+        Refresh-FormState
+        Assert ($claudeCapDot.Fill.ToString() -eq '#FFF59E0B' -and [string]$claudeCapBtn.ToolTip -match '公网响应偏慢 \(4650ms\)' -and $script:lastTopBarCapsuleSig -eq $sigAfterFirstTick -and $script:controls.ProfilesListPanel.Children.Contains($sentinelChild)) 'Refresh-FormState updates top capsule Degraded (#F59E0B / 4650ms) via Sync-TopBarTunnelCapsuleState without rebuilding hidden ProfilesListPanel on 2s ticks'
+        [void](Remove-CapsulePlatform -Context $script:context -Settings $script:settings -Platform 'claude')
+        $script:lastTopBarCapsuleSig = ''
+        Refresh-FormState
+
+        # Verify Stop-PublicMcpTunnel lock retry in main suite
+        $mainLockFile = Join-Path $script:context.DataRoot 'public-mcp-tunnel.lock'
+        $mainLockFlag = Join-Path $testRoot 'main-lock.flag'
+        $mainHolder = [powershell]::Create()
+        try {
+            [void]$mainHolder.AddScript({
+                param($Lp, $Fp)
+                $fs = [IO.File]::Open($Lp, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+                try {
+                    [IO.File]::WriteAllText($Fp, '1')
+                    Start-Sleep -Milliseconds 250
+                } finally { $fs.Dispose() }
+            }).AddArgument($mainLockFile).AddArgument($mainLockFlag)
+            $mh = $mainHolder.BeginInvoke()
+            $dl = [DateTime]::UtcNow.AddSeconds(3)
+            while (-not (Test-Path -LiteralPath $mainLockFlag) -and [DateTime]::UtcNow -lt $dl) { Start-Sleep -Milliseconds 15 }
+            Stop-PublicMcpTunnel $script:context
+            [void]$mainHolder.EndInvoke($mh)
+            Assert (-not (Get-PublicMcpTunnelState $script:context).Running) 'Main suite: Stop-PublicMcpTunnel retries public-mcp-tunnel.lock cleanly without IOException'
+        } finally { $mainHolder.Dispose() }
+    } finally {
+        Set-PublicMcpEdgeProbeOverride $null
+        Stop-PublicMcpTunnel $script:context
+    }
+
+    # Verify UTF-8 BOM preservation and PowerShell AST clean parse on all 3 PowerShell files
+    foreach ($psFile in @(
+        (Join-Path $managerRoot 'ConnectionManager.psm1'),
+        (Join-Path $managerRoot '连接管理.ps1'),
+        (Join-Path $managerRoot 'tests\Test-ConnectionManager.ps1')
+    )) {
+        $rawBytes = [IO.File]::ReadAllBytes($psFile)
+        $hasUtf8Bom = ($rawBytes.Length -ge 3 -and $rawBytes[0] -eq 0xEF -and $rawBytes[1] -eq 0xBB -and $rawBytes[2] -eq 0xBF)
+        $astTokens = $null
+        $astErrors = $null
+        [void][System.Management.Automation.Language.Parser]::ParseFile($psFile, [ref]$astTokens, [ref]$astErrors)
+        $leafName = Split-Path $psFile -Leaf
+        Assert ($hasUtf8Bom -and @($astErrors).Count -eq 0) "File $leafName preserves UTF-8 BOM ($hasUtf8Bom) and parses with 0 PowerShell AST errors (errors=$(@($astErrors).Count))"
+    }
 
     [pscustomobject]@{Passed=$script:passed; LiveTunnelStarted=$false; ProductionFilesModified=$false; Result='PASS'} | ConvertTo-Json
 

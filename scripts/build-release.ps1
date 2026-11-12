@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$Version = '1.3.0'
 )
 $ErrorActionPreference = 'Stop'
@@ -20,6 +20,7 @@ try {
     $rootFiles = @(
         'RelayStudio.exe',
         'RelayStudio.ico',
+        'HostBridge.ps1',
         'Launch-ConnectionManager.ps1',
         '连接管理.ps1',
         'ConnectionManager.psm1',
@@ -40,7 +41,7 @@ try {
         }
     }
 
-    # 2. Copy bin/ executables
+    # 2. Copy bin/ executables and WebView2 runtime loader/assemblies
     $binStage = Join-Path $appStage 'bin'
     [IO.Directory]::CreateDirectory($binStage) | Out-Null
     foreach ($binFile in @('relaystudio-core.exe', 'tunnel-client.exe')) {
@@ -50,9 +51,15 @@ try {
         }
         Copy-Item -LiteralPath $bSrc -Destination (Join-Path $binStage $binFile) -Force
     }
+    $wvSrcDir = Join-Path $repoRoot 'bin\webview2'
+    if (Test-Path -LiteralPath $wvSrcDir) {
+        $wvStageDir = Join-Path $binStage 'webview2'
+        [IO.Directory]::CreateDirectory($wvStageDir) | Out-Null
+        Copy-Item -Path (Join-Path $wvSrcDir '*.dll') -Destination $wvStageDir -Force
+    }
 
     # 3. Copy runtime directories without builtin-skills first (for Pure Routing Edition)
-    foreach ($dirName in @('browser-bridge', 'docs', 'fonts', 'scripts')) {
+    foreach ($dirName in @('browser-bridge', 'docs', 'fonts', 'scripts', 'ui')) {
         $dSrc = Join-Path $repoRoot $dirName
         if (Test-Path -LiteralPath $dSrc) {
             Copy-Item -LiteralPath $dSrc -Destination (Join-Path $appStage $dirName) -Recurse -Force

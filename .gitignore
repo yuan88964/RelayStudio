@@ -16,7 +16,10 @@ window-layout.json
 web-bridge.json
 shield-activity.json
 
-# Python & test caches
+# Python, frontend build & test caches
+/ui-src/node_modules/
+/ui-src/.vite/
+*.tsbuildinfo
 __pycache__/
 *.py[cod]
 *$py.class

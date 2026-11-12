@@ -1,6 +1,6 @@
 # RelayStudio 系统架构与模块接口契约
 
-> **架构概览**：RelayStudio 采用**云端模型推理、本机回环网关管账、本机执行内核落地、双宿主网桥续推**的四层解耦结构。所有跨进程运行状态统一收敛至监听于 `127.0.0.1:8766` 的桥接中枢与本地 JSON 账本，使 WPF 多栏界面保持低延迟读取，同时确保桌面客户端或浏览器标签页在断流、换窗或重启后仍能依托本地账本无缝续接。
+> **架构概览**：RelayStudio 采用**云端模型推理、本机回环网关管账、本机执行内核落地、双宿主网桥续推**的四层解耦结构。所有跨进程运行状态统一收敛至监听于 `127.0.0.1:8766` 的桥接中枢与本地 JSON 账本，通过 `/studio/events` SSE 增量推送与内存态宿主桥驱动 **Edge WebView2 多栏工作台**低延迟局部重绘（并保留 `--legacy` 回退至 WPF 脚本），同时确保桌面客户端或浏览器标签页在断流、换窗或重启后仍能依托本地账本无缝续接。
 
 ---
 
@@ -28,11 +28,11 @@
 
 | 模块与入口文件 | 维护的核心状态（State） | 对外接口契约（Inputs / Outputs） | 边界守卫与退路（Guards） |
 | :--- | :--- | :--- | :--- |
-| **回环桥接中枢、原生账本与 OAuth 2.1 网关**<br>[`McpReadOnlyShield.py`](../McpReadOnlyShield.py) | `engine-data/tasks/tsk_*.json`、`data/logs/web-bridge-state.json`、`shield-activity.json`、内存态在途计数与分平台模型目录 | 仅绑定 `127.0.0.1:8766`：对隧道暴露 `/mcp`（内置零配置 OAuth 2.1 + PKCE + DCR 自动授权端点以兼容 Claude / Gemini / ChatGPT 连接器）并原生处理单步 `task_manage`（7 类动作与一步自动结单）；对 UI 提供 `/studio/snapshot` 与 `/studio/action`；对网桥提供 `/web-bridge/*` | **全工具在途与严格进度门禁**：任意本机工具（含无 `task_id` 的文件/命令调用）在途或宿主正在输出时冻结停顿计时；仅在开启自动重发的任务下注入免确认尾注；重试计数仅随真实步骤/提交/工具进展清零 |
+| **回环桥接中枢、原生账本与 OAuth 2.1 网关**<br>[`McpReadOnlyShield.py`](../McpReadOnlyShield.py) | `engine-data/tasks/tsk_*.json`、`data/logs/web-bridge-state.json`、`shield-activity.json`、内存态在途计数与分平台模型目录 | 仅绑定 `127.0.0.1:8766`：对隧道暴露 `/mcp`（内置零配置 OAuth 2.1 + PKCE + DCR 自动授权端点以兼容 Claude / Gemini / ChatGPT 连接器）并原生处理单步 `task_manage`（7 类动作与一步自动结单）；对本地 UI 提供 `/studio/events`（SSE 实时推送）、`/studio/snapshot` 与 `/studio/action`；对网桥提供 `/web-bridge/*` | **公网与控制面硬隔离 + 严格进度门禁**：严禁携带隧道转发头或非回环 `Host` 访问 `/studio/*` 与 `/web-bridge/*`（直接 `403` 拦截），并支持 `studio-local.token` 校验；全工具在途或宿主输出时冻结停顿计时 |
 | **桌面端 CDP 桥接驱动**<br>[`RelayCdp.py`](../RelayCdp.py) | `127.0.0.1:9222` WebSocket 连接与多抽屉文件柜映射表 | 发现官方桌面客户端会话、穿透 `<Activity>` 隐藏容器扫描草稿号并转正为 36 位 `conv_uuid`、按需还原模型/思考强度并投递消息 | 绝不强杀运行中的带调试端口 `ChatGPT.exe`；在默认 `inherit` 原窗唤醒下跳过 `onModelChange` 防止篡改用户手调档位 |
 | **多平台浏览器 MV3 扩展网桥**<br>[`browser-bridge/`](../browser-bridge/) | `chrome.storage.local` 实例标识与三平台（ChatGPT / Gemini / Claude）标签页鲜活状态表 | `background.js` 每 2 秒聚合轮询 `/web-bridge/poll` 并管理后台标签页；`bridge-content.js` 探测各平台流式状态、动态模型档位、执行填词并返回 `ack-deliver` 两阶段回执 | 严格按 `browser_profile` 与平台隔离队列；不劫持空白新建聊天页，交接时自动保留平台入口 URL 与项目夹前缀 |
-| **双隧道与内核管理模块**<br>[`ConnectionManager.psm1`](../ConnectionManager.psm1) | `data/settings.json`、`data/credential-profiles.json`、`data/*.dpapi` | 管理 OpenAI Cloudflare 隧道与 Tailscale Funnel 双公网隧道进程、核心进程（`:8765`）与 `:8766` 中枢启停，挂载 `engine-data/AGENTS.md`（支持硬链接哈希自愈）与 `engine-data/skills`，提供 DPAPI 凭据读写 | 后台进程统一在交互式桌面会话（`WinSta0\Default`）无黑框拉起；`:8766` 离线或隔离测试模式下自动回退本地快照解析 |
-| **WPF 多栏工作台与主题引擎**<br>[`连接管理.ps1`](../连接管理.ps1) | `data/window-layout.json`、三态主题配置、最多 4 分栏视图与焦点锁 | 渲染左侧任务轨、右侧 GPU 滑动过渡多栏工作区、每栏独立操作舱（支持解耦停顿时长与重试次数配置）及顶栏连接面板 | 输入框获焦或下拉菜单展开期间自动延后分栏重建防止跳焦；支持 `跟随系统 / 浅色 / 深色` 记忆、`Ctrl+Shift+D` 切换及右键恢复跟随系统 |
+| **双隧道与内核管理模块**<br>[`ConnectionManager.psm1`](../ConnectionManager.psm1) & [`HostBridge.ps1`](../HostBridge.ps1) | `data/settings.json`、`data/credential-profiles.json`、`data/*.dpapi`、`data/studio-local.token` | 管理 OpenAI Cloudflare 隧道与 Tailscale Funnel 双公网隧道进程（含 DoH 公网边缘真实连通探活与防抖退避自愈）、核心进程（`:8765`）与 `:8766` 中枢启停，挂载 `engine-data/AGENTS.md` 与 `engine-data/skills`，通过内存态 PowerShell Runspace 向 WebView2 提供高权限 RPC（自动剥离明文密钥） | 后台进程统一在交互式桌面会话无黑框拉起；凭据与进程操作仅经内存 `WebMessageReceived` 通道执行，零网络端口暴露 |
+| **Edge WebView2 多栏工作台与主题引擎**<br>[`RelayStudio.exe`](../scripts/build-launcher.ps1) · [`ui-src/`](../ui-src/) → [`ui/`](../ui/)（含 [`连接管理.ps1`](../连接管理.ps1) `--legacy` 兼容层） | `data/window-layout.json`、`data/webview2-cache/`、三态主题配置、1～4 动态分栏视图与 2.5s 乐观交互锁 | 基于系统内置 Edge WebView2 虚拟域名 `https://studio.relaystudio.local` 承载 Preact + TypeScript 工作台：渲染无边框顶栏分段呼吸胶囊、可折叠任务轨、最多 4 分栏工作区、每栏 6 控件操作舱及原生 `<dialog>` 弹窗 | `requestAnimationFrame` 帧合并更新消除局部重绘抖动；最小化至托盘时自动断开 SSE 并挂起渲染进程（`TrySuspendAsync`）实现后台零 GPU 占用，支持 `--legacy` 参数一键回退传统 WPF 界面 |
 
 ---
 

@@ -1278,7 +1278,15 @@ function Update-OptionButtonGroupState($Pairs, $SelectedValue) {
     }
 }
 
-function Apply-WindowTheme([string]$ThemeMode = '') {
+$script:lastAppliedThemeSig = ''
+$script:trayMenu = $null
+
+function Apply-WindowTheme {
+    param(
+        [Parameter(Position = 0)]
+        [string]$ThemeMode = '',
+        [switch]$Force
+    )
     if ($ThemeMode) {
         $script:layout.ThemeMode = Resolve-NormalizedThemeMode $ThemeMode
     }
@@ -1289,6 +1297,14 @@ function Apply-WindowTheme([string]$ThemeMode = '') {
     }
     $script:effectiveTheme = Resolve-EffectiveTheme -ThemeMode ([string]$script:layout.ThemeMode)
     $isDark = ($script:effectiveTheme -eq 'dark')
+    $accentHex = '#2563EB'
+    $curCapPlatSig = if ($script:activeCapsulePlatform) { [string]$script:activeCapsulePlatform } else { 'chatgpt' }
+    $hasTraySig = [bool]($null -ne $script:trayMenu)
+    $themeSig = "$isDark|$accentHex|$($script:layout.ThemeMode)|$curCapPlatSig|$hasTraySig"
+    if (-not $Force -and $script:lastAppliedThemeSig -eq $themeSig) {
+        return
+    }
+    $script:lastAppliedThemeSig = $themeSig
 
     foreach ($hexKey in $script:xamlThemeHexKeys) {
         $resKey = 'ThemeBrush_' + $hexKey.TrimStart('#')
@@ -1479,11 +1495,21 @@ function Reset-DefaultWindowLayout {
     Show-QuickToast '已重置为默认窗口尺寸与分栏比例'
 }
 
+$script:activeCapsulePlatform = 'chatgpt'
+$script:addPlatformPickerOpen = $false
 $script:popoverExpandedProfileId = ''
 $script:globalSettingsOpen = $false
 $script:suppressDefaultCarrierComboEvent = $false
 $script:capsuleSegmentButtons = @{}
 $script:lastTestedApiKeyProfileId = ''
+$script:lastTopBarCapsuleSig = ''
+$script:lastTopStatusDotHex = ''
+$script:lastPulseBannerSig = ''
+$script:publicTunnelOpInFlight = $false
+$script:publicTunnelOpPs = $null
+$script:publicTunnelOpHandle = $null
+$script:publicTunnelOpTimer = $null
+$script:publicTunnelOpMeta = $null
 
 function Sync-PopoverAnchorAndAnimate {
     param(
@@ -1659,15 +1685,37 @@ function Toggle-GlobalSettingsPopover {
     }
 }
 
+$script:dynamicCliAgentButtons = @{}
+$script:lastCliAgentIdsSig = ''
+
 function Select-DefaultCliAgent([string]$AgentId, [string]$DisplayName = '') {
     if (-not $AgentId) { return }
-    $cfg = Get-CoreEngineConfig $script:context
-    $script:settings = (Set-CoreEngineConfig -Context $script:context -AcpDefaultProfile $AgentId -BrowserEnabled ([bool]$cfg.BrowserEnabled) -StartupMode ([string]$cfg.StartupMode) -ApplyStartup:(-not $script:context.Isolated)).Settings
-    if (-not $script:context.Isolated) { [void](Restart-LocalCoreEngine $script:context $script:settings) }
-    Refresh-ProfilePopoverState
-    Refresh-FormState
-    $label = if ($DisplayName) { $DisplayName } else { $AgentId }
-    Show-QuickToast "已将默认 CLI 智能体切换为 $label"
+    try {
+        $cfg = Get-CoreEngineConfig $script:context
+        $script:settings = (Set-CoreEngineConfig -Context $script:context -AcpDefaultProfile $AgentId -BrowserEnabled ([bool]$cfg.BrowserEnabled) -StartupMode ([string]$cfg.StartupMode) -ApplyStartup:(-not $script:context.Isolated)).Settings
+        $label = if ($DisplayName) { $DisplayName } else { $AgentId }
+        Refresh-ProfilePopoverState
+        Show-QuickToast "已将默认 CLI 智能体切换为 $label"
+        if (-not $script:context.Isolated) {
+            if ($script:window -and $script:window.Dispatcher -and (-not $NoShow)) {
+                [void]$script:window.Dispatcher.BeginInvoke([Windows.Threading.DispatcherPriority]::Background, [Action]{
+                    try {
+                        [void](Restart-LocalCoreEngine $script:context $script:settings)
+                        Refresh-FormState
+                    } catch {
+                        try { Show-QuickToast ("后台重启核心遇到异常：" + $_.Exception.Message) } catch {}
+                    }
+                })
+            } else {
+                try { [void](Restart-LocalCoreEngine $script:context $script:settings) } catch {}
+                try { Refresh-FormState } catch {}
+            }
+        } else {
+            try { Refresh-FormState } catch {}
+        }
+    } catch {
+        try { Show-QuickToast ("切换 CLI 智能体失败：" + $_.Exception.Message) } catch {}
+    }
 }
 
 function Invoke-AddCustomCliAgentDialog {
@@ -1714,7 +1762,7 @@ function Get-CapsulePlatformMeta([string]$Platform = 'chatgpt') {
                 SecondLabel = '固定 HTTPS 域名（选填，留空使用临时隧道）'; KeyLabel = 'Cloudflare 隧道凭证（选填）'
                 DisplaySecondLabel = '隧道'; DisplayKeyLabel = 'Key'
                 TunnelPlaceholder = '选填：固定 HTTPS 域名，留空使用临时隧道'
-                KeyPlaceholder = '选填：Cloudflare 隧道凭证，不用可留空'
+                KeyPlaceholder = '选填：Cloudflare 凭证；若网页提示填 OAuth ID/密钥，可复制默认 Key (relaystudio)'
                 ApiKeysUrl = 'https://developers.cloudflare.com/tunnel/get-started/'
                 PlatText = '网页端 Connectors ↗'; PlatUrl = 'https://claude.ai/settings/connectors'
             }
@@ -1727,7 +1775,7 @@ function Get-CapsulePlatformMeta([string]$Platform = 'chatgpt') {
                 SecondLabel = '固定 HTTPS 域名（选填，留空使用临时隧道）'; KeyLabel = 'Cloudflare 隧道凭证（选填）'
                 DisplaySecondLabel = '隧道'; DisplayKeyLabel = 'Key'
                 TunnelPlaceholder = '选填：固定 HTTPS 域名，留空使用临时隧道'
-                KeyPlaceholder = '选填：Cloudflare 隧道凭证，不用可留空'
+                KeyPlaceholder = '选填：Cloudflare 凭证；若网页提示填 OAuth ID/密钥，可复制默认 Key (relaystudio)'
                 ApiKeysUrl = 'https://developers.cloudflare.com/tunnel/get-started/'
                 PlatText = '已关联的应用 ↗'; PlatUrl = 'https://gemini.google.com/extensions'
             }
@@ -1854,6 +1902,186 @@ function Invoke-RemoveCurrentCapsulePlatform {
     Update-SessionCards
 }
 
+function Sync-TopBarTunnelCapsuleState {
+    param(
+        $PubState = $null,
+        $ProfilesState = $null,
+        [switch]$Force
+    )
+    $profState = if ($null -ne $ProfilesState) { $ProfilesState } else { Get-ConnectionProfiles $script:context $script:settings }
+    $script:profilesState = $profState
+    $allProfs = @($profState.Profiles)
+    $enabledPlats = @(if ($profState.PSObject.Properties['EnabledPlatforms'] -and $profState.EnabledPlatforms) {
+        $profState.EnabledPlatforms | ForEach-Object {
+            $epCode = ([string]$_).Trim().ToLowerInvariant()
+            if ($epCode -eq 'openai') { 'chatgpt' } else { $epCode }
+        }
+    } else { @('chatgpt') })
+    if ($script:activeCapsulePlatform -eq 'openai') { $script:activeCapsulePlatform = 'chatgpt' }
+    if (-not $script:activeCapsulePlatform -or ($enabledPlats -notcontains $script:activeCapsulePlatform)) {
+        $script:activeCapsulePlatform = 'chatgpt'
+    }
+    $pubTunnel = if ($null -ne $PubState) { $PubState } else { Get-PublicMcpTunnelState $script:context }
+
+    $openaiProfs = @($allProfs | Where-Object { (-not $_.PSObject.Properties['Platform']) -or (-not $_.Platform) -or ([string]$_.Platform).ToLowerInvariant() -in @('openai', 'chatgpt') })
+    $openaiActiveProf = $openaiProfs | Where-Object { $_.IsActive } | Select-Object -First 1
+    if (-not $openaiActiveProf -and $openaiProfs.Count -gt 0) { $openaiActiveProf = $openaiProfs[0] }
+
+    $activeShortName = if ($openaiActiveProf -and $openaiActiveProf.Name) {
+        ($openaiActiveProf.Name -replace '\s*(主力隧道|主力号|隧道|配置).*$', '').Trim()
+    } else { '未配置' }
+    if (-not $activeShortName) { $activeShortName = '主力隧道' }
+    if ($activeShortName.Length -gt 12) { $activeShortName = $activeShortName.Substring(0, 12) }
+    $miniTagText = $(if ($enabledPlats.Count -gt 1) { "ChatGPT · $activeShortName ▾" } else { "$activeShortName ▾" })
+
+    $capDotColor = if ($script:display -and $script:display.IsFault) {
+        '#EF4444'
+    } elseif ($script:display -and $script:display.Running) {
+        '#16A34A'
+    } elseif ($script:display -and $script:display.Core -eq '已准备好') {
+        '#F59E0B'
+    } else {
+        '#A1A1AA'
+    }
+
+    $pubRunning = [bool]($pubTunnel -and $pubTunnel.Running)
+    $pubPhase = if ($pubTunnel -and $pubTunnel.PSObject.Properties['HealthPhase'] -and $pubTunnel.HealthPhase) {
+        [string]$pubTunnel.HealthPhase
+    } elseif ($pubRunning) {
+        'Online'
+    } else {
+        'Offline'
+    }
+    $pubRtt = if ($pubTunnel -and $pubTunnel.PSObject.Properties['PublicRttMs'] -and $null -ne $pubTunnel.PublicRttMs) {
+        [int]$pubTunnel.PublicRttMs
+    } else {
+        0
+    }
+    $pubSegDotHex = if ($pubRunning -and $pubPhase -eq 'Degraded') {
+        '#F59E0B'
+    } elseif ($pubRunning) {
+        '#16A34A'
+    } else {
+        '#A1A1AA'
+    }
+    $pubStatusTip = if ($pubRunning -and $pubPhase -eq 'Degraded') {
+        "公网响应偏慢 ($($pubRtt)ms)"
+    } elseif ($pubRunning) {
+        '在线'
+    } else {
+        '离线'
+    }
+
+    $extraPlats = @($enabledPlats | Where-Object { $_ -notin @('openai', 'chatgpt') })
+    $segSpecs = New-Object 'System.Collections.Generic.List[object]'
+    $segSigParts = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($ep in $extraPlats) {
+        $epMeta = Get-CapsulePlatformMeta $ep
+        $epAct = $allProfs | Where-Object { ([string]$_.Platform).ToLowerInvariant() -eq $ep -and $_.IsActive } | Select-Object -First 1
+        if (-not $epAct) {
+            $epAct = $allProfs | Where-Object { ([string]$_.Platform).ToLowerInvariant() -eq $ep } | Select-Object -First 1
+        }
+        $epShort = if ($epAct -and $epAct.Name) { [string]$epAct.Name } else { '默认' }
+        $segLabel = "$($epMeta.Title) · $epShort ▾"
+        $segTip = "$($epMeta.Title) 公网隧道：$pubStatusTip"
+        [void]$segSpecs.Add([pscustomobject]@{
+            Platform = $ep
+            Label    = $segLabel
+            DotHex   = $pubSegDotHex
+            ToolTip  = $segTip
+        })
+        [void]$segSigParts.Add("$ep`:$segLabel`:$pubSegDotHex`:$segTip")
+    }
+
+    $panelCount = if ($script:controls.CapsuleExtraSegmentsPanel) { [int]$script:controls.CapsuleExtraSegmentsPanel.Children.Count } else { 0 }
+    $expectedPanelCount = $extraPlats.Count * 2
+    $topCapsuleSig = "$($script:effectiveTheme)|$capDotColor|$miniTagText|$expectedPanelCount|$($segSigParts -join ';')"
+    if (-not $Force -and $panelCount -eq $expectedPanelCount -and $script:lastTopBarCapsuleSig -eq $topCapsuleSig) {
+        return
+    }
+    $script:lastTopBarCapsuleSig = $topCapsuleSig
+
+    if ($script:controls.ConnIconStatusDot) {
+        $script:controls.ConnIconStatusDot.Fill = ConvertTo-Brush $capDotColor
+    }
+    if ($script:controls.ConnProfileMiniTagText -and $script:controls.ConnProfileMiniTagText.Text -ne $miniTagText) {
+        $script:controls.ConnProfileMiniTagText.Text = $miniTagText
+    }
+    if ($script:controls.CapsuleExtraSegmentsPanel) {
+        $canReuseSegs = ($script:capsuleSegmentButtons -and $script:controls.CapsuleExtraSegmentsPanel.Children.Count -eq $expectedPanelCount)
+        if ($canReuseSegs) {
+            foreach ($spec in $segSpecs) {
+                if (-not $script:capsuleSegmentButtons.ContainsKey($spec.Platform) -or -not $script:capsuleSegmentButtons[$spec.Platform]) {
+                    $canReuseSegs = $false
+                    break
+                }
+            }
+        }
+        if (-not $canReuseSegs) {
+            $script:controls.CapsuleExtraSegmentsPanel.Children.Clear()
+            $script:capsuleSegmentButtons = @{}
+            foreach ($spec in $segSpecs) {
+                $div = New-Object Windows.Controls.Border
+                $div.Width = 1
+                $div.Background = ConvertTo-Brush '#E4E4E7'
+                $div.Margin = [Windows.Thickness]::new(0, 3, 0, 3)
+                [void]$script:controls.CapsuleExtraSegmentsPanel.Children.Add($div)
+
+                $segBtn = New-Object Windows.Controls.Button
+                $segBtn.Padding = [Windows.Thickness]::new(8, 2, 8, 2)
+                $segBtn.MinHeight = 24
+                $segBtn.Background = ConvertTo-Brush 'Transparent'
+                $segBtn.BorderBrush = ConvertTo-Brush 'Transparent'
+                $segBtn.BorderThickness = [Windows.Thickness]::new(0)
+                $segBtn.Tag = $spec.Platform
+                $segBtn.ToolTip = $spec.ToolTip
+                $segStack = New-Object Windows.Controls.StackPanel
+                $segStack.Orientation = 'Horizontal'
+                $segStack.VerticalAlignment = 'Center'
+                $segDot = New-Object Windows.Shapes.Ellipse
+                $segDot.Width = 7; $segDot.Height = 7
+                $segDot.Fill = ConvertTo-Brush $spec.DotHex
+                $segDot.VerticalAlignment = 'Center'
+                $segDot.Margin = [Windows.Thickness]::new(0, 0, 6, 0)
+                [void]$segStack.Children.Add($segDot)
+                $segTxt = New-Object Windows.Controls.TextBlock
+                $segTxt.Text = $spec.Label
+                $segTxt.FontSize = 11.5
+                $segTxt.FontWeight = 'SemiBold'
+                $segTxt.Foreground = ConvertTo-Brush '#18181B'
+                $segTxt.VerticalAlignment = 'Center'
+                [void]$segStack.Children.Add($segTxt)
+                $segBtn.Content = $segStack
+                $segBtn.Add_Click({
+                    param($s, $e)
+                    if ($s.Tag) { Select-CapsulePlatform ([string]$s.Tag) $s }
+                })
+                $script:capsuleSegmentButtons[$spec.Platform] = $segBtn
+                [void]$script:controls.CapsuleExtraSegmentsPanel.Children.Add($segBtn)
+            }
+        } else {
+            foreach ($spec in $segSpecs) {
+                $segBtn = $script:capsuleSegmentButtons[$spec.Platform]
+                if ($segBtn) {
+                    if ([string]$segBtn.ToolTip -ne $spec.ToolTip) {
+                        $segBtn.ToolTip = $spec.ToolTip
+                    }
+                    if ($segBtn.Content -is [Windows.Controls.StackPanel] -and $segBtn.Content.Children.Count -ge 2) {
+                        $segDot = $segBtn.Content.Children[0]
+                        $segTxt = $segBtn.Content.Children[1]
+                        if ($segDot -is [Windows.Shapes.Ellipse]) {
+                            $segDot.Fill = ConvertTo-Brush $spec.DotHex
+                        }
+                        if ($segTxt -is [Windows.Controls.TextBlock] -and $segTxt.Text -ne $spec.Label) {
+                            $segTxt.Text = $spec.Label
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 function Refresh-ProfilePopoverState {
     $script:profilesState = Get-ConnectionProfiles $script:context $script:settings
     $allProfs = @($script:profilesState.Profiles)
@@ -1871,10 +2099,6 @@ function Refresh-ProfilePopoverState {
     $publicTunnel = Get-PublicMcpTunnelState $script:context
     $platMeta = Get-CapsulePlatformMeta $curPlat
 
-    $openaiProfs = @($allProfs | Where-Object { (-not $_.PSObject.Properties['Platform']) -or (-not $_.Platform) -or ([string]$_.Platform).ToLowerInvariant() -in @('openai', 'chatgpt') })
-    $openaiActiveProf = $openaiProfs | Where-Object { $_.IsActive } | Select-Object -First 1
-    if (-not $openaiActiveProf -and $openaiProfs.Count -gt 0) { $openaiActiveProf = $openaiProfs[0] }
-
     $platProfs = @($allProfs | Where-Object {
         $pl = if ($_.PSObject.Properties['Platform'] -and $_.Platform) { ([string]$_.Platform).ToLowerInvariant() } else { 'chatgpt' }
         if ($pl -eq 'openai') { $pl = 'chatgpt' }
@@ -1891,95 +2115,7 @@ function Refresh-ProfilePopoverState {
     if (-not $viewProf -and $script:viewingProfileId -ne 'new') { $viewProf = $activeProf }
 
     $tunRunning = [bool]($script:display -and $script:display.Running)
-    $activeShortName = if ($openaiActiveProf -and $openaiActiveProf.Name) {
-        ($openaiActiveProf.Name -replace '\s*(主力隧道|主力号|隧道|配置).*$', '').Trim()
-    } else { '未配置' }
-    if (-not $activeShortName) { $activeShortName = '主力隧道' }
-    if ($activeShortName.Length -gt 12) { $activeShortName = $activeShortName.Substring(0, 12) }
-    $script:controls.ConnProfileMiniTagText.Text = $(if ($enabledPlats.Count -gt 1) { "ChatGPT · $activeShortName ▾" } else { "$activeShortName ▾" })
-
-    if ($script:controls.CapsuleExtraSegmentsPanel) {
-        $extraPlats = @($enabledPlats | Where-Object { $_ -notin @('openai', 'chatgpt') })
-        $canReuseSegs = ($script:capsuleSegmentButtons -and $script:controls.CapsuleExtraSegmentsPanel.Children.Count -eq ($extraPlats.Count * 2))
-        if ($canReuseSegs) {
-            foreach ($ep in $extraPlats) {
-                if (-not $script:capsuleSegmentButtons.ContainsKey($ep) -or -not $script:capsuleSegmentButtons[$ep]) {
-                    $canReuseSegs = $false
-                    break
-                }
-            }
-        }
-        if (-not $canReuseSegs) {
-            $script:controls.CapsuleExtraSegmentsPanel.Children.Clear()
-            $script:capsuleSegmentButtons = @{}
-            foreach ($ep in $extraPlats) {
-                $div = New-Object Windows.Controls.Border
-                $div.Width = 1
-                $div.Background = ConvertTo-Brush '#E4E4E7'
-                $div.Margin = [Windows.Thickness]::new(0, 3, 0, 3)
-                [void]$script:controls.CapsuleExtraSegmentsPanel.Children.Add($div)
-
-                $epMeta = Get-CapsulePlatformMeta $ep
-                $epAct = $allProfs | Where-Object { ([string]$_.Platform).ToLowerInvariant() -eq $ep -and $_.IsActive } | Select-Object -First 1
-                if (-not $epAct) {
-                    $epAct = $allProfs | Where-Object { ([string]$_.Platform).ToLowerInvariant() -eq $ep } | Select-Object -First 1
-                }
-                $epShort = if ($epAct -and $epAct.Name) { [string]$epAct.Name } else { '默认' }
-                $epReady = [bool]$publicTunnel.Running
-                $segBtn = New-Object Windows.Controls.Button
-                $segBtn.Padding = [Windows.Thickness]::new(8, 2, 8, 2)
-                $segBtn.MinHeight = 24
-                $segBtn.Background = ConvertTo-Brush 'Transparent'
-                $segBtn.BorderBrush = ConvertTo-Brush 'Transparent'
-                $segBtn.BorderThickness = [Windows.Thickness]::new(0)
-                $segBtn.Tag = $ep
-                $segStack = New-Object Windows.Controls.StackPanel
-                $segStack.Orientation = 'Horizontal'
-                $segStack.VerticalAlignment = 'Center'
-                $segDot = New-Object Windows.Shapes.Ellipse
-                $segDot.Width = 7; $segDot.Height = 7
-                $segDot.Fill = ConvertTo-Brush $(if ($epReady) { '#16A34A' } else { '#A1A1AA' })
-                $segDot.VerticalAlignment = 'Center'
-                $segDot.Margin = [Windows.Thickness]::new(0, 0, 6, 0)
-                [void]$segStack.Children.Add($segDot)
-                $segTxt = New-Object Windows.Controls.TextBlock
-                $segTxt.Text = "$($epMeta.Title) · $epShort ▾"
-                $segTxt.FontSize = 11.5
-                $segTxt.FontWeight = 'SemiBold'
-                $segTxt.Foreground = ConvertTo-Brush '#18181B'
-                $segTxt.VerticalAlignment = 'Center'
-                [void]$segStack.Children.Add($segTxt)
-                $segBtn.Content = $segStack
-                $segBtn.Add_Click({
-                    param($s, $e)
-                    if ($s.Tag) { Select-CapsulePlatform ([string]$s.Tag) $s }
-                })
-                $script:capsuleSegmentButtons[$ep] = $segBtn
-                [void]$script:controls.CapsuleExtraSegmentsPanel.Children.Add($segBtn)
-            }
-        } else {
-            foreach ($ep in $extraPlats) {
-                $epMeta = Get-CapsulePlatformMeta $ep
-                $epAct = $allProfs | Where-Object { ([string]$_.Platform).ToLowerInvariant() -eq $ep -and $_.IsActive } | Select-Object -First 1
-                if (-not $epAct) {
-                    $epAct = $allProfs | Where-Object { ([string]$_.Platform).ToLowerInvariant() -eq $ep } | Select-Object -First 1
-                }
-                $epShort = if ($epAct -and $epAct.Name) { [string]$epAct.Name } else { '默认' }
-                $epReady = [bool]$publicTunnel.Running
-                $segBtn = $script:capsuleSegmentButtons[$ep]
-                if ($segBtn -and $segBtn.Content -is [Windows.Controls.StackPanel] -and $segBtn.Content.Children.Count -ge 2) {
-                    $segDot = $segBtn.Content.Children[0]
-                    $segTxt = $segBtn.Content.Children[1]
-                    if ($segDot -is [Windows.Shapes.Ellipse]) {
-                        $segDot.Fill = ConvertTo-Brush $(if ($epReady) { '#16A34A' } else { '#A1A1AA' })
-                    }
-                    if ($segTxt -is [Windows.Controls.TextBlock]) {
-                        $segTxt.Text = "$($epMeta.Title) · $epShort ▾"
-                    }
-                }
-            }
-        }
-    }
+    Sync-TopBarTunnelCapsuleState -PubState $publicTunnel -ProfilesState $script:profilesState
 
     if ($script:controls.AddPlatformPanelBorder -and $script:controls.AddPlatformListPanel) {
         $script:controls.AddPlatformPanelBorder.Visibility = $(if ($script:addPlatformPickerOpen) { 'Visible' } else { 'Collapsed' })
@@ -2122,9 +2258,10 @@ function Refresh-ProfilePopoverState {
             $nameRow.VerticalAlignment = 'Center'
             $isChatGptPlat = ($curPlat -in @('openai', 'chatgpt'))
             $platTunRunning = if ($isChatGptPlat) { $tunRunning } else { [bool]$publicTunnel.Running }
+            $isDegradedPub = (-not $isChatGptPlat) -and $platTunRunning -and ($publicTunnel.PSObject.Properties['HealthPhase'] -and $publicTunnel.HealthPhase -eq 'Degraded')
             $dot = New-Object Windows.Shapes.Ellipse
             $dot.Width = 7; $dot.Height = 7
-            $dot.Fill = ConvertTo-Brush $(if ($isProfActive -and $platTunRunning) { '#16A34A' } elseif ($isProfActive) { '#22C55E' } elseif ($isProfViewing) { '#2563EB' } else { '#A1A1AA' })
+            $dot.Fill = ConvertTo-Brush $(if ($isProfActive -and $isDegradedPub) { '#F59E0B' } elseif ($isProfActive -and $platTunRunning) { '#16A34A' } elseif ($isProfActive) { '#22C55E' } elseif ($isProfViewing) { '#2563EB' } else { '#A1A1AA' })
             $dot.VerticalAlignment = 'Center'
             $dot.Margin = [Windows.Thickness]::new(0, 0, 7, 0)
             [void]$nameRow.Children.Add($dot)
@@ -2196,10 +2333,10 @@ function Refresh-ProfilePopoverState {
             # Line 2: Unified Tunnel + Key + Inline Copy Links across all platforms
             $rawEndpointOrTid = if (-not $isChatGptPlat) {
                 $profDomain = if ($prof.PSObject.Properties['BaseUrl'] -and $prof.BaseUrl) { ([string]$prof.BaseUrl).Trim() } else { '' }
-                if ($profDomain) {
-                    try { ConvertTo-PublicMcpUrl $profDomain } catch { $profDomain }
-                } elseif ($isProfActive -and $publicTunnel.Running -and $publicTunnel.Url -and ((-not $publicTunnel.ProfileId) -or ($publicTunnel.ProfileId -eq $prof.Id))) {
+                if ($isProfActive -and $publicTunnel.Running -and $publicTunnel.Url -and ((-not $publicTunnel.ProfileId) -or ($publicTunnel.ProfileId -eq $prof.Id))) {
                     [string]$publicTunnel.Url
+                } elseif ($profDomain) {
+                    try { ConvertTo-PublicMcpUrl $profDomain } catch { $profDomain }
                 } else {
                     ''
                 }
@@ -2222,10 +2359,13 @@ function Refresh-ProfilePopoverState {
                 }
             }
             $rawPlain = [string]$prof.PlainKey
+            $isDefaultOAuthKey = ((-not $isChatGptPlat) -and (-not $rawPlain))
             $shortKey = if ($rawPlain.Length -ge 12) {
                 "$($rawPlain.Substring(0, 8))••••$($rawPlain.Substring($rawPlain.Length - 4))"
             } elseif ($rawPlain.Length -gt 0) {
                 '••••••••'
+            } elseif ($isDefaultOAuthKey) {
+                'relaystudio'
             } else {
                 ''
             }
@@ -2281,16 +2421,25 @@ function Refresh-ProfilePopoverState {
             $copyKeyBtn.Padding = [Windows.Thickness]::new(2, 0, 2, 0)
             $copyKeyBtn.MinHeight = 16
             $copyKeyBtn.VerticalAlignment = 'Center'
-            $copyKeyBtn.Tag = $rawPlain
+            $copyKeyBtn.Tag = [pscustomobject]@{
+                Val = $(if ($rawPlain) { $rawPlain } elseif ($isDefaultOAuthKey) { 'relaystudio' } else { '' })
+                IsDefaultOAuth = [bool]$isDefaultOAuthKey
+            }
             $copyKeyBtn.Add_Click({
                 param($s, $e)
                 $e.Handled = $true
-                $val = [string]$s.Tag
+                $tagObj = $s.Tag
+                $val = if ($tagObj -is [pscustomobject]) { [string]$tagObj.Val } else { [string]$tagObj }
+                $isDefOAuth = if ($tagObj -is [pscustomobject] -and $tagObj.PSObject.Properties['IsDefaultOAuth']) { [bool]$tagObj.IsDefaultOAuth } else { $false }
                 if ($val) {
                     try { [Windows.Clipboard]::SetText($val) } catch { }
                     $s.Content = '✓ 已复制'
                     $s.Foreground = ConvertTo-Brush '#16A34A'
-                    Show-QuickToast '已复制完整 Key 到剪贴板'
+                    if ($isDefOAuth) {
+                        Show-QuickToast '已复制默认 OAuth 凭据 (relaystudio)，可直接粘贴至客户端 ID 与密钥'
+                    } else {
+                        Show-QuickToast '已复制完整 Key 到剪贴板'
+                    }
                 } else {
                     Show-QuickToast '当前配置尚未填写 Key'
                 }
@@ -2325,33 +2474,47 @@ function Refresh-ProfilePopoverState {
     $isCurChatGpt = ($curPlat -in @('openai', 'chatgpt'))
     $curPlatTunRunning = if ($isCurChatGpt) { $tunRunning } else { [bool]$publicTunnel.Running }
     if ($script:controls.QuickConnectButton) {
-        if ($viewProf -and $activeProf -and $viewProf.Id -ne $activeProf.Id) {
-            $script:controls.QuickConnectButton.Content = "▶ 启动此隧道"
-            $script:controls.QuickConnectButton.Background = ConvertTo-Brush '#2563EB'
-            $script:controls.QuickConnectButton.BorderBrush = ConvertTo-Brush '#2563EB'
-            $script:controls.QuickConnectButton.Foreground = ConvertTo-Brush '#FEFEFF'
-        } elseif (-not $curPlatTunRunning) {
-            $script:controls.QuickConnectButton.Content = "▶ 启动隧道"
-            $script:controls.QuickConnectButton.Background = ConvertTo-Brush '#2563EB'
-            $script:controls.QuickConnectButton.BorderBrush = ConvertTo-Brush '#2563EB'
-            $script:controls.QuickConnectButton.Foreground = ConvertTo-Brush '#FEFEFF'
+        if ((-not $isCurChatGpt) -and $script:publicTunnelOpInFlight) {
+            $script:controls.QuickConnectButton.IsEnabled = $false
+            if ($script:publicTunnelOpMeta -and $script:publicTunnelOpMeta.Action -eq 'connect') {
+                $script:controls.QuickConnectButton.Content = '连接中…'
+            }
         } else {
-            $script:controls.QuickConnectButton.Content = "↻ 重新连接"
-            $script:controls.QuickConnectButton.Background = ConvertTo-Brush '#EFF6FF'
-            $script:controls.QuickConnectButton.BorderBrush = ConvertTo-Brush '#BFDBFE'
-            $script:controls.QuickConnectButton.Foreground = ConvertTo-Brush '#2563EB'
+            $script:controls.QuickConnectButton.IsEnabled = $true
+            if ($viewProf -and $activeProf -and $viewProf.Id -ne $activeProf.Id) {
+                $script:controls.QuickConnectButton.Content = "▶ 启动此隧道"
+                $script:controls.QuickConnectButton.Background = ConvertTo-Brush '#2563EB'
+                $script:controls.QuickConnectButton.BorderBrush = ConvertTo-Brush '#2563EB'
+                $script:controls.QuickConnectButton.Foreground = ConvertTo-Brush '#FEFEFF'
+            } elseif (-not $curPlatTunRunning) {
+                $script:controls.QuickConnectButton.Content = "▶ 启动隧道"
+                $script:controls.QuickConnectButton.Background = ConvertTo-Brush '#2563EB'
+                $script:controls.QuickConnectButton.BorderBrush = ConvertTo-Brush '#2563EB'
+                $script:controls.QuickConnectButton.Foreground = ConvertTo-Brush '#FEFEFF'
+            } else {
+                $script:controls.QuickConnectButton.Content = "↻ 重新连接"
+                $script:controls.QuickConnectButton.Background = ConvertTo-Brush '#EFF6FF'
+                $script:controls.QuickConnectButton.BorderBrush = ConvertTo-Brush '#BFDBFE'
+                $script:controls.QuickConnectButton.Foreground = ConvertTo-Brush '#2563EB'
+            }
         }
     }
     if ($script:controls.DisconnectButton) {
-        $script:controls.DisconnectButton.Content = '断开隧道'
-        if (-not $isCurChatGpt) {
+        if ((-not $isCurChatGpt) -and $script:publicTunnelOpInFlight) {
             $script:controls.DisconnectButton.Visibility = 'Visible'
-            $script:controls.DisconnectButton.IsEnabled = [bool]($publicTunnel.Running -or $publicTunnel.ProcessId)
+            $script:controls.DisconnectButton.IsEnabled = $false
+            $script:controls.DisconnectButton.Content = $(if ($script:publicTunnelOpMeta -and $script:publicTunnelOpMeta.Action -eq 'disconnect') { '断开中…' } else { '断开隧道' })
         } else {
-            $coreReady = ($script:display -and $script:display.Core -eq '已准备好')
-            $legacy = ($script:display -and $script:display.Tunnel -eq '旧脚本连接仍在运行')
-            $script:controls.DisconnectButton.IsEnabled = [bool]($script:display -and $script:display.Running)
-            $script:controls.DisconnectButton.Visibility = $(if ($coreReady -and $legacy) { 'Collapsed' } else { 'Visible' })
+            $script:controls.DisconnectButton.Content = '断开隧道'
+            if (-not $isCurChatGpt) {
+                $script:controls.DisconnectButton.Visibility = 'Visible'
+                $script:controls.DisconnectButton.IsEnabled = [bool]($publicTunnel.Running -or $publicTunnel.ProcessId)
+            } else {
+                $coreReady = ($script:display -and $script:display.Core -eq '已准备好')
+                $legacy = ($script:display -and $script:display.Tunnel -eq '旧脚本连接仍在运行')
+                $script:controls.DisconnectButton.IsEnabled = [bool]($script:display -and $script:display.Running)
+                $script:controls.DisconnectButton.Visibility = $(if ($coreReady -and $legacy) { 'Collapsed' } else { 'Visible' })
+            }
         }
     }
 
@@ -2442,15 +2605,15 @@ function Refresh-ProfilePopoverState {
 
     if ($script:controls.CliAgentsButtonPanel) {
         $detectedCliAgents = @(Get-DetectedCliAgents -Settings $script:settings -Context $script:context)
-        $script:controls.CliAgentsButtonPanel.Children.Clear()
         $cliBtnPairs = New-Object 'System.Collections.Generic.List[object]'
+        $desiredButtons = New-Object 'System.Collections.Generic.List[object]'
         if ($detectedCliAgents.Count -eq 0) {
             foreach ($fallbackPair in @(
                 @{ Btn = $script:controls.AcpProfileCodexButton; Val = 'codex' },
                 @{ Btn = $script:controls.AcpProfileClaudeButton; Val = 'claude' }
             )) {
                 if ($fallbackPair.Btn) {
-                    [void]$script:controls.CliAgentsButtonPanel.Children.Add($fallbackPair.Btn)
+                    [void]$desiredButtons.Add($fallbackPair.Btn)
                     [void]$cliBtnPairs.Add($fallbackPair)
                 }
             }
@@ -2462,6 +2625,12 @@ function Refresh-ProfilePopoverState {
                     $script:controls.AcpProfileCodexButton
                 } elseif ($agId -eq 'claude' -and $script:controls.AcpProfileClaudeButton) {
                     $script:controls.AcpProfileClaudeButton
+                } elseif ($script:dynamicCliAgentButtons.ContainsKey($agId) -and $script:dynamicCliAgentButtons[$agId]) {
+                    $cachedBtn = $script:dynamicCliAgentButtons[$agId]
+                    $cachedBtn.Content = $agDisp
+                    $cachedBtn.ToolTip = [string]$ag.command
+                    $cachedBtn.Tag = [pscustomobject]@{ Id = $agId; Name = $agDisp }
+                    $cachedBtn
                 } else {
                     $dynBtn = New-Object Windows.Controls.Button
                     $dynBtn.Content = $agDisp
@@ -2473,17 +2642,35 @@ function Refresh-ProfilePopoverState {
                     $dynBtn.Tag = [pscustomobject]@{ Id = $agId; Name = $agDisp }
                     $dynBtn.Add_Click({
                         param($s, $e)
-                        if ($s.Tag) { Select-DefaultCliAgent ([string]$s.Tag.Id) ([string]$s.Tag.Name) }
+                        try {
+                            if ($s.Tag) { Select-DefaultCliAgent ([string]$s.Tag.Id) ([string]$s.Tag.Name) }
+                        } catch {}
                     })
+                    $script:dynamicCliAgentButtons[$agId] = $dynBtn
                     $dynBtn
                 }
                 if ($btnElem) {
-                    if ($btnElem.Parent -is [Windows.Controls.Panel]) {
-                        [void]$btnElem.Parent.Children.Remove($btnElem)
-                    }
-                    [void]$script:controls.CliAgentsButtonPanel.Children.Add($btnElem)
+                    [void]$desiredButtons.Add($btnElem)
                     [void]$cliBtnPairs.Add(@{ Btn = $btnElem; Val = $agId })
                 }
+            }
+        }
+        $needsPanelRebuild = ($script:controls.CliAgentsButtonPanel.Children.Count -ne $desiredButtons.Count)
+        if (-not $needsPanelRebuild) {
+            for ($bi = 0; $bi -lt $desiredButtons.Count; $bi++) {
+                if (-not [object]::ReferenceEquals($script:controls.CliAgentsButtonPanel.Children[$bi], $desiredButtons[$bi])) {
+                    $needsPanelRebuild = $true
+                    break
+                }
+            }
+        }
+        if ($needsPanelRebuild) {
+            $script:controls.CliAgentsButtonPanel.Children.Clear()
+            foreach ($bElem in $desiredButtons) {
+                if ($bElem.Parent -is [Windows.Controls.Panel]) {
+                    [void]$bElem.Parent.Children.Remove($bElem)
+                }
+                [void]$script:controls.CliAgentsButtonPanel.Children.Add($bElem)
             }
         }
         Update-OptionButtonGroupState ($cliBtnPairs.ToArray()) $coreCfg.AcpDefaultProfile
@@ -2656,6 +2843,173 @@ function Resolve-ProfileTunnelModeLabel($Prof, $TunnelState = $null) {
     return 'Cloudflare 临时隧道'
 }
 
+function Complete-PublicTunnelConnectUi($Prof, $State) {
+    $modeLbl = Resolve-ProfileTunnelModeLabel $Prof $State
+    $isDegraded = [bool]($State -and $State.Running -and $State.PSObject.Properties['HealthPhase'] -and $State.HealthPhase -eq 'Degraded')
+    $rttMs = if ($State -and $State.PSObject.Properties['PublicRttMs'] -and $null -ne $State.PublicRttMs) { [int]$State.PublicRttMs } else { 0 }
+    $script:lastTopBarCapsuleSig = ''
+    if ($script:popoverOpen -or $script:globalSettingsOpen -or $NoShow -or $script:context.Isolated) {
+        Refresh-ProfilePopoverState
+    }
+    Refresh-FormState
+    $fbMsg = if ($isDegraded) {
+        "已启动「$($Prof.Name)」隧道（$modeLbl · 公网响应偏慢 $($rttMs)ms）"
+    } elseif ($State -and $State.Running) {
+        "已启动「$($Prof.Name)」隧道（$modeLbl）"
+    } elseif ($State -and $State.Mode -in @('tailscale', 'external_fixed')) {
+        "「$($Prof.Name)」公网边缘暂不可达（$modeLbl · 固定域名保持不变）"
+    } else {
+        "已切换至「$($Prof.Name)」，正在建立 $modeLbl 连接…"
+    }
+    $isWarn = [bool]($State -and $State.Mode -in @('tailscale', 'external_fixed') -and (-not $State.Running))
+    Show-Feedback $fbMsg $isWarn
+    $toastMsg = if ($isDegraded) {
+        "⚠ 已启动「$($Prof.Name)」($modeLbl · 偏慢 $($rttMs)ms)"
+    } elseif ($State -and $State.Running) {
+        "✓ 已启动「$($Prof.Name)」隧道 ($modeLbl)"
+    } elseif ($isWarn) {
+        "⚠ 「$($Prof.Name)」公网暂不可达 ($modeLbl)"
+    } else {
+        "正在启动「$($Prof.Name)」隧道 ($modeLbl)…"
+    }
+    Show-QuickToast $toastMsg
+}
+
+function Start-PublicTunnelAsyncOp {
+    param(
+        [ValidateSet('connect', 'disconnect')]
+        [string]$Action,
+        $Profile = $null
+    )
+    if ($script:publicTunnelOpInFlight) {
+        Show-QuickToast '公网隧道正在后台操作中，请稍候…'
+        return
+    }
+    $modPath = Join-Path $PSScriptRoot 'ConnectionManager.psm1'
+    $dataRoot = [string]$script:context.DataRoot
+    $port = if ($script:settings.shield_port) { [int]$script:settings.shield_port } else { 8766 }
+    $fixedDom = if ($Profile -and $Profile.PSObject.Properties['BaseUrl'] -and $Profile.BaseUrl) { [string]$Profile.BaseUrl } else { '' }
+    $plainTok = if ($Profile -and $Profile.PSObject.Properties['PlainKey'] -and $Profile.PlainKey) { [string]$Profile.PlainKey } else { '' }
+    $profId = if ($Profile -and $Profile.PSObject.Properties['Id'] -and $Profile.Id) { [string]$Profile.Id } else { '' }
+
+    $script:publicTunnelOpInFlight = $true
+    $script:publicTunnelOpMeta = @{
+        Action  = $Action
+        Profile = $Profile
+    }
+    if ($Action -eq 'connect') {
+        if ($script:controls.QuickConnectButton) {
+            $script:controls.QuickConnectButton.IsEnabled = $false
+            $script:controls.QuickConnectButton.Content = '连接中…'
+        }
+        if ($script:controls.DisconnectButton) {
+            $script:controls.DisconnectButton.IsEnabled = $false
+        }
+        Show-Feedback '正在后台连接公网隧道…'
+    } else {
+        if ($script:controls.QuickConnectButton) {
+            $script:controls.QuickConnectButton.IsEnabled = $false
+        }
+        if ($script:controls.DisconnectButton) {
+            $script:controls.DisconnectButton.IsEnabled = $false
+            $script:controls.DisconnectButton.Content = '断开中…'
+        }
+        Show-Feedback '正在断开公网隧道…'
+    }
+
+    try {
+        $script:publicTunnelOpPs = [powershell]::Create()
+        [void]$script:publicTunnelOpPs.AddScript({
+            param($ModulePath, $DataRoot, $OpAction, $FixedDomain, $Token, $ShieldPort, $ProfileId)
+            try {
+                Import-Module $ModulePath -Force
+                $ctx = New-ConnectionContext -DataRoot $DataRoot
+                $cfg = Read-ConnectionSettings $ctx
+                if ($OpAction -eq 'disconnect') {
+                    Stop-PublicMcpTunnel $ctx
+                    return [pscustomobject]@{ Ok = $true; Action = 'disconnect'; State = $null; Error = '' }
+                }
+                if (-not $ctx.Isolated) {
+                    if (-not (Test-LocalUrlPortOpen "http://127.0.0.1:$ShieldPort")) {
+                        [void](Start-ReadOnlyShield $ctx $cfg (Get-OfficialCoreEndpoint $cfg))
+                    }
+                }
+                Stop-PublicMcpTunnel $ctx
+                $st = Start-PublicMcpTunnel -Context $ctx -FixedDomain $FixedDomain -Token $Token -Port $ShieldPort -ProfileId $ProfileId -ForceReconnect
+                return [pscustomobject]@{ Ok = $true; Action = 'connect'; State = $st; Error = '' }
+            } catch {
+                return [pscustomobject]@{ Ok = $false; Action = $OpAction; State = $null; Error = $_.Exception.Message }
+            }
+        }).AddArgument($modPath).AddArgument($dataRoot).AddArgument($Action).AddArgument($fixedDom).AddArgument($plainTok).AddArgument($port).AddArgument($profId)
+        $script:publicTunnelOpHandle = $script:publicTunnelOpPs.BeginInvoke()
+    } catch {
+        if ($script:publicTunnelOpPs) { try { $script:publicTunnelOpPs.Dispose() } catch { } }
+        $script:publicTunnelOpPs = $null
+        $script:publicTunnelOpHandle = $null
+        $script:publicTunnelOpInFlight = $false
+        $script:publicTunnelOpMeta = $null
+        $script:lastTopBarCapsuleSig = ''
+        if ($script:popoverOpen -or $script:globalSettingsOpen) { Refresh-ProfilePopoverState }
+        Refresh-FormState
+        Show-Feedback $_.Exception.Message $true
+        return
+    }
+
+    if (-not $script:publicTunnelOpTimer) {
+        $script:publicTunnelOpTimer = New-Object Windows.Threading.DispatcherTimer([Windows.Threading.DispatcherPriority]::Background)
+        $script:publicTunnelOpTimer.Interval = [TimeSpan]::FromMilliseconds(120)
+        $script:publicTunnelOpTimer.Add_Tick({
+            if (-not $script:publicTunnelOpHandle) {
+                $script:publicTunnelOpTimer.Stop()
+                $script:publicTunnelOpInFlight = $false
+                return
+            }
+            if (-not $script:publicTunnelOpHandle.IsCompleted) {
+                return
+            }
+            $script:publicTunnelOpTimer.Stop()
+            $opOut = $null
+            try {
+                $rawCol = $script:publicTunnelOpPs.EndInvoke($script:publicTunnelOpHandle)
+                if ($rawCol -and $rawCol.Count -gt 0) {
+                    $opOut = $rawCol[$rawCol.Count - 1]
+                }
+            } catch {
+                $opOut = [pscustomobject]@{ Ok = $false; Action = $(if ($script:publicTunnelOpMeta) { $script:publicTunnelOpMeta.Action } else { 'connect' }); State = $null; Error = $_.Exception.Message }
+            } finally {
+                if ($script:publicTunnelOpPs) { try { $script:publicTunnelOpPs.Dispose() } catch { } }
+                $script:publicTunnelOpPs = $null
+                $script:publicTunnelOpHandle = $null
+            }
+            $meta = $script:publicTunnelOpMeta
+            $script:publicTunnelOpMeta = $null
+            $script:publicTunnelOpInFlight = $false
+            Clear-PublicMcpTunnelLogCache
+            $script:lastTopBarCapsuleSig = ''
+
+            if (-not $opOut -or (-not $opOut.Ok)) {
+                $errMsg = if ($opOut -and $opOut.Error) { [string]$opOut.Error } else { '公网隧道操作失败，请稍后重试。' }
+                if ($script:popoverOpen -or $script:globalSettingsOpen) { Refresh-ProfilePopoverState }
+                Refresh-FormState
+                Show-Feedback $errMsg $true
+                Show-QuickToast ("⚠ " + $errMsg)
+                return
+            }
+            if ($opOut.Action -eq 'disconnect') {
+                if ($script:controls.DisconnectButton) { $script:controls.DisconnectButton.Content = '断开隧道' }
+                if ($script:popoverOpen -or $script:globalSettingsOpen) { Refresh-ProfilePopoverState }
+                Refresh-FormState
+                Show-Feedback '已断开 Gemini 与 Claude 共享的公网隧道。'
+                Show-QuickToast '已断开 Gemini 与 Claude 共享的公网隧道'
+            } else {
+                $freshState = Get-PublicMcpTunnelState $script:context
+                Complete-PublicTunnelConnectUi ($meta.Profile) $freshState
+            }
+        })
+    }
+    $script:publicTunnelOpTimer.Start()
+}
+
 function Invoke-PopoverQuickConnect {
     try {
         $curPlat = if ($script:activeCapsulePlatform) { $script:activeCapsulePlatform.Trim().ToLowerInvariant() } else { 'chatgpt' }
@@ -2676,25 +3030,19 @@ function Invoke-PopoverQuickConnect {
             } else {
                 $script:profilesState.Profiles | Where-Object Id -eq $script:viewingProfileId | Select-Object -First 1
             }
-            if (-not $script:context.Isolated) {
-                $port = [int]$script:settings.shield_port
-                $probe = Invoke-ConnectionProbe "http://127.0.0.1:$port/shieldz"
-                if ($probe.Status -ne 200 -or $probe.Body -notmatch '"ok"\s*:\s*true') {
-                    if (Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction SilentlyContinue) { throw '本地桥接服务未就绪，请检查连接状态。' }
-                    [void](Start-ReadOnlyShield $script:context $script:settings (Get-OfficialCoreEndpoint $script:settings))
+            if ($NoShow -or $script:context.Isolated) {
+                if (-not $script:context.Isolated) {
+                    $port = [int]$script:settings.shield_port
+                    if (-not (Test-LocalUrlPortOpen "http://127.0.0.1:$port")) {
+                        [void](Start-ReadOnlyShield $script:context $script:settings (Get-OfficialCoreEndpoint $script:settings))
+                    }
                 }
+                Stop-PublicMcpTunnel $script:context
+                $state = Start-PublicMcpTunnel -Context $script:context -FixedDomain ([string]$prof.BaseUrl) -Token ([string]$prof.PlainKey) -Port $script:settings.shield_port -ProfileId ([string]$prof.Id) -ForceReconnect
+                Complete-PublicTunnelConnectUi $prof $state
+                return
             }
-            Stop-PublicMcpTunnel $script:context
-            $state = Start-PublicMcpTunnel -Context $script:context -FixedDomain ([string]$prof.BaseUrl) -Token ([string]$prof.PlainKey) -Port $script:settings.shield_port -ProfileId ([string]$prof.Id)
-            $modeLbl = Resolve-ProfileTunnelModeLabel $prof $state
-            Refresh-ProfilePopoverState
-            $fbMsg = if ($state.Running) {
-                "已启动「$($prof.Name)」隧道（$modeLbl）"
-            } else {
-                "已切换至「$($prof.Name)」，正在建立 $modeLbl 连接…"
-            }
-            Show-Feedback $fbMsg
-            Show-QuickToast ($(if ($state.Running) { "✓ 已启动「$($prof.Name)」隧道 ($modeLbl)" } else { "正在启动「$($prof.Name)」隧道 ($modeLbl)…" }))
+            Start-PublicTunnelAsyncOp -Action 'connect' -Profile $prof
             return
         }
         $res = Select-ConnectionProfile -Context $script:context -Settings $script:settings -ProfileId $script:viewingProfileId -AutoReconnect:(-not $script:context.Isolated)
@@ -7760,10 +8108,16 @@ function Save-Form {
 
 function Update-PulseBanner {
     if (-not $script:display) { return }
+    $isFault = ($script:display.PSObject.Properties.Name -contains 'IsFault') -and [bool]$script:display.IsFault
+    $sessTxt = [string]$script:display.Session
+    $sessClr = [string]$script:display.SessionColor
+    $pulseSig = "$($script:effectiveTheme)|$isFault|$sessTxt|$sessClr"
+    if ($script:lastPulseBannerSig -eq $pulseSig) {
+        return
+    }
+    $script:lastPulseBannerSig = $pulseSig
     if ($script:controls.TopHeartbeatText) {
-        $nth = if ($script:display.PSObject.Properties['NonTaskHeartbeat']) { $script:display.NonTaskHeartbeat } else { $null }
-        $nthCount = if ($nth -and $nth.PSObject.Properties['count'] -and [int]$nth.count -gt 0) { [int]$nth.count } else { 0 }
-        if ($script:display.IsFault) {
+        if ($isFault) {
             $script:controls.TopHeartbeatPillBorder.Visibility = 'Visible'
             $script:controls.TopHeartbeatText.Text = '隧道告警: 请检查连接'
             $script:controls.TopHeartbeatText.Foreground = ConvertTo-Brush '#B91C1C'
@@ -7774,9 +8128,8 @@ function Update-PulseBanner {
             $script:controls.TopHeartbeatPillBorder.Visibility = 'Collapsed'
         }
     }
-    $script:controls.SessionStatus.Text = $script:display.Session
-    $script:controls.SessionStatus.Foreground = ConvertTo-Brush $script:display.SessionColor
-    $isFault = ($script:display.PSObject.Properties.Name -contains 'IsFault') -and [bool]$script:display.IsFault
+    $script:controls.SessionStatus.Text = $sessTxt
+    $script:controls.SessionStatus.Foreground = ConvertTo-Brush $sessClr
     if ($isFault) {
         $script:controls.PulseBannerBorder.Visibility = 'Visible'
         $script:controls.PulseBannerBorder.Background = ConvertTo-Brush '#FEF2F2'
@@ -7826,49 +8179,64 @@ function Refresh-FormState {
     param([switch]$ForceInfraProbe)
     $script:lastRefreshUtc = [DateTime]::UtcNow
     $script:display = Get-ConnectionDisplayState -Context $script:context -Settings $script:settings -ForceInfraProbe:$ForceInfraProbe
-    $script:controls.CoreStatus.Text = $script:display.Core
-    $script:controls.TunnelStatus.Text = $script:display.Tunnel
+    if ($script:controls.CoreStatus.Text -ne $script:display.Core) {
+        $script:controls.CoreStatus.Text = $script:display.Core
+    }
+    if ($script:controls.TunnelStatus.Text -ne $script:display.Tunnel) {
+        $script:controls.TunnelStatus.Text = $script:display.Tunnel
+    }
     Update-PulseBanner
     $dotHex = if ($script:display.IsFault) { '#EF4444' } elseif ($script:display.Running) { '#22C55E' } elseif ($script:display.Core -eq '已准备好') { '#F59E0B' } else { '#71717A' }
-    $script:controls.TopStatusDot.Fill = ConvertTo-Brush $dotHex
-    $script:controls.EndpointText.Text = '本地内核地址  ' + $script:display.Endpoint
-    $script:controls.DetailText.Text = $script:display.Detail
-    $script:controls.StatusButton.IsEnabled = [bool]$script:display.UiUrl
-    if ($script:display.Running -and $script:controls.FeedbackBox.Visibility -eq 'Visible' -and $script:controls.FeedbackText.Text -match '已断开') {
-        $script:controls.FeedbackBox.Visibility = 'Collapsed'
+    if ($script:lastTopStatusDotHex -ne $dotHex) {
+        $script:lastTopStatusDotHex = $dotHex
+        $script:controls.TopStatusDot.Fill = ConvertTo-Brush $dotHex
+    }
+    $endpointLine = '本地内核地址  ' + $script:display.Endpoint
+    if ($script:controls.EndpointText.Text -ne $endpointLine) {
+        $script:controls.EndpointText.Text = $endpointLine
     }
     $coreReady = $script:display.Core -eq '已准备好'
     $legacy = $script:display.Tunnel -eq '旧脚本连接仍在运行'
-    $script:controls.ConnectButton.Content = if ($legacy) { '断开旧隧道' } else { '保存并连接' }
-    $script:controls.OfficialButton.Visibility = 'Collapsed'
+    $desiredDetail = if ($coreReady -and $legacy) {
+        '旧连接通向 8787。准备切换时，点击右上角“断开旧隧道”，再按新配置连接。'
+    } else {
+        [string]$script:display.Detail
+    }
+    if ($script:controls.DetailText.Text -ne $desiredDetail) {
+        $script:controls.DetailText.Text = $desiredDetail
+    }
+    $desiredStatusEnabled = [bool]$script:display.UiUrl
+    if ($script:controls.StatusButton.IsEnabled -ne $desiredStatusEnabled) {
+        $script:controls.StatusButton.IsEnabled = $desiredStatusEnabled
+    }
+    if ($script:display.Running -and $script:controls.FeedbackBox.Visibility -eq 'Visible' -and $script:controls.FeedbackText.Text -match '已断开') {
+        $script:controls.FeedbackBox.Visibility = 'Collapsed'
+    }
+    $desiredConnectContent = if ($legacy) { '断开旧隧道' } else { '保存并连接' }
+    if ([string]$script:controls.ConnectButton.Content -ne $desiredConnectContent) {
+        $script:controls.ConnectButton.Content = $desiredConnectContent
+    }
+    if ($script:controls.OfficialButton.Visibility -ne 'Collapsed') {
+        $script:controls.OfficialButton.Visibility = 'Collapsed'
+    }
     $curCapPlat = if ($script:activeCapsulePlatform) { $script:activeCapsulePlatform.Trim().ToLowerInvariant() } else { 'chatgpt' }
     $pubTunPoll = Get-PublicMcpTunnelState $script:context
-    if ($curCapPlat -in @('', 'openai', 'chatgpt')) {
-        $script:controls.DisconnectButton.IsEnabled = [bool]$script:display.Running
-        $script:controls.DisconnectButton.Visibility = if ($coreReady -and $legacy) { 'Collapsed' } else { 'Visible' }
-    } else {
-        $script:controls.DisconnectButton.IsEnabled = [bool]($pubTunPoll.Running -or $pubTunPoll.ProcessId)
-        $script:controls.DisconnectButton.Visibility = 'Visible'
-    }
-    if ($coreReady -and $legacy) { $script:controls.DetailText.Text = '旧连接通向 8787。准备切换时，点击右上角“断开旧隧道”，再按新配置连接。' }
-    if ($script:popoverOpen -or $script:globalSettingsOpen) {
-        if ($script:controls.ConnIconStatusDot -and $script:display) {
-            $capDotColor = if ($script:display.IsFault) { '#EF4444' } elseif ($script:display.Running) { '#16A34A' } elseif ($script:display.Core -eq '已准备好') { '#F59E0B' } else { '#A1A1AA' }
-            $script:controls.ConnIconStatusDot.Fill = ConvertTo-Brush $capDotColor
+    if (-not ($script:publicTunnelOpInFlight -and ($curCapPlat -notin @('', 'openai', 'chatgpt')))) {
+        if ($curCapPlat -in @('', 'openai', 'chatgpt')) {
+            $desiredDiscEnabled = [bool]$script:display.Running
+            $desiredDiscVis = if ($coreReady -and $legacy) { 'Collapsed' } else { 'Visible' }
+        } else {
+            $desiredDiscEnabled = [bool]($pubTunPoll.Running -or $pubTunPoll.ProcessId)
+            $desiredDiscVis = 'Visible'
         }
-        if ($script:capsuleSegmentButtons) {
-            foreach ($segBtn in $script:capsuleSegmentButtons.Values) {
-                if ($segBtn -and $segBtn.Content -is [Windows.Controls.StackPanel] -and $segBtn.Content.Children.Count -ge 1) {
-                    $segDot = $segBtn.Content.Children[0]
-                    if ($segDot -is [Windows.Shapes.Ellipse]) {
-                        $segDot.Fill = ConvertTo-Brush $(if ($pubTunPoll.Running) { '#16A34A' } else { '#A1A1AA' })
-                    }
-                }
-            }
+        if ($script:controls.DisconnectButton.IsEnabled -ne $desiredDiscEnabled) {
+            $script:controls.DisconnectButton.IsEnabled = $desiredDiscEnabled
         }
-    } else {
-        Refresh-ProfilePopoverState
+        if ([string]$script:controls.DisconnectButton.Visibility -ne $desiredDiscVis) {
+            $script:controls.DisconnectButton.Visibility = $desiredDiscVis
+        }
     }
+    Sync-TopBarTunnelCapsuleState -PubState $pubTunPoll
     Update-SessionCards
     Sync-QueueFastPollingState
 }
@@ -8326,15 +8694,23 @@ $script:controls.ConnectButton.Add_Click({ Invoke-FormAction {
     Refresh-ProfilePopoverState
 } })
 $script:controls.DisconnectButton.Add_Click({
-    Invoke-FormAction {
-        $curPlat = if ($script:activeCapsulePlatform) { $script:activeCapsulePlatform.Trim().ToLowerInvariant() } else { 'chatgpt' }
-        if ($curPlat -eq 'openai') { $curPlat = 'chatgpt' }
-        if ($curPlat -ne 'chatgpt') {
+    $curPlat = if ($script:activeCapsulePlatform) { $script:activeCapsulePlatform.Trim().ToLowerInvariant() } else { 'chatgpt' }
+    if ($curPlat -eq 'openai') { $curPlat = 'chatgpt' }
+    if ($curPlat -ne 'chatgpt') {
+        if ($NoShow -or $script:context.Isolated) {
             Stop-PublicMcpTunnel $script:context
-            Refresh-ProfilePopoverState
+            $script:lastTopBarCapsuleSig = ''
+            if ($script:popoverOpen -or $script:globalSettingsOpen -or $NoShow -or $script:context.Isolated) {
+                Refresh-ProfilePopoverState
+            }
+            Refresh-FormState
             Show-QuickToast '已断开 Gemini 与 Claude 共享的公网隧道'
             return
         }
+        Start-PublicTunnelAsyncOp -Action 'disconnect'
+        return
+    }
+    Invoke-FormAction {
         Show-Feedback (Stop-ConnectionTunnel $script:context $script:settings)
         Refresh-FormState
         Refresh-ProfilePopoverState
@@ -8477,8 +8853,9 @@ $script:window.Add_Closing({
     }
 })
 
-Apply-WindowTheme
+Apply-WindowTheme -Force
 Select-WindowTab 'Live'
+Refresh-ProfilePopoverState
 Refresh-FormState
 $script:initializing = $false
 $script:dirty = $false
@@ -8640,16 +9017,22 @@ if (-not $script:context.Isolated) {
                     $hasTailscaleReady = [bool](Get-TailscaleFunnelSelfUrl)
                     if ($pubProf -or $hasTailscaleReady) {
                         $port = if ($cfg.shield_port) { [int]$cfg.shield_port } else { 8766 }
-                        $probe = Invoke-ConnectionProbe "http://127.0.0.1:$port/shieldz"
-                        if ($probe.Status -ne 200 -or $probe.Body -notmatch '"ok"\s*:\s*true') {
+                        if (-not (Test-LocalUrlPortOpen "http://127.0.0.1:$port")) {
                             [void](Start-ReadOnlyShield $ctx $cfg (Get-OfficialCoreEndpoint $cfg))
                         }
                         $pubState = Get-PublicMcpTunnelState $ctx
-                        if (-not $pubState.Running) {
+                        $needsTunnelStart = (-not $pubState.Running)
+                        if ($pubState.Running -and $pubState.Url) {
+                            $edgeCheck = Test-PublicMcpEdgeHealth -Url ([string]$pubState.Url) -Context $ctx -TimeoutMs 8000
+                            if (-not $edgeCheck.Reachable) {
+                                $needsTunnelStart = $true
+                            }
+                        }
+                        if ($needsTunnelStart) {
                             $fDom = if ($pubProf -and $pubProf.BaseUrl) { [string]$pubProf.BaseUrl } else { '' }
                             $fTok = if ($pubProf -and $pubProf.PlainKey) { [string]$pubProf.PlainKey } else { '' }
                             $fPid = if ($pubProf -and $pubProf.Id) { [string]$pubProf.Id } else { '' }
-                            [void](Start-PublicMcpTunnel -Context $ctx -FixedDomain $fDom -Token $fTok -Port $port -ProfileId $fPid -PreferTailscale:([bool]$hasTailscaleReady))
+                            [void](Start-PublicMcpTunnel -Context $ctx -FixedDomain $fDom -Token $fTok -Port $port -ProfileId $fPid -PreferTailscale:([bool]$hasTailscaleReady) -ForceReconnect)
                         }
                     }
                 }
@@ -8673,7 +9056,12 @@ if (-not $script:context.Isolated) {
             try { $script:bootPs.Dispose() } catch { }
             $script:bootPs = $null
             $script:bootAsyncHandle = $null
+            Clear-PublicMcpTunnelLogCache
+            $script:lastTopBarCapsuleSig = ''
             try { Refresh-FormState -ForceInfraProbe } catch { }
+            if ($script:popoverOpen -or $script:globalSettingsOpen) {
+                try { Refresh-ProfilePopoverState } catch { }
+            }
         }
     })
     $bootTimer.Start()
@@ -8822,6 +9210,15 @@ if (-not $StartMinimized) { $timer.Start() }
 $script:window.Add_Closed({
     try { [System.Windows.Threading.Dispatcher]::ExitAllFrames() } catch { }
 })
+if ($script:window -and $script:window.Dispatcher) {
+    $script:window.Dispatcher.Add_UnhandledException({
+        param($sender, $eventArgs)
+        $eventArgs.Handled = $true
+        try {
+            Show-QuickToast ("已拦截界面操作异常：" + $eventArgs.Exception.Message)
+        } catch {}
+    })
+}
 try {
     if (-not $StartMinimized) {
         [void]$script:window.Show()
@@ -8830,6 +9227,8 @@ try {
 }
 finally {
     if ($script:bootPs) { try { $script:bootPs.Dispose() } catch { }; $script:bootPs = $null }
+    if ($script:publicTunnelOpTimer) { try { $script:publicTunnelOpTimer.Stop() } catch { } }
+    if ($script:publicTunnelOpPs) { try { $script:publicTunnelOpPs.Dispose() } catch { }; $script:publicTunnelOpPs = $null }
     $timer.Stop()
     if ($script:queueFastTimer) { $script:queueFastTimer.Stop() }
     $ipcTimer.Stop()

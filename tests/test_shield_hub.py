@@ -39,7 +39,14 @@ class MockUpstreamHandler(BaseHTTPRequestHandler):
         tool_name = params.get("name", "")
         args = params.get("arguments") or {}
 
-        self.server.calls.append({"method": method, "tool": tool_name, "args": args, "accept": self.headers.get("Accept", "")})
+        self.server.calls.append({
+            "method": method,
+            "tool": tool_name,
+            "args": args,
+            "accept": self.headers.get("Accept", ""),
+            "transfer_encoding": self.headers.get("Transfer-Encoding", ""),
+            "content_length": self.headers.get("Content-Length", ""),
+        })
 
         if method == "tools/list":
             resp_obj = {
@@ -130,6 +137,7 @@ class ShieldHubSeamTests(unittest.TestCase):
         self.upstream_thread = threading.Thread(target=self.upstream.serve_forever, daemon=True)
         self.upstream_thread.start()
 
+        self._saved_local_token_env = os.environ.pop("RELAYSTUDIO_LOCAL_TOKEN", None)
         self.shield_srv = shield.ShieldServer(
             ("127.0.0.1", 0),
             f"http://127.0.0.1:{self.upstream_port}/mcp",
@@ -147,6 +155,10 @@ class ShieldHubSeamTests(unittest.TestCase):
             self.shield_srv.server_close()
         self.upstream.shutdown()
         self.upstream.server_close()
+        if self._saved_local_token_env is None:
+            os.environ.pop("RELAYSTUDIO_LOCAL_TOKEN", None)
+        else:
+            os.environ["RELAYSTUDIO_LOCAL_TOKEN"] = self._saved_local_token_env
         self.tmp_dir.cleanup()
 
     def _post_json(self, path: str, payload: dict) -> dict:
@@ -2034,6 +2046,1379 @@ eval(hookCode);
         })
         mtime_3 = os.stat(self.wb_state_path).st_mtime_ns
         self.assertGreater(mtime_3, mtime_2, "Substantive state change (is_generating=True) must flush to disk immediately")
+
+    def test_15_vpn_resilience_proxy_seam_and_http11_keepalive(self):
+        """Verify Seam 1 (outbound proxy resolution) and HTTP/1.1 keep-alive multi-step OAuth + MCP over a single socket."""
+        import http.client
+        import socket
+
+        # 1. Seam 1: Dead local proxy port must automatically fall back to direct/TUN mode
+        dead_env = {"HTTPS_PROXY": "http://127.0.0.1:59997", "HTTP_PROXY": "http://127.0.0.1:59997"}
+        res_dead = shield.resolve_effective_outbound_proxy_env(
+            data_root=self.data_root,
+            base_env=dead_env,
+            system_proxy_override="",
+        )
+        self.assertEqual(res_dead["Mode"], "direct_fallback")
+        self.assertEqual(res_dead["ProxyUrl"], "")
+        self.assertEqual(res_dead["Env"]["HTTPS_PROXY"], "")
+        self.assertIn("*.ts.net", res_dead["NoProxy"])
+        self.assertIn("100.64.0.0/10", res_dead["NoProxy"])
+
+        # 2. Seam 1: Live local proxy port (e.g. switched VPN client) is dynamically adopted
+        dummy_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        dummy_sock.bind(("127.0.0.1", 0))
+        dummy_sock.listen(1)
+        live_port = dummy_sock.getsockname()[1]
+        try:
+            res_live = shield.resolve_effective_outbound_proxy_env(
+                data_root=self.data_root,
+                base_env=dead_env,
+                system_proxy_override=f"127.0.0.1:{live_port}",
+            )
+            self.assertEqual(res_live["Mode"], "proxy")
+            self.assertEqual(res_live["ProxyUrl"], f"http://127.0.0.1:{live_port}")
+            self.assertEqual(res_live["Env"]["HTTPS_PROXY"], f"http://127.0.0.1:{live_port}")
+        finally:
+            dummy_sock.close()
+
+        # 3. Seam 1: Explicit 'direct' setting overrides all proxies
+        res_direct = shield.resolve_effective_outbound_proxy_env(
+            data_root=self.data_root,
+            base_env=dead_env,
+            system_proxy_override="",
+            outbound_proxy_setting="direct",
+        )
+        self.assertEqual(res_direct["Mode"], "direct")
+        self.assertEqual(res_direct["ProxyUrl"], "")
+
+        # 4. Persistent HTTP/1.1 Keep-Alive over a SINGLE TCP socket (simulating tailscaled Funnel / cloudflared reverse proxy)
+        conn = http.client.HTTPConnection("127.0.0.1", self.shield_port, timeout=5)
+        try:
+            conn.request("GET", "/.well-known/oauth-protected-resource", headers={"Connection": "keep-alive"})
+            r1 = conn.getresponse()
+            b1 = json.loads(r1.read().decode("utf-8"))
+            self.assertEqual(r1.status, 200)
+            self.assertEqual(r1.getheader("Connection"), "keep-alive")
+            self.assertIn("authorization_servers", b1)
+            sock_fileno_1 = conn.sock.fileno()
+
+            # Second request on the exact same TCP connection
+            conn.request("GET", "/.well-known/oauth-authorization-server", headers={"Connection": "keep-alive"})
+            r2 = conn.getresponse()
+            b2 = json.loads(r2.read().decode("utf-8"))
+            self.assertEqual(r2.status, 200)
+            self.assertEqual(r2.getheader("Connection"), "keep-alive")
+            self.assertIn("token_endpoint", b2)
+            self.assertEqual(conn.sock.fileno(), sock_fileno_1, "HTTP/1.1 keep-alive must reuse the exact same socket")
+
+            # Third request (forwarded POST /mcp tools/list) on the exact same TCP connection
+            mcp_req = json.dumps({"jsonrpc": "2.0", "id": 99, "method": "tools/list", "params": {}}).encode("utf-8")
+            conn.request(
+                "POST",
+                "/mcp",
+                body=mcp_req,
+                headers={"Content-Type": "application/json", "Connection": "keep-alive"},
+            )
+            r3 = conn.getresponse()
+            b3 = json.loads(r3.read().decode("utf-8"))
+            self.assertEqual(r3.status, 200)
+            self.assertEqual(r3.getheader("Connection"), "keep-alive")
+            self.assertIn("result", b3)
+            self.assertEqual(conn.sock.fileno(), sock_fileno_1, "Forwarded /mcp POST must also preserve HTTP/1.1 keep-alive socket")
+        finally:
+            conn.close()
+
+    def test_16_chunked_request_decoding_and_hop_by_hop_stripping(self):
+        """Verify RFC 9112 Transfer-Encoding: chunked decoding and hop-by-hop header stripping across OAuth and /mcp."""
+        import http.client
+
+        def _encode_chunked(parts: list[bytes], with_ext: bool = False, trailer: bytes = b"") -> bytes:
+            out = bytearray()
+            for idx, part in enumerate(parts):
+                ext = b";chunk-ext=val" if (with_ext and idx == 0) else b""
+                out.extend(f"{len(part):x}".encode("ascii") + ext + b"\r\n" + part + b"\r\n")
+            out.extend(b"0\r\n")
+            if trailer:
+                out.extend(trailer + b"\r\n")
+            out.extend(b"\r\n")
+            return bytes(out)
+
+        conn = http.client.HTTPConnection("127.0.0.1", self.shield_port, timeout=5)
+        try:
+            # 1. Chunked POST /oauth/register (with chunk extension) on keep-alive socket
+            reg_body = json.dumps({
+                "client_name": "Gemini Chunked Connector",
+                "redirect_uris": ["https://gemini.google.com/oauth/callback"],
+            }).encode("utf-8")
+            chunked_reg = _encode_chunked([reg_body[:24], reg_body[24:]], with_ext=True)
+            conn.putrequest("POST", "/oauth/register")
+            conn.putheader("Content-Type", "application/json")
+            conn.putheader("Transfer-Encoding", "chunked")
+            conn.putheader("Connection", "keep-alive")
+            conn.endheaders()
+            conn.send(chunked_reg)
+
+            r_reg = conn.getresponse()
+            b_reg = json.loads(r_reg.read().decode("utf-8"))
+            self.assertEqual(r_reg.status, 201)
+            self.assertEqual(r_reg.getheader("Connection"), "keep-alive")
+            self.assertTrue(str(b_reg.get("client_id") or "").startswith("rs_client_"))
+            sock_fileno = conn.sock.fileno()
+
+            # 2. Chunked POST /mcp (initialize -> tools/list) on the EXACT SAME socket without Content-Length
+            valid_chunked_tok = shield._sign_oauth_envelope(
+                "rs_at",
+                {
+                    "client_id": b_reg["client_id"],
+                    "scope": "mcp",
+                    "expires_at": int(time.time()) + 3600,
+                    "nonce": "chunked_keepalive",
+                },
+            )
+            init_payload = json.dumps({
+                "jsonrpc": "2.0",
+                "id": 101,
+                "method": "initialize",
+                "params": {"protocolVersion": "2025-03-26", "capabilities": {}, "clientInfo": {"name": "Google", "version": "1.0"}},
+            }).encode("utf-8")
+            chunked_init = _encode_chunked([init_payload[:30], init_payload[30:90], init_payload[90:]], with_ext=True, trailer=b"X-Checksum: ok")
+            conn.putrequest("POST", "/mcp")
+            conn.putheader("Content-Type", "application/json")
+            conn.putheader("Transfer-Encoding", "chunked")
+            conn.putheader("Authorization", f"Bearer {valid_chunked_tok}")
+            conn.putheader("Connection", "keep-alive")
+            conn.endheaders()
+            conn.send(chunked_init)
+
+            r_init = conn.getresponse()
+            b_init = json.loads(r_init.read().decode("utf-8"))
+            self.assertEqual(r_init.status, 200)
+            self.assertEqual(r_init.getheader("Connection"), "keep-alive")
+            self.assertEqual(b_init.get("id"), 101)
+            self.assertEqual(conn.sock.fileno(), sock_fileno, "Socket must remain open and synchronized after chunked POST /mcp")
+
+            # Verify upstream received decoded Content-Length and NO Transfer-Encoding header
+            last_call = self.upstream.calls[-1]
+            self.assertEqual(last_call["method"], "initialize")
+            self.assertEqual(last_call["transfer_encoding"], "", "Transfer-Encoding hop-by-hop header must be stripped before upstream")
+            self.assertEqual(int(last_call["content_length"]), len(init_payload), "Upstream must receive exact decoded Content-Length")
+
+            # 3. Follow-up chunked POST /mcp (tools/list) on the same socket
+            list_payload = json.dumps({"jsonrpc": "2.0", "id": 102, "method": "tools/list", "params": {}}).encode("utf-8")
+            chunked_list = _encode_chunked([list_payload[:18], list_payload[18:]])
+            conn.putrequest("POST", "/mcp")
+            conn.putheader("Content-Type", "application/json")
+            conn.putheader("Transfer-Encoding", "chunked")
+            conn.putheader("Connection", "keep-alive")
+            conn.endheaders()
+            conn.send(chunked_list)
+
+            r_list = conn.getresponse()
+            b_list = json.loads(r_list.read().decode("utf-8"))
+            self.assertEqual(r_list.status, 200)
+            self.assertEqual(b_list.get("id"), 102)
+            self.assertIn("tools", b_list.get("result") or {})
+            self.assertEqual(conn.sock.fileno(), sock_fileno)
+
+            # 4. Malformed chunked request on /mcp must return 400 with Connection: close
+            conn.putrequest("POST", "/mcp")
+            conn.putheader("Content-Type", "application/json")
+            conn.putheader("Transfer-Encoding", "chunked")
+            conn.putheader("Connection", "keep-alive")
+            conn.endheaders()
+            conn.send(b"ZZZ_NOT_HEX\r\n{}\r\n0\r\n\r\n")
+
+            r_bad = conn.getresponse()
+            _ = r_bad.read()
+            self.assertEqual(r_bad.status, 400)
+            self.assertEqual(r_bad.getheader("Connection"), "close")
+        finally:
+            conn.close()
+
+    def test_17_shield_handler_timeout_whiteboard_sharing_and_tailscale_fixed_url_preservation(self):
+        """Verify 15s keep-alive timeout, whiteboard cache sharing for since_sig callers, runtime read-only log bookmark, and Tailscale FixedUrl preservation."""
+        self.assertEqual(shield.ShieldHandler.timeout, 15)
+
+        # 1. Whiteboard cache sharing even when since_sig is provided and outdated
+        s_init = shield.build_studio_snapshot(self.data_root, self.tasks_root, self.wb_state_path)
+        cur_rev = s_init.get("rev")
+        self.assertTrue(cur_rev)
+        s_outdated_caller = shield.build_studio_snapshot(self.data_root, self.tasks_root, self.wb_state_path, since_sig="rev_outdated_000")
+        self.assertEqual(s_outdated_caller.get("rev"), cur_rev)
+        self.assertFalse(s_outdated_caller.get("not_modified", False))
+
+        # 2. Runtime tunnel log reading over 2500 lines trims in memory without creating .tmp files on disk when host side effects are active
+        tmp_log = os.path.join(self.logs_dir, "bookmark-test.log")
+        with open(tmp_log, "w", encoding="utf-8") as fh:
+            for idx in range(2600):
+                fh.write(f'{{"time":"2026-11-07T08:00:00Z","level":"INFO","msg":"line {idx}"}}\n')
+        orig_size = os.path.getsize(tmp_log)
+        prev_host_flag = shield._HOST_SIDE_EFFECTS_ENABLED
+        try:
+            shield._HOST_SIDE_EFFECTS_ENABLED = True
+            kept_lines = shield.read_tunnel_log_incremental(tmp_log)
+        finally:
+            shield._HOST_SIDE_EFFECTS_ENABLED = prev_host_flag
+        self.assertEqual(len(kept_lines), 2000)
+        self.assertEqual(os.path.getsize(tmp_log), orig_size, "Runtime log reader must never rewrite or truncate locked log file on disk")
+        leftover_tmps = [f for f in os.listdir(self.logs_dir) if f.startswith("bookmark-test.log.") and f.endswith(".tmp")]
+        self.assertEqual(leftover_tmps, [])
+
+        # 3. _guardian_check_public_tunnel must never overwrite user's configured fixed Tailscale URL
+        from unittest import mock
+        ts_state_file = os.path.join(self.data_root, "public-mcp-tunnel.json")
+        fixed_ts_url = "https://thinkbook16pl.tail29988f.ts.net/mcp"
+        with open(ts_state_file, "w", encoding="utf-8") as fh:
+            json.dump({"Mode": "tailscale", "FixedUrl": fixed_ts_url, "Port": self.shield_port}, fh)
+        with mock.patch.object(
+            shield,
+            "_probe_public_mcp_edge_health",
+            return_value={"ok": False, "phase": "Offline", "rtt_ms": 0, "ingress_ip": ""},
+        ), mock.patch("subprocess.run", return_value=mock.Mock(returncode=1)):
+            chk1 = shield._guardian_check_public_tunnel(self.data_root, listen_port=self.shield_port, force=True)
+            self.assertEqual(chk1.get("action"), "debounce_hold")
+            chk2 = shield._guardian_check_public_tunnel(self.data_root, listen_port=self.shield_port, force=True)
+            self.assertEqual(chk2.get("action"), "offline_persisted")
+            with open(ts_state_file, "r", encoding="utf-8") as fh:
+                after_saved = json.load(fh)
+            self.assertEqual(after_saved.get("Mode"), "tailscale")
+            self.assertEqual(after_saved.get("FixedUrl"), fixed_ts_url)
+
+    def test_18_public_edge_health_probe_doh_filtering_and_rtt_classification(self):
+        """Verify DoH IPv4 filtering (rejecting Tailscale 100.64/10 & Fake-IP 198.18/15), 8.0s default timeout, SNI probe classification, and proxy/cloudflared seams."""
+        import inspect
+        from unittest import mock
+
+        # 1. Verify calibrated default timeout_sec = 8.0 and slow_threshold_ms = 2500
+        sig = inspect.signature(shield._probe_public_mcp_edge_health)
+        self.assertEqual(sig.parameters["timeout_sec"].default, 8.0)
+        self.assertEqual(sig.parameters["slow_threshold_ms"].default, 2500)
+
+        # 2. Verify DoH filtering rejects MagicDNS CGNAT (100.64.0.0/10), Clash Fake-IP (198.18.0.0/15), RFC1918, loopback, link-local
+        for rejected_ip in (
+            "100.85.42.19",
+            "100.64.0.1",
+            "100.127.255.254",
+            "198.18.0.25",
+            "198.19.255.250",
+            "127.0.0.1",
+            "10.0.0.8",
+            "172.16.12.1",
+            "192.168.1.100",
+            "169.254.10.20",
+        ):
+            self.assertFalse(shield._is_public_edge_ipv4(rejected_ip), f"{rejected_ip} must be rejected as non-public")
+
+        for public_ip in ("103.84.155.153", "104.16.132.229", "172.64.150.10"):
+            self.assertTrue(shield._is_public_edge_ipv4(public_ip), f"{public_ip} must be accepted as public IPv4")
+
+        with shield._PUBLIC_DOH_LOCK:
+            shield._PUBLIC_DOH_CACHE.clear()
+
+        mixed_doh_doc = {
+            "Status": 0,
+            "Answer": [
+                {"name": "node.tail29988f.ts.net", "type": 1, "data": "100.85.42.19"},
+                {"name": "node.tail29988f.ts.net", "type": 1, "data": "198.18.0.25"},
+                {"name": "node.tail29988f.ts.net", "type": 28, "data": "2606:4700::1"},
+                {"name": "node.tail29988f.ts.net", "type": 1, "data": "103.84.155.153"},
+                {"name": "node.tail29988f.ts.net", "type": 1, "data": "104.16.132.229"},
+            ],
+        }
+        with mock.patch.object(shield, "_fetch_doh_json", return_value=mixed_doh_doc) as mock_doh:
+            resolved = shield._resolve_public_edge_ipv4s("node.tail29988f.ts.net", data_root=self.data_root)
+            self.assertEqual(resolved, ["103.84.155.153", "104.16.132.229"])
+            self.assertEqual(mock_doh.call_count, 1)
+            # Second lookup hits 300s in-memory _PUBLIC_DOH_CACHE without network call
+            resolved_cached = shield._resolve_public_edge_ipv4s("node.tail29988f.ts.net", data_root=self.data_root)
+            self.assertEqual(resolved_cached, ["103.84.155.153", "104.16.132.229"])
+            self.assertEqual(mock_doh.call_count, 1)
+
+        # 3. If DoH returns ONLY non-public MagicDNS/Fake-IP records, must return Offline (doh_unresolved) and NEVER dial 100.x
+        poisoned_doh = {
+            "Status": 0,
+            "Answer": [
+                {"name": "poisoned.tail29988f.ts.net", "type": 1, "data": "100.85.1.2"},
+                {"name": "poisoned.tail29988f.ts.net", "type": 1, "data": "198.18.1.9"},
+            ],
+        }
+        with mock.patch.object(shield, "resolve_effective_outbound_proxy_env", return_value={"Mode": "direct", "ProxyUrl": "", "Env": {}}), \
+             mock.patch.object(shield, "_fetch_doh_json", return_value=poisoned_doh), \
+             mock.patch("socket.create_connection") as mock_conn:
+            p_poison = shield._probe_public_mcp_edge_health("https://poisoned.tail29988f.ts.net/mcp", data_root=self.data_root)
+            self.assertFalse(p_poison["ok"])
+            self.assertEqual(p_poison["phase"], "Offline")
+            self.assertEqual(p_poison["reason"], "doh_unresolved")
+            self.assertEqual(p_poison["ingress_ip"], "")
+            mock_conn.assert_not_called()
+
+        # 4. Classify Online (<= 2500ms) vs Degraded (> 2500ms) vs Offline over raw TCP + TLS SNI
+        class _FakeTlsSock:
+            def __init__(self, status_line: bytes):
+                self._resp = status_line
+                self.sent = b""
+                self.closed = False
+
+            def settimeout(self, _t):
+                pass
+
+            def sendall(self, data: bytes):
+                self.sent += data
+
+            def recv(self, _n: int) -> bytes:
+                out, self._resp = self._resp, b""
+                return out
+
+            def close(self):
+                self.closed = True
+
+        sni_seen = []
+
+        class _FakeSslCtx:
+            def __init__(self, status_line: bytes):
+                self._status_line = status_line
+
+            def wrap_socket(self, _raw_sock, server_hostname=None):
+                sni_seen.append(server_hostname)
+                return _FakeTlsSock(self._status_line)
+
+        with mock.patch.object(shield, "_resolve_public_edge_ipv4s", return_value=["103.84.155.153"]), \
+             mock.patch("socket.create_connection", return_value=mock.MagicMock()) as m_sock, \
+             mock.patch("ssl.create_default_context", return_value=_FakeSslCtx(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{}")), \
+             mock.patch("time.perf_counter", side_effect=[100.0, 100.01, 100.02, 100.05, 100.08, 100.18]):
+            res_online = shield._probe_public_mcp_edge_health("https://node.tail29988f.ts.net/mcp", data_root=self.data_root)
+            self.assertTrue(res_online["ok"])
+            self.assertEqual(res_online["phase"], "Online")
+            self.assertEqual(res_online["rtt_ms"], 180)
+            self.assertEqual(res_online["ingress_ip"], "103.84.155.153")
+            self.assertEqual(sni_seen[-1], "node.tail29988f.ts.net")
+            m_sock.assert_called_once()
+            self.assertEqual(m_sock.call_args[0][0], ("103.84.155.153", 443))
+
+        # Cellular hotspot 4.125s RTT (> 2500ms) -> Degraded (not Offline!)
+        with mock.patch.object(shield, "_resolve_public_edge_ipv4s", return_value=["103.84.155.153"]), \
+             mock.patch("socket.create_connection", return_value=mock.MagicMock()), \
+             mock.patch("ssl.create_default_context", return_value=_FakeSslCtx(b"HTTP/1.1 401 Unauthorized\r\n\r\n")), \
+             mock.patch("time.perf_counter", side_effect=[200.0, 200.125, 200.5, 201.25, 202.0, 204.125]):
+            res_deg = shield._probe_public_mcp_edge_health("https://node.tail29988f.ts.net/mcp", data_root=self.data_root)
+            self.assertTrue(res_deg["ok"])
+            self.assertEqual(res_deg["phase"], "Degraded")
+            self.assertEqual(res_deg["rtt_ms"], 4125)
+            self.assertEqual(res_deg["ingress_ip"], "103.84.155.153")
+
+        # Cloudflare 530 / Tunnel offline across both candidate IPs -> Offline
+        with mock.patch.object(shield, "_resolve_public_edge_ipv4s", return_value=["104.16.1.1", "104.16.1.2"]), \
+             mock.patch("socket.create_connection", return_value=mock.MagicMock()) as m_sock_off, \
+             mock.patch("ssl.create_default_context", return_value=_FakeSslCtx(b"HTTP/1.1 530 Origin DNS Error\r\n\r\n")):
+            res_off = shield._probe_public_mcp_edge_health("https://dead-tunnel.trycloudflare.com/mcp", data_root=self.data_root)
+            self.assertFalse(res_off["ok"])
+            self.assertEqual(res_off["phase"], "Offline")
+            self.assertEqual(res_off["rtt_ms"], 0)
+            self.assertEqual(res_off["ingress_ip"], "")
+            self.assertEqual(m_sock_off.call_count, 2)
+
+        # 5. Verify runtime auto-discovery of local proxy port 7897 when base_env is None, and bin/cloudflared.exe lookup
+        with mock.patch.dict(os.environ, {"HTTP_PROXY": "", "HTTPS_PROXY": "", "ALL_PROXY": "", "http_proxy": "", "https_proxy": "", "all_proxy": ""}, clear=False), \
+             mock.patch.object(shield, "_is_local_proxy_port_open", side_effect=lambda u, timeout_sec=0.15: u == "http://127.0.0.1:7897"):
+            auto_proxy = shield.resolve_effective_outbound_proxy_env(
+                data_root=self.data_root,
+                base_env=None,
+                system_proxy_override="",
+                outbound_proxy_setting="auto",
+            )
+            self.assertEqual(auto_proxy["Mode"], "proxy")
+            self.assertEqual(auto_proxy["ProxyUrl"], "http://127.0.0.1:7897")
+
+        cf_src = inspect.getsource(shield._spawn_cloudflared_quick_tunnel)
+        self.assertIn('os.path.join(repo_root, "bin", "cloudflared.exe")', cf_src)
+
+    def test_19_guardian_public_tunnel_debounce_circuit_breaker_lock_yield_and_no_churn(self):
+        """Verify 2-strike debounce, 3-strike reconnect circuit breaker, StartTicks manual-reset, lock yield, zero Online file churn, and strict FixedUrl stability."""
+        from unittest import mock
+
+        ts_state_file = os.path.join(self.data_root, "public-mcp-tunnel.json")
+        fixed_ts_url = "https://thinkbook16pl.tail29988f.ts.net/mcp"
+        initial_doc = {
+            "Mode": "tailscale",
+            "ProcessId": -1,
+            "StartTicks": 639300000000000001,
+            "FixedUrl": fixed_ts_url,
+            "TailscalePath": "tailscale.exe",
+            "Port": self.shield_port,
+            "ProfileId": "prof_main",
+            "FallbackFrom": "",
+        }
+        with open(ts_state_file, "w", encoding="utf-8") as fh:
+            json.dump(initial_doc, fh, ensure_ascii=False, indent=2)
+
+        # 1. Manual Always Wins: holding public-mcp-tunnel.lock makes _guardian_check_public_tunnel yield immediately in 0ms
+        with shield._try_acquire_public_tunnel_file_lock(self.data_root) as held:
+            self.assertTrue(held)
+            t0 = time.perf_counter()
+            with mock.patch.object(shield, "_probe_public_mcp_edge_health") as m_probe_locked:
+                yield_res = shield._guardian_check_public_tunnel(self.data_root, listen_port=self.shield_port, force=True)
+                self.assertEqual(yield_res["action"], "lock_busy_yielded")
+                self.assertLess(time.perf_counter() - t0, 0.25)
+                m_probe_locked.assert_not_called()
+
+        # 2. First Online verification writes telemetry; steady Online does NOT churn file mtime; lock is NEVER held during probe
+        lock_free_during_probe = []
+
+        def _online_probe(url, timeout_sec=8.0, slow_threshold_ms=2500, data_root=""):
+            with shield._try_acquire_public_tunnel_file_lock(self.data_root) as can_lock:
+                lock_free_during_probe.append(can_lock)
+            return {"ok": True, "phase": "Online", "rtt_ms": 142, "ingress_ip": "103.84.155.153"}
+
+        with mock.patch.object(shield, "_probe_public_mcp_edge_health", side_effect=_online_probe):
+            res_on_1 = shield._guardian_check_public_tunnel(self.data_root, listen_port=self.shield_port, force=True)
+            self.assertEqual(res_on_1["action"], "healthy_online")
+            self.assertTrue(res_on_1["wrote_state"])
+            self.assertEqual(lock_free_during_probe, [True], "public-mcp-tunnel.lock must NEVER be held during network probe")
+
+            saved_on = json.loads(pathlib.Path(ts_state_file).read_text(encoding="utf-8"))
+            self.assertEqual(saved_on["Mode"], "tailscale")
+            self.assertEqual(saved_on["FixedUrl"], fixed_ts_url)
+            self.assertEqual(saved_on["Url"], fixed_ts_url)
+            self.assertEqual(saved_on["StartTicks"], 639300000000000001)
+            self.assertEqual(saved_on["ProfileId"], "prof_main")
+            self.assertEqual(saved_on["HealthPhase"], "Online")
+            self.assertTrue(saved_on["Running"])
+            self.assertEqual(saved_on["Status"], "在线")
+            self.assertEqual(saved_on["PublicRttMs"], 142)
+            self.assertEqual(saved_on["VerifiedIngressIp"], "103.84.155.153")
+            self.assertTrue(saved_on["LastCheckedUtc"])
+
+            mtime_steady_1 = os.stat(ts_state_file).st_mtime_ns
+            time.sleep(0.05)
+            # Non-forced call within 60s Online schedule is throttled
+            res_throttled = shield._guardian_check_public_tunnel(self.data_root, listen_port=self.shield_port, force=False)
+            self.assertEqual(res_throttled["action"], "throttled")
+            # Forced steady Online check does NOT rewrite file (0 mtime churn for PowerShell UI cache!)
+            res_on_2 = shield._guardian_check_public_tunnel(self.data_root, listen_port=self.shield_port, force=True)
+            self.assertEqual(res_on_2["action"], "healthy_online")
+            self.assertFalse(res_on_2["wrote_state"])
+            self.assertEqual(os.stat(ts_state_file).st_mtime_ns, mtime_steady_1)
+
+        # 3. Degraded 2-strike debounce (never restarts tunnel)
+        with mock.patch.object(
+            shield,
+            "_probe_public_mcp_edge_health",
+            return_value={"ok": True, "phase": "Degraded", "rtt_ms": 3850, "ingress_ip": "103.84.155.153"},
+        ), mock.patch("subprocess.run") as m_deg_run:
+            deg_1 = shield._guardian_check_public_tunnel(self.data_root, listen_port=self.shield_port, force=True)
+            self.assertEqual(deg_1["action"], "degraded_debounce_hold")
+            self.assertEqual(json.loads(pathlib.Path(ts_state_file).read_text(encoding="utf-8"))["HealthPhase"], "Online")
+
+            deg_2 = shield._guardian_check_public_tunnel(self.data_root, listen_port=self.shield_port, force=True)
+            self.assertEqual(deg_2["action"], "degraded_persisted")
+            saved_deg = json.loads(pathlib.Path(ts_state_file).read_text(encoding="utf-8"))
+            self.assertEqual(saved_deg["HealthPhase"], "Degraded")
+            self.assertTrue(saved_deg["Running"])
+            self.assertEqual(saved_deg["Status"], "偏慢")
+            self.assertEqual(saved_deg["PublicRttMs"], 3850)
+            self.assertEqual(saved_deg["FixedUrl"], fixed_ts_url)
+            m_deg_run.assert_not_called()
+
+        # 4. Offline 2-strike debounce + 3-strike reconnect circuit breaker + strict FixedUrl preservation (never cloudflared_quick!)
+        with mock.patch.object(
+            shield,
+            "_probe_public_mcp_edge_health",
+            return_value={"ok": False, "phase": "Offline", "rtt_ms": 0, "ingress_ip": ""},
+        ), mock.patch("subprocess.run", return_value=mock.Mock(returncode=1)) as m_ts_run, \
+             mock.patch.object(shield, "_spawn_cloudflared_quick_tunnel") as m_cf_quick:
+            # Strike 1: debounce hold (file stays Degraded/Running=True, 0 subprocesses)
+            off_1 = shield._guardian_check_public_tunnel(self.data_root, listen_port=self.shield_port, force=True)
+            self.assertEqual(off_1["action"], "debounce_hold")
+            self.assertEqual(off_1["fail_streak"], 1)
+            self.assertEqual(m_ts_run.call_count, 0)
+            self.assertEqual(json.loads(pathlib.Path(ts_state_file).read_text(encoding="utf-8"))["HealthPhase"], "Degraded")
+
+            # Strike 2: confirmed Offline -> persists Offline + Reconnect Attempt #1
+            off_2 = shield._guardian_check_public_tunnel(self.data_root, listen_port=self.shield_port, force=True)
+            self.assertEqual(off_2["action"], "offline_persisted")
+            self.assertEqual(off_2["reconnect_attempts"], 1)
+            self.assertFalse(off_2["tripped"])
+            self.assertEqual(m_ts_run.call_count, 1)
+            saved_off = json.loads(pathlib.Path(ts_state_file).read_text(encoding="utf-8"))
+            self.assertEqual(saved_off["Mode"], "tailscale")
+            self.assertEqual(saved_off["FixedUrl"], fixed_ts_url)
+            self.assertEqual(saved_off["Url"], fixed_ts_url)
+            self.assertEqual(saved_off["HealthPhase"], "Offline")
+            self.assertFalse(saved_off["Running"])
+            self.assertEqual(saved_off["Status"], "离线")
+            self.assertEqual(saved_off["PublicRttMs"], 0)
+            self.assertEqual(saved_off["VerifiedIngressIp"], "")
+
+            # Reconnect Attempt #2
+            off_3 = shield._guardian_check_public_tunnel(self.data_root, listen_port=self.shield_port, force=True)
+            self.assertEqual(off_3["reconnect_attempts"], 2)
+            self.assertFalse(off_3["tripped"])
+            self.assertEqual(m_ts_run.call_count, 2)
+
+            # Reconnect Attempt #3 -> Circuit Breaker Tripped!
+            off_4 = shield._guardian_check_public_tunnel(self.data_root, listen_port=self.shield_port, force=True)
+            self.assertEqual(off_4["action"], "circuit_breaker_tripped")
+            self.assertEqual(off_4["reconnect_attempts"], 3)
+            self.assertTrue(off_4["tripped"])
+            self.assertEqual(m_ts_run.call_count, 3)
+
+            # Subsequent checks while tripped: ZERO further subprocess spawns and NEVER downgrades to cloudflared_quick!
+            off_5 = shield._guardian_check_public_tunnel(self.data_root, listen_port=self.shield_port, force=True)
+            self.assertEqual(off_5["action"], "circuit_breaker_tripped")
+            self.assertEqual(m_ts_run.call_count, 3)
+            m_cf_quick.assert_not_called()
+            self.assertEqual(json.loads(pathlib.Path(ts_state_file).read_text(encoding="utf-8"))["FixedUrl"], fixed_ts_url)
+
+        # 5. StartTicks Manual-Reconnect Reset: updating StartTicks immediately clears tripped/backoff even with force=False!
+        manual_reconnect_doc = dict(initial_doc)
+        manual_reconnect_doc["StartTicks"] = 639300000000999999
+        with open(ts_state_file, "w", encoding="utf-8") as fh:
+            json.dump(manual_reconnect_doc, fh, ensure_ascii=False, indent=2)
+
+        with mock.patch.object(
+            shield,
+            "_probe_public_mcp_edge_health",
+            return_value={"ok": True, "phase": "Online", "rtt_ms": 210, "ingress_ip": "103.84.155.153"},
+        ):
+            # force=False proves the 180s tripped backoff was immediately cleared by StartTicks change!
+            recovered = shield._guardian_check_public_tunnel(self.data_root, listen_port=self.shield_port, force=False)
+            self.assertEqual(recovered["action"], "healthy_online")
+            with shield._PUBLIC_TUNNEL_GUARD_LOCK:
+                self.assertEqual(shield._PUBLIC_TUNNEL_GUARD_STATE["fail_streak"], 0)
+                self.assertEqual(shield._PUBLIC_TUNNEL_GUARD_STATE["reconnect_attempts"], 0)
+                self.assertFalse(shield._PUBLIC_TUNNEL_GUARD_STATE["tripped"])
+            saved_rec = json.loads(pathlib.Path(ts_state_file).read_text(encoding="utf-8"))
+            self.assertEqual(saved_rec["HealthPhase"], "Online")
+            self.assertTrue(saved_rec["Running"])
+            self.assertEqual(saved_rec["Status"], "在线")
+            self.assertEqual(saved_rec["FixedUrl"], fixed_ts_url)
+
+    def test_20_host_maintenance_async_tunnel_worker_never_blocks_caller(self):
+        """Verify _run_host_maintenance dispatches public tunnel check asynchronously on a non-blocking daemon thread."""
+        from unittest import mock
+
+        entered = threading.Event()
+        release = threading.Event()
+        call_count = []
+
+        def _slow_tunnel_check(data_root="", listen_port=8766, force=False):
+            call_count.append(data_root)
+            entered.set()
+            release.wait(timeout=3.0)
+            return {"ok": True, "action": "healthy_online"}
+
+        prev_flag = shield._HOST_SIDE_EFFECTS_ENABLED
+        try:
+            shield._HOST_SIDE_EFFECTS_ENABLED = True
+            with mock.patch.object(shield, "cold_start_pending_hosts", return_value=None), \
+                 mock.patch.object(shield.DesktopAppBridge, "tick", return_value={"ok": True}), \
+                 mock.patch.object(shield, "_guardian_check_public_tunnel", side_effect=_slow_tunnel_check):
+                t0 = time.perf_counter()
+                shield._run_host_maintenance(self.wb_state_path, self.tasks_root)
+                caller_elapsed = time.perf_counter() - t0
+                self.assertLess(caller_elapsed, 0.2, "_run_host_maintenance must return immediately without blocking on tunnel check")
+                self.assertTrue(entered.wait(timeout=2.0), "Async daemon worker must enter _guardian_check_public_tunnel")
+
+                # Second call while first worker holds _PUBLIC_TUNNEL_WORKER_LOCK must skip spawning duplicate worker
+                spawned_second = shield._trigger_public_tunnel_guardian_async(data_root=self.data_root)
+                self.assertFalse(spawned_second)
+                self.assertEqual(len(call_count), 1)
+                release.set()
+
+                deadline = time.time() + 2.0
+                while shield._PUBLIC_TUNNEL_WORKER_LOCK.locked() and time.time() < deadline:
+                    time.sleep(0.02)
+                self.assertFalse(shield._PUBLIC_TUNNEL_WORKER_LOCK.locked())
+        finally:
+            release.set()
+            shield._HOST_SIDE_EFFECTS_ENABLED = prev_flag
+
+    def test_21_post_mcp_expired_oauth_token_401_challenge_and_client_persistence(self):
+        """Verify POST /mcp challenges expired/invalid rs_at tokens with 401 + WWW-Authenticate while allowing valid rs_at & loopback, plus _OAUTH_CLIENTS disk persistence."""
+        import base64
+        import hashlib
+        import http.client
+        import urllib.error
+        import urllib.parse
+
+        base = f"http://127.0.0.1:{self.shield_port}"
+        tunnel_host = "thinkbook16pl.tail29988f.ts.net"
+        fwd_headers = {
+            "X-Forwarded-Proto": "https",
+            "X-Forwarded-Host": tunnel_host,
+            "Content-Type": "application/json",
+        }
+        mcp_body = json.dumps({"jsonrpc": "2.0", "id": "auth-check-1", "method": "tools/list", "params": {}}).encode("utf-8")
+
+        # 1. Local loopback POST /mcp without Authorization -> 200 OK
+        local_resp = self._post_json("/mcp", {"jsonrpc": "2.0", "id": "loc-1", "method": "tools/list", "params": {}})
+        self.assertIn("tools", local_resp.get("result") or {})
+
+        # 2. Public forwarded POST /mcp without Authorization (unauthenticated connector) -> 200 OK
+        unauth_pub_req = urllib.request.Request(f"{base}/mcp", data=mcp_body, headers=fwd_headers, method="POST")
+        with urllib.request.urlopen(unauth_pub_req, timeout=3) as up_resp:
+            self.assertEqual(up_resp.status, 200)
+
+        # 3. Expired Bearer rs_at... on POST /mcp -> 401 + WWW-Authenticate + oauth-shim.log event, without breaking HTTP/1.1 keep-alive!
+        expired_tok = shield._sign_oauth_envelope(
+            "rs_at",
+            {"client_id": "rs_client_exp", "scope": "mcp", "expires_at": int(time.time()) - 120, "nonce": "exp1"},
+        )
+        valid_tok = shield._sign_oauth_envelope(
+            "rs_at",
+            {"client_id": "rs_client_exp", "scope": "mcp", "expires_at": int(time.time()) + 3600, "nonce": "val1"},
+        )
+        upstream_before = len(self.upstream.calls)
+
+        conn = http.client.HTTPConnection("127.0.0.1", self.shield_port, timeout=5)
+        try:
+            conn.request(
+                "POST",
+                "/mcp",
+                body=mcp_body,
+                headers={
+                    **fwd_headers,
+                    "Authorization": f"Bearer {expired_tok}",
+                    "Connection": "keep-alive",
+                },
+            )
+            r_exp = conn.getresponse()
+            exp_payload = json.loads(r_exp.read().decode("utf-8"))
+            self.assertEqual(r_exp.status, 401)
+            self.assertEqual(exp_payload.get("error"), "invalid_token")
+            www_auth = r_exp.getheader("WWW-Authenticate") or ""
+            self.assertIn('Bearer realm="mcp"', www_auth)
+            self.assertIn(f'resource_metadata="https://{tunnel_host}/.well-known/oauth-protected-resource"', www_auth)
+            self.assertEqual(len(self.upstream.calls), upstream_before, "Expired rs_at token must NOT forward to upstream")
+            sock_fn = conn.sock.fileno()
+
+            # Retry immediately on the EXACT SAME keep-alive socket with refreshed valid rs_at token -> 200 OK!
+            conn.request(
+                "POST",
+                "/mcp",
+                body=mcp_body,
+                headers={
+                    **fwd_headers,
+                    "Authorization": f"Bearer {valid_tok}",
+                    "Connection": "keep-alive",
+                },
+            )
+            r_ok = conn.getresponse()
+            ok_payload = json.loads(r_ok.read().decode("utf-8"))
+            self.assertEqual(r_ok.status, 200)
+            self.assertIn("tools", ok_payload.get("result") or {})
+            self.assertEqual(conn.sock.fileno(), sock_fn, "401 challenge must drain request body so keep-alive socket stays reusable")
+        finally:
+            conn.close()
+
+        # Verify tampered rs_at token also challenges 401, and post_mcp_token_expired was logged to oauth-shim.log
+        tampered_req = urllib.request.Request(
+            f"{base}/mcp",
+            data=mcp_body,
+            headers={**fwd_headers, "Authorization": "Bearer rs_at.tampered.signature"},
+            method="POST",
+        )
+        with self.assertRaises(urllib.error.HTTPError) as tamp_err:
+            urllib.request.urlopen(tampered_req, timeout=3)
+        self.assertEqual(tamp_err.exception.code, 401)
+        tamp_err.exception.close()
+
+        oauth_log_path = os.path.join(self.logs_dir, "oauth-shim.log")
+        self.assertTrue(os.path.isfile(oauth_log_path))
+        oauth_log_txt = pathlib.Path(oauth_log_path).read_text(encoding="utf-8")
+        self.assertIn("post_mcp_token_expired", oauth_log_txt)
+
+        # 4. Dynamic client registration persists to oauth-clients.json and lazy-reloads across _OAUTH_CLIENTS reset
+        reg_redirect = "https://claude.ai/api/mcp/auth_callback"
+        reg_req = urllib.request.Request(
+            f"{base}/oauth/register",
+            data=json.dumps({"client_name": "Claude Persistent Connector", "redirect_uris": [reg_redirect]}).encode("utf-8"),
+            headers=fwd_headers,
+            method="POST",
+        )
+        with urllib.request.urlopen(reg_req, timeout=3) as reg_resp:
+            self.assertEqual(reg_resp.status, 201)
+            reg_doc = json.loads(reg_resp.read().decode("utf-8"))
+            persisted_cid = reg_doc["client_id"]
+
+        clients_disk_path = os.path.join(self.data_root, "oauth-clients.json")
+        self.assertTrue(os.path.isfile(clients_disk_path))
+        disk_clients = json.loads(pathlib.Path(clients_disk_path).read_text(encoding="utf-8"))
+        self.assertIn(persisted_cid, disk_clients)
+        self.assertEqual(disk_clients[persisted_cid]["redirect_uris"], [reg_redirect])
+
+        # Simulate :8766 process restart by clearing in-memory _OAUTH_CLIENTS
+        with shield._OAUTH_LOCK:
+            shield._OAUTH_CLIENTS.clear()
+
+        # Authorize WITHOUT passing redirect_uri on query string -> must lazy-load oauth-clients.json and redirect 302 to reg_redirect!
+        verifier = "persist_pkce_verifier_0123456789_abcdefghijklmnopqrstuvwxyz"
+        challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode("ascii")).digest()).rstrip(b"=").decode("ascii")
+
+        class _NoRedir(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, newurl):
+                return None
+
+        opener = urllib.request.build_opener(_NoRedir())
+        qs = urllib.parse.urlencode({
+            "response_type": "code",
+            "client_id": persisted_cid,
+            "state": "st_persist",
+            "code_challenge": challenge,
+            "code_challenge_method": "S256",
+        })
+        with self.assertRaises(urllib.error.HTTPError) as redir_exc:
+            opener.open(urllib.request.Request(f"{base}/oauth/authorize?{qs}", headers=fwd_headers, method="GET"), timeout=3)
+        self.assertEqual(redir_exc.exception.code, 302)
+        self.assertTrue((redir_exc.exception.headers.get("Location") or "").startswith(reg_redirect + "?"))
+        redir_exc.exception.close()
+
+    def test_22_local_control_plane_security_guard_blocks_public_tunnel_while_preserving_mcp_oauth(self):
+        """Verify /studio/*, /__studio__/*, and /web-bridge/* reject public-tunnel headers, non-loopback Host, and non-loopback peers with 403 while /mcp and OAuth remain public."""
+        import http.client
+        import urllib.error
+        import urllib.parse
+
+        base = f"http://127.0.0.1:{self.shield_port}"
+        tunnel_host = "thinkbook16pl.tail29988f.ts.net"
+
+        def _expect_403(method: str, path: str, headers: dict, body: bytes | None = None) -> dict:
+            conn = http.client.HTTPConnection("127.0.0.1", self.shield_port, timeout=3)
+            try:
+                put_host = "Host" in headers
+                conn.putrequest(method, path, skip_host=put_host)
+                for hk, hv in headers.items():
+                    conn.putheader(hk, hv)
+                if body is not None and "Content-Length" not in headers:
+                    conn.putheader("Content-Length", str(len(body)))
+                conn.endheaders(body)
+                resp = conn.getresponse()
+                raw = resp.read()
+                self.assertEqual(resp.status, 403, f"Expected 403 on {method} {path} with {headers}, got {resp.status}: {raw!r}")
+                return json.loads(raw.decode("utf-8")) if raw else {}
+            finally:
+                conn.close()
+
+        # 1. Reverse-proxy / public-tunnel headers MUST trigger 403 forbidden_public_tunnel across all control-plane endpoints
+        tunnel_header_cases = [
+            {"X-Forwarded-For": "203.0.113.42"},
+            {"X-Forwarded-Host": tunnel_host},
+            {"X-Forwarded-Proto": "https"},
+            {"Tailscale-Funnel-Request": "?1"},
+            {"Cf-Connecting-Ip": "198.51.100.7"},
+            {"Cf-Ray": "89abcdef01234567-HKG"},
+            {"Forwarded": "for=203.0.113.42;proto=https"},
+        ]
+        protected_routes = [
+            ("GET", "/studio/snapshot", None),
+            ("GET", "/__studio__/snapshot", None),
+            ("POST", "/studio/action", b'{"action":"set_alias","session_key":"tsk_1","title":"x"}'),
+            ("GET", "/studio/events?max_events=1", None),
+            ("GET", "/web-bridge/state", None),
+            ("POST", "/web-bridge/poll", b'{"browser":"Chrome","tabs":[]}'),
+        ]
+        for hdr_case in tunnel_header_cases:
+            for method, path, body in protected_routes:
+                err_doc = _expect_403(method, path, hdr_case, body=body)
+                self.assertEqual(err_doc.get("error"), "forbidden_public_tunnel")
+
+        # 2. Non-loopback Host header (even without X-Forwarded-* headers!) MUST trigger 403 forbidden_host
+        for bad_host in (tunnel_host, f"{tunnel_host}:443", "quick-demo.trycloudflare.com"):
+            for method, path, body in protected_routes:
+                err_doc = _expect_403(method, path, {"Host": bad_host}, body=body)
+                self.assertEqual(err_doc.get("error"), "forbidden_host")
+
+        # HEAD and DELETE on control-plane routes are also guarded
+        _expect_403("HEAD", "/studio/snapshot", {"Tailscale-Funnel-Request": "?1"})
+        del_err = _expect_403("DELETE", "/studio/action", {"Cf-Connecting-Ip": "198.51.100.7"})
+        self.assertEqual(del_err.get("error"), "forbidden_public_tunnel")
+
+        # Loopback Host variants ([::1]:port, localhost:port, 127.0.0.1:port) ARE allowed
+        for ok_host in (f"127.0.0.1:{self.shield_port}", f"localhost:{self.shield_port}", f"[::1]:{self.shield_port}"):
+            conn_ok = http.client.HTTPConnection("127.0.0.1", self.shield_port, timeout=3)
+            try:
+                conn_ok.putrequest("GET", "/studio/snapshot", skip_host=True)
+                conn_ok.putheader("Host", ok_host)
+                conn_ok.endheaders()
+                r_ok = conn_ok.getresponse()
+                snap_ok = json.loads(r_ok.read().decode("utf-8"))
+                self.assertEqual(r_ok.status, 200)
+                self.assertTrue(snap_ok.get("ok"))
+            finally:
+                conn_ok.close()
+
+        # 3. Non-loopback client_address[0] (e.g. Tailscale tailnet peer 100.85.12.34) MUST trigger 403 forbidden_non_loopback
+        captured_non_loopback = []
+        dummy_handler = shield.ShieldHandler.__new__(shield.ShieldHandler)
+        dummy_handler.client_address = ("100.85.12.34", 54321)
+        dummy_handler.headers = {}
+        dummy_handler.server = self.shield_srv
+        dummy_handler._send_json = lambda code, payload, **kw: captured_non_loopback.append((code, payload))
+        allowed = dummy_handler._check_local_control_plane_guard(
+            urllib.parse.urlsplit("/studio/snapshot"),
+            require_studio_token=True,
+        )
+        self.assertFalse(allowed)
+        self.assertEqual(captured_non_loopback, [(403, {"ok": False, "error": "forbidden_non_loopback"})])
+
+        # 4. Meanwhile, public /mcp and /.well-known/oauth-protected-resource MUST continue serving normally through the tunnel!
+        pub_headers = {
+            "Host": tunnel_host,
+            "X-Forwarded-Proto": "https",
+            "X-Forwarded-Host": tunnel_host,
+            "X-Forwarded-For": "203.0.113.42",
+            "Tailscale-Funnel-Request": "?1",
+        }
+        pr_req = urllib.request.Request(f"{base}/.well-known/oauth-protected-resource", headers=pub_headers, method="GET")
+        with urllib.request.urlopen(pr_req, timeout=3) as pr_resp:
+            self.assertEqual(pr_resp.status, 200)
+            pr_doc = json.loads(pr_resp.read().decode("utf-8"))
+            self.assertEqual(pr_doc.get("resource"), f"https://{tunnel_host}/mcp")
+
+        head_mcp_req = urllib.request.Request(f"{base}/mcp", headers=pub_headers, method="HEAD")
+        with self.assertRaises(urllib.error.HTTPError) as head_err:
+            urllib.request.urlopen(head_mcp_req, timeout=3)
+        self.assertEqual(head_err.exception.code, 401)
+        self.assertIn("WWW-Authenticate", head_err.exception.headers)
+        head_err.exception.close()
+
+        mcp_req = urllib.request.Request(
+            f"{base}/mcp",
+            data=json.dumps({"jsonrpc": "2.0", "id": "pub-ok-1", "method": "tools/list", "params": {}}).encode("utf-8"),
+            headers={**pub_headers, "Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(mcp_req, timeout=3) as mcp_resp:
+            self.assertEqual(mcp_resp.status, 200)
+            mcp_doc = json.loads(mcp_resp.read().decode("utf-8"))
+            self.assertIn("tools", mcp_doc.get("result") or {})
+
+    def test_23_studio_local_token_enforcement_query_and_header_cors_and_web_bridge_exemption(self):
+        """Verify studio-local.token & RELAYSTUDIO_LOCAL_TOKEN enforcement on /studio/* (header + query param + WebView2 CORS) while exempting /web-bridge/*."""
+        import urllib.error
+
+        base = f"http://127.0.0.1:{self.shield_port}"
+        tok_file = os.path.join(self.data_root, "studio-local.token")
+        secret_tok = "rs_local_tok_9f8e7d6c5b4a3210"
+
+        # Write studio-local.token with UTF-8 BOM + trailing newline to verify PowerShell-compatible reading
+        with open(tok_file, "wb") as fh:
+            fh.write(b"\xef\xbb\xbf" + secret_tok.encode("utf-8") + b"\r\n")
+
+        # 1. OPTIONS preflight from WebView2 virtual host MUST return 204 BEFORE auth and expose X-Studio-Token, Last-Event-ID
+        for wv_origin in ("https://studio.relaystudio.local", "http://studio.relaystudio.local"):
+            opt_req = urllib.request.Request(
+                f"{base}/studio/action",
+                headers={
+                    "Origin": wv_origin,
+                    "Access-Control-Request-Method": "POST",
+                    "Access-Control-Request-Headers": "Content-Type, X-Studio-Token",
+                },
+                method="OPTIONS",
+            )
+            with urllib.request.urlopen(opt_req, timeout=3) as opt_resp:
+                self.assertEqual(opt_resp.status, 204)
+                self.assertEqual(opt_resp.headers.get("Access-Control-Allow-Origin"), wv_origin)
+                allow_hdrs = opt_resp.headers.get("Access-Control-Allow-Headers") or ""
+                self.assertIn("X-Studio-Token", allow_hdrs)
+                self.assertIn("Last-Event-ID", allow_hdrs)
+
+        evil_opt = urllib.request.Request(
+            f"{base}/studio/action",
+            headers={"Origin": "https://studio.relaystudio.local.evil.invalid"},
+            method="OPTIONS",
+        )
+        with urllib.request.urlopen(evil_opt, timeout=3) as evil_resp:
+            self.assertIsNone(evil_resp.headers.get("Access-Control-Allow-Origin"))
+
+        # 2. /studio/* without token or with wrong token -> 403 invalid_studio_token
+        for bad_req in (
+            urllib.request.Request(f"{base}/studio/snapshot", method="GET"),
+            urllib.request.Request(f"{base}/studio/snapshot", headers={"X-Studio-Token": "wrong_token"}, method="GET"),
+            urllib.request.Request(f"{base}/studio/events?max_events=1", method="GET"),
+            urllib.request.Request(
+                f"{base}/studio/action",
+                data=b'{"action":"set_alias","session_key":"tsk_x","title":"y"}',
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            ),
+        ):
+            with self.assertRaises(urllib.error.HTTPError) as tok_err:
+                urllib.request.urlopen(bad_req, timeout=3)
+            self.assertEqual(tok_err.exception.code, 403)
+            err_body = json.loads(tok_err.exception.read().decode("utf-8"))
+            self.assertEqual(err_body.get("error"), "invalid_studio_token")
+            tok_err.exception.close()
+
+        # 3. /studio/* with X-Studio-Token header + Origin: https://studio.relaystudio.local -> 200 OK + CORS echo
+        hdr_ok_req = urllib.request.Request(
+            f"{base}/studio/snapshot",
+            headers={"X-Studio-Token": secret_tok, "Origin": "https://studio.relaystudio.local"},
+            method="GET",
+        )
+        with urllib.request.urlopen(hdr_ok_req, timeout=3) as hdr_ok_resp:
+            self.assertEqual(hdr_ok_resp.status, 200)
+            self.assertEqual(hdr_ok_resp.headers.get("Access-Control-Allow-Origin"), "https://studio.relaystudio.local")
+            self.assertTrue(json.loads(hdr_ok_resp.read().decode("utf-8")).get("ok"))
+
+        # 4. /studio/events and /studio/snapshot with ?studio_token= query param (for browser EventSource) -> 200 OK
+        ev_ok_req = urllib.request.Request(
+            f"{base}/studio/events?max_events=1&studio_token={secret_tok}",
+            headers={"Origin": "https://studio.relaystudio.local"},
+            method="GET",
+        )
+        with urllib.request.urlopen(ev_ok_req, timeout=3) as ev_ok_resp:
+            self.assertEqual(ev_ok_resp.status, 200)
+            self.assertEqual(ev_ok_resp.headers.get("Access-Control-Allow-Origin"), "https://studio.relaystudio.local")
+            self.assertIn("text/event-stream", ev_ok_resp.headers.get("Content-Type") or "")
+            ev_raw = ev_ok_resp.read().decode("utf-8")
+            self.assertIn("event: snapshot\n", ev_raw)
+
+        # 5. /web-bridge/state and /web-bridge/poll remain accessible on loopback WITHOUT X-Studio-Token!
+        wb_st = self._get_json("/web-bridge/state")
+        self.assertIn("queue", wb_st)
+        wb_poll = self._post_json("/web-bridge/poll", {"browser": "Chrome", "browser_profile": "Chrome:Default", "tabs": []})
+        self.assertTrue(wb_poll.get("ok", True))
+
+        # 6. Removing studio-local.token and setting RELAYSTUDIO_LOCAL_TOKEN enforces env token
+        os.remove(tok_file)
+        env_tok = "rs_env_tok_abcdef123456"
+        os.environ["RELAYSTUDIO_LOCAL_TOKEN"] = env_tok
+        try:
+            with self.assertRaises(urllib.error.HTTPError) as env_err:
+                urllib.request.urlopen(urllib.request.Request(f"{base}/studio/snapshot", headers={"X-Studio-Token": secret_tok}), timeout=3)
+            self.assertEqual(env_err.exception.code, 403)
+            env_err.exception.close()
+
+            with urllib.request.urlopen(urllib.request.Request(f"{base}/studio/snapshot?studio_token={env_tok}"), timeout=3) as env_ok:
+                self.assertEqual(env_ok.status, 200)
+        finally:
+            os.environ.pop("RELAYSTUDIO_LOCAL_TOKEN", None)
+
+    def test_24_studio_sse_events_initial_snapshot_and_sub_300ms_live_push_and_clean_shutdown(self):
+        """Verify GET /studio/events streams initial snapshot immediately, pushes state mutations in <300ms, and closes cleanly on server_close."""
+        import http.client
+
+        self._write_task("tsk_sse_1", "初始任务标题")
+
+        def _read_one_sse_event(resp) -> tuple[str, dict]:
+            ev_name = ""
+            data_lines = []
+            while True:
+                line_bytes = resp.fp.readline()
+                if not line_bytes:
+                    break
+                line = line_bytes.decode("utf-8").rstrip("\r\n")
+                if line == "":
+                    if ev_name or data_lines:
+                        break
+                    continue
+                if line.startswith(":"):
+                    continue
+                if line.startswith("event:"):
+                    ev_name = line[len("event:") :].strip()
+                elif line.startswith("data:"):
+                    data_lines.append(line[len("data:") :].strip())
+            payload = json.loads("\n".join(data_lines)) if data_lines else {}
+            return (ev_name, payload)
+
+        # 1. Connect to GET /studio/events?max_events=2 -> immediate initial snapshot + <300ms push on set_alias
+        conn = http.client.HTTPConnection("127.0.0.1", self.shield_port, timeout=5)
+        try:
+            conn.request("GET", "/studio/events?max_events=2", headers={"Origin": "https://studio.relaystudio.local"})
+            resp = conn.getresponse()
+            self.assertEqual(resp.status, 200)
+            self.assertEqual(resp.getheader("Content-Type"), "text/event-stream; charset=utf-8")
+            self.assertEqual(resp.getheader("Cache-Control"), "no-cache, no-store")
+            self.assertEqual(resp.getheader("X-Accel-Buffering"), "no")
+            self.assertIsNone(resp.getheader("Content-Length"))
+            self.assertEqual(resp.getheader("Access-Control-Allow-Origin"), "https://studio.relaystudio.local")
+
+            ev1_name, ev1_data = _read_one_sse_event(resp)
+            self.assertEqual(ev1_name, "snapshot")
+            self.assertTrue(ev1_data.get("ok"))
+            rev_1 = ev1_data.get("rev", "")
+            self.assertTrue(rev_1.startswith("rev_"))
+            s1 = next(s for s in ev1_data["sessions"] if s["SessionKey"] == "tsk_sse_1")
+            self.assertFalse(s1.get("HasCustomAlias"))
+
+            # Trigger POST /studio/action (set_alias) from a concurrent thread and measure SSE wakeup latency!
+            post_started = threading.Event()
+            t_post_holder = [0.0]
+
+            def _mutate_alias():
+                time.sleep(0.03)
+                t_post_holder[0] = time.perf_counter()
+                post_started.set()
+                self._post_json(
+                    "/studio/action",
+                    {"action": "set_alias", "session_key": "tsk_sse_1", "title": "WebView2 毫秒级推送标题"},
+                )
+
+            mut_thread = threading.Thread(target=_mutate_alias, daemon=True)
+            mut_thread.start()
+
+            ev2_name, ev2_data = _read_one_sse_event(resp)
+            t_received = time.perf_counter()
+            self.assertTrue(post_started.is_set())
+            mut_thread.join(timeout=2.0)
+
+            push_latency = t_received - t_post_holder[0]
+            self.assertLess(push_latency, 0.3, f"SSE mutation push took {push_latency:.3f}s (expected <0.300s)")
+            self.assertEqual(ev2_name, "snapshot")
+            rev_2 = ev2_data.get("rev", "")
+            self.assertNotEqual(rev_2, rev_1)
+            s2 = next(s for s in ev2_data["sessions"] if s["SessionKey"] == "tsk_sse_1")
+            self.assertEqual(s2["Title"], "WebView2 毫秒级推送标题")
+            self.assertTrue(s2["HasCustomAlias"])
+
+            # Verify stream closed cleanly after max_events=2
+            self.assertEqual(resp.fp.readline(), b"")
+        finally:
+            conn.close()
+
+        # 2. Reconnect with since_sig=rev_2 on /__studio__/events?max_events=2 -> initial synced frame + <300ms push on enqueue_message
+        conn2 = http.client.HTTPConnection("127.0.0.1", self.shield_port, timeout=5)
+        try:
+            conn2.request("GET", f"/__studio__/events?max_events=2&since_sig={rev_2}")
+            resp2 = conn2.getresponse()
+            self.assertEqual(resp2.status, 200)
+            ev_sync_name, ev_sync_data = _read_one_sse_event(resp2)
+            self.assertEqual(ev_sync_name, "snapshot")
+            self.assertTrue(ev_sync_data.get("not_modified"))
+            self.assertEqual(ev_sync_data.get("rev"), rev_2)
+
+            t_enq_holder = [0.0]
+
+            def _mutate_enqueue():
+                time.sleep(0.03)
+                t_enq_holder[0] = time.perf_counter()
+                self._post_json(
+                    "/studio/action",
+                    {"action": "enqueue_message", "session_key": "tsk_sse_1", "user_text": "继续推进测试"},
+                )
+
+            enq_thread = threading.Thread(target=_mutate_enqueue, daemon=True)
+            enq_thread.start()
+
+            ev_enq_name, ev_enq_data = _read_one_sse_event(resp2)
+            enq_latency = time.perf_counter() - t_enq_holder[0]
+            enq_thread.join(timeout=2.0)
+
+            self.assertLess(enq_latency, 0.3, f"SSE enqueue push took {enq_latency:.3f}s (expected <0.300s)")
+            self.assertEqual(ev_enq_name, "snapshot")
+            self.assertNotEqual(ev_enq_data.get("rev"), rev_2)
+            s_enq = next(s for s in ev_enq_data["sessions"] if s["SessionKey"] == "tsk_sse_1")
+            self.assertGreaterEqual(s_enq["PendingQueueCount"], 1)
+        finally:
+            conn2.close()
+
+        # 3. Verify open unbounded SSE stream (no max_events) exits promptly when server_close() / shutdown() runs
+        extra_srv = shield.ShieldServer(
+            ("127.0.0.1", 0),
+            f"http://127.0.0.1:{self.upstream_port}/mcp",
+            self.activity_path,
+            tasks_root=self.tasks_root,
+            data_root=self.data_root,
+        )
+        extra_port = extra_srv.server_address[1]
+        extra_th = threading.Thread(target=extra_srv.serve_forever, daemon=True)
+        extra_th.start()
+        conn3 = http.client.HTTPConnection("127.0.0.1", extra_port, timeout=5)
+        try:
+            conn3.request("GET", "/studio/events")
+            resp3 = conn3.getresponse()
+            ev_init, _ = _read_one_sse_event(resp3)
+            self.assertEqual(ev_init, "snapshot")
+
+            t_close0 = time.perf_counter()
+            extra_srv.shutdown()
+            extra_srv.server_close()
+            eof_line = resp3.fp.readline()
+            close_elapsed = time.perf_counter() - t_close0
+            self.assertEqual(eof_line, b"")
+            self.assertLess(close_elapsed, 0.6, "SSE stream must terminate cleanly upon server shutdown/close without blocking")
+        finally:
+            conn3.close()
+            extra_srv.server_close()
+
+    def test_25_pna_cors_preflight_and_snapshot_milestone_queue_fidelity(self):
+        """Verify Chromium PNA CORS headers, strict 403 tunnel guard, Milestone/Queue fidelity, and PS 5.1 ConvertFrom-Json safety."""
+        import http.client
+        import subprocess
+        import urllib.error
+
+        base = f"http://127.0.0.1:{self.shield_port}"
+        tok_file = os.path.join(self.data_root, "studio-local.token")
+        secret_tok = "rs_pna_tok_0123456789abcdef"
+        with open(tok_file, "w", encoding="utf-8") as fh:
+            fh.write(secret_tok + "\n")
+
+        try:
+            # 1. OPTIONS /studio/snapshot with Origin: https://studio.relaystudio.local + Access-Control-Request-Private-Network: true
+            for path in ("/studio/snapshot", "/studio/events", "/studio/queue_digest", "/studio/action"):
+                opt_req = urllib.request.Request(
+                    f"{base}{path}",
+                    headers={
+                        "Origin": "https://studio.relaystudio.local",
+                        "Access-Control-Request-Method": "POST" if path.endswith("/action") else "GET",
+                        "Access-Control-Request-Headers": "Content-Type, X-Studio-Token, Authorization, Cache-Control, Last-Event-ID",
+                        "Access-Control-Request-Private-Network": "true",
+                    },
+                    method="OPTIONS",
+                )
+                with urllib.request.urlopen(opt_req, timeout=3) as opt_resp:
+                    self.assertIn(opt_resp.status, (200, 204))
+                    self.assertEqual(opt_resp.headers.get("Access-Control-Allow-Origin"), "https://studio.relaystudio.local")
+                    self.assertEqual(opt_resp.headers.get("Access-Control-Allow-Private-Network"), "true")
+                    allow_hdrs = {
+                        h.strip().lower()
+                        for h in (opt_resp.headers.get("Access-Control-Allow-Headers") or "").split(",")
+                        if h.strip()
+                    }
+                    for req_h in ("content-type", "x-studio-token", "authorization", "cache-control", "last-event-id"):
+                        self.assertIn(req_h, allow_hdrs)
+
+            # 2. Seed rich task checkpoints + app-initiated pending & delivered web messages
+            now_ep = time.time()
+            iso_t1 = shield.datetime.fromtimestamp(now_ep - 120, tz=shield.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            iso_t2 = shield.datetime.fromtimestamp(now_ep - 30, tz=shield.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            iso_deliv = shield.datetime.fromtimestamp(now_ep - 15, tz=shield.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            raw_cp_warn = "s1=in_progress: 集成回归出现 1F 阻塞，正在定位原因 || SHAabcdef12 pytest=4P1F"
+            raw_cp_ok = "completed=[s1], current=s2: 全部门禁测试已恢复通过，准备热重启验证。 || SHA98765432 all_green"
+
+            task_doc = {
+                "id": "tsk_pna_fid_1",
+                "title": "PNA 与台账保真回归任务",
+                "goal": "验证里程碑原文、步骤跳转与队列全文保真",
+                "status": "active",
+                "created_at": iso_t1,
+                "updated_at": iso_t2,
+                "steps": [
+                    {"id": "s1", "title": "修复 PNA 预检头", "status": "completed", "updated_at": iso_t1},
+                    {"id": "s2", "title": "验证快照字段保真", "status": "in_progress", "updated_at": iso_t2},
+                ],
+                "checkpoints": [
+                    {
+                        "type": "checkpoint",
+                        "summary": raw_cp_warn,
+                        "trace_text": "trace: test_pna_cors failed at line 42",
+                        "created_at": iso_t1,
+                    },
+                    {
+                        "type": "checkpoint",
+                        "summary": raw_cp_ok,
+                        "trace_text": "trace: 25/25 green in 12.4s",
+                        "created_at": iso_t2,
+                    },
+                ],
+                "summary": raw_cp_ok,
+            }
+            with open(os.path.join(self.tasks_root, "tsk_pna_fid_1.json"), "w", encoding="utf-8") as fh:
+                json.dump(task_doc, fh, ensure_ascii=False)
+
+            full_sent_prompt = "【RelayStudio 任务契约】\n请严格执行 s1 修复并回写检查点。\n---\n用户原始输入：先修 PNA"
+            full_pend_prompt = "【RelayStudio 任务契约】\n完成后请热重启 8766 并汇报。\n---\n用户原始输入：再跑全量单测"
+            with open(self.wb_state_path, "w", encoding="utf-8") as fh:
+                json.dump(
+                    {
+                        "schema_version": 1,
+                        "tabs": {},
+                        "bindings": {},
+                        "queue": [
+                            {
+                                "id": "msg_sent_1",
+                                "session_key": "tsk_pna_fid_1",
+                                "status": "delivered",
+                                "mode": "new_window_handover",
+                                "app_initiated": True,
+                                "display_text": "先修 PNA",
+                                "prompt": full_sent_prompt,
+                                "created_at": iso_t1,
+                                "claimed_at": iso_t2,
+                                "delivered_at": iso_deliv,
+                                "defer_until_stopped": False,
+                                "target_model": "gpt-5-4-thinking",
+                                "reasoning_effort": "high",
+                                "browser_profile": "Edge:Default",
+                                "provider": "chatgpt",
+                                "conv_uuid": "conv-fid-1234",
+                            },
+                            {
+                                "id": "msg_pend_2",
+                                "session_key": "tsk_pna_fid_1",
+                                "status": "pending",
+                                "mode": "custom_message",
+                                "app_initiated": True,
+                                "display_text": "再跑全量单测",
+                                "prompt": full_pend_prompt,
+                                "created_at": iso_t2,
+                                "claimed_at": "",
+                                "delivered_at": "",
+                                "defer_until_stopped": True,
+                                "target_model": "gpt-5-4-thinking",
+                                "reasoning_effort": "xhigh",
+                                "browser_profile": "Edge:Default",
+                                "provider": "chatgpt",
+                                "conv_uuid": "conv-fid-1234",
+                            },
+                        ],
+                    },
+                    fh,
+                    ensure_ascii=False,
+                )
+
+            # 3. GET /studio/snapshot, GET /studio/queue_digest, GET /studio/events, POST /studio/action on loopback return PNA header
+            snap_req = urllib.request.Request(
+                f"{base}/studio/snapshot",
+                headers={"Origin": "https://studio.relaystudio.local", "X-Studio-Token": secret_tok},
+                method="GET",
+            )
+            with urllib.request.urlopen(snap_req, timeout=3) as snap_resp:
+                self.assertEqual(snap_resp.status, 200)
+                self.assertEqual(snap_resp.headers.get("Access-Control-Allow-Private-Network"), "true")
+                self.assertEqual(snap_resp.headers.get("Access-Control-Allow-Origin"), "https://studio.relaystudio.local")
+                snap_raw_bytes = snap_resp.read()
+                snap_data = json.loads(snap_raw_bytes.decode("utf-8"))
+
+            qd_req = urllib.request.Request(
+                f"{base}/studio/queue_digest",
+                headers={"Origin": "https://studio.relaystudio.local", "X-Studio-Token": secret_tok},
+                method="GET",
+            )
+            with urllib.request.urlopen(qd_req, timeout=3) as qd_resp:
+                self.assertEqual(qd_resp.status, 200)
+                self.assertEqual(qd_resp.headers.get("Access-Control-Allow-Private-Network"), "true")
+                qd_data = json.loads(qd_resp.read().decode("utf-8"))
+                self.assertTrue(qd_data.get("ok"))
+
+            sse_req = urllib.request.Request(
+                f"{base}/studio/events?max_events=1&studio_token={secret_tok}",
+                headers={"Origin": "https://studio.relaystudio.local"},
+                method="GET",
+            )
+            with urllib.request.urlopen(sse_req, timeout=3) as sse_resp:
+                self.assertEqual(sse_resp.status, 200)
+                self.assertEqual(sse_resp.headers.get("Access-Control-Allow-Private-Network"), "true")
+                _ = sse_resp.read()
+
+            act_req = urllib.request.Request(
+                f"{base}/studio/action",
+                data=json.dumps({"action": "set_alias", "session_key": "tsk_pna_fid_1", "title": "PNA已对齐"}).encode("utf-8"),
+                headers={
+                    "Origin": "https://studio.relaystudio.local",
+                    "Content-Type": "application/json",
+                    "X-Studio-Token": secret_tok,
+                },
+                method="POST",
+            )
+            with urllib.request.urlopen(act_req, timeout=3) as act_resp:
+                self.assertEqual(act_resp.status, 200)
+                self.assertEqual(act_resp.headers.get("Access-Control-Allow-Private-Network"), "true")
+                self.assertTrue(json.loads(act_resp.read().decode("utf-8")).get("ok"))
+
+            # 4. Forwarded / public-tunnel headers or non-loopback Host MUST STILL return 403 even with valid token & PNA request headers!
+            for tunnel_hdrs, expected_err in (
+                ({"Cf-Connecting-Ip": "203.0.113.9", "X-Studio-Token": secret_tok}, "forbidden_public_tunnel"),
+                ({"X-Forwarded-For": "203.0.113.9", "X-Studio-Token": secret_tok}, "forbidden_public_tunnel"),
+                ({"Tailscale-Funnel-Request": "?1", "X-Studio-Token": secret_tok}, "forbidden_public_tunnel"),
+                ({"Host": "relay.tail29988f.ts.net", "X-Studio-Token": secret_tok}, "forbidden_host"),
+            ):
+                for bad_method in ("GET", "OPTIONS"):
+                    conn_bad = http.client.HTTPConnection("127.0.0.1", self.shield_port, timeout=3)
+                    try:
+                        has_host = any(k.lower() == "host" for k in tunnel_hdrs)
+                        conn_bad.putrequest(bad_method, "/studio/snapshot", skip_host=has_host)
+                        conn_bad.putheader("Origin", "https://studio.relaystudio.local")
+                        conn_bad.putheader("Access-Control-Request-Private-Network", "true")
+                        for hk, hv in tunnel_hdrs.items():
+                            conn_bad.putheader(hk, hv)
+                        conn_bad.endheaders()
+                        r_bad = conn_bad.getresponse()
+                        err_doc = json.loads(r_bad.read().decode("utf-8"))
+                        self.assertEqual(r_bad.status, 403)
+                        self.assertEqual(err_doc.get("error"), expected_err)
+                        self.assertNotIn("sessions", err_doc)
+                    finally:
+                        conn_bad.close()
+
+            # 5. Verify Milestone, Step, PendingQueue, and SentWebMessages fidelity
+            sess = next((s for s in snap_data["sessions"] if s["SessionKey"] == "tsk_pna_fid_1"), None)
+            self.assertIsNotNone(sess)
+            self.assertEqual([st["id"] for st in sess["Steps"]], ["s1", "s2"])
+            self.assertEqual([st["status"] for st in sess["Steps"]], ["completed", "in_progress"])
+
+            ms_list = sess["Milestones"]
+            self.assertEqual(len(ms_list), 2)
+            # Newest first: ms_list[0] is s2 (ok), ms_list[1] is s1 (warning)
+            ms_ok, ms_warn = ms_list[0], ms_list[1]
+            self.assertEqual(ms_ok["StepId"], "s2")
+            self.assertEqual(ms_ok["step_id"], "s2")
+            self.assertIn("验证快照字段保真", ms_ok["Title"])
+            self.assertIn("全部门禁测试已恢复通过", ms_ok["Body"])
+            self.assertTrue(ms_ok["TimeText"])
+            self.assertEqual(ms_ok["TimeText"], ms_ok["time_text"])
+            self.assertEqual(ms_ok["TraceText"], "trace: 25/25 green in 12.4s")
+            self.assertEqual(ms_ok["trace_text"], "trace: 25/25 green in 12.4s")
+            self.assertEqual(ms_ok["RawSummary"], raw_cp_ok)
+            self.assertEqual(ms_ok["raw_summary"], raw_cp_ok)
+            self.assertFalse(ms_ok["IsWarning"])
+            self.assertFalse(ms_ok["is_warning"])
+
+            self.assertEqual(ms_warn["StepId"], "s1")
+            self.assertEqual(ms_warn["step_id"], "s1")
+            self.assertEqual(ms_warn["RawSummary"], raw_cp_warn)
+            self.assertEqual(ms_warn["raw_summary"], raw_cp_warn)
+            self.assertEqual(ms_warn["TraceText"], "trace: test_pna_cors failed at line 42")
+            self.assertTrue(ms_warn["IsWarning"])
+            self.assertTrue(ms_warn["is_warning"])
+
+            # PendingQueue preserves full prompt vs short display_text/text + defer_until_stopped
+            self.assertEqual(len(sess["PendingQueue"]), 1)
+            pq = sess["PendingQueue"][0]
+            self.assertEqual(pq["id"], "msg_pend_2")
+            self.assertEqual(pq["prompt"], full_pend_prompt)
+            self.assertEqual(pq["display_text"], "再跑全量单测")
+            self.assertEqual(pq["text"], "再跑全量单测")
+            self.assertEqual(pq["created_at"], iso_t2)
+            self.assertEqual(pq["status"], "pending")
+            self.assertEqual(pq["mode"], "custom_message")
+            self.assertTrue(pq["defer_until_stopped"])
+
+            # SentWebMessages preserves full prompt vs short display_text/text + delivered_at + mode
+            sent_delivered = next((m for m in sess["SentWebMessages"] if m["id"] == "msg_sent_1"), None)
+            self.assertIsNotNone(sent_delivered)
+            self.assertEqual(sent_delivered["prompt"], full_sent_prompt)
+            self.assertEqual(sent_delivered["display_text"], "先修 PNA")
+            self.assertEqual(sent_delivered["text"], "先修 PNA")
+            self.assertEqual(sent_delivered["created_at"], iso_t1)
+            self.assertEqual(sent_delivered["delivered_at"], iso_deliv)
+            self.assertEqual(sent_delivered["status"], "delivered")
+            self.assertEqual(sent_delivered["mode"], "new_window_handover")
+            self.assertFalse(sent_delivered["defer_until_stopped"])
+
+            # 6. Verify Windows PowerShell 5.1 ConvertFrom-Json parses the entire snapshot without duplicate-key collisions
+            snap_tmp = os.path.join(self.data_root, "snap_ps51_check.json")
+            with open(snap_tmp, "wb") as fh:
+                fh.write(snap_raw_bytes)
+            ps_check = subprocess.run(
+                [
+                    "powershell.exe",
+                    "-NoProfile",
+                    "-Command",
+                    f"$s = Get-Content -Raw -Encoding UTF8 -LiteralPath '{snap_tmp}' | ConvertFrom-Json; "
+                    "$c = $s.sessions | Where-Object { $_.SessionKey -eq 'tsk_pna_fid_1' }; "
+                    "if (-not $c -or $c.PendingQueue[0].Prompt -ne $c.PendingQueue[0].prompt -or -not $c.Milestones[0].RawSummary) { exit 2 }",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            self.assertEqual(ps_check.returncode, 0, f"PS 5.1 ConvertFrom-Json failed: {ps_check.stderr}")
+        finally:
+            if os.path.exists(tok_file):
+                os.remove(tok_file)
 
 
 if __name__ == "__main__":

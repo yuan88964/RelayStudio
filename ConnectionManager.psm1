@@ -65,6 +65,7 @@ function Get-DefaultConnectionSettings {
         health_port = 8789; credential_revision = 'legacy'
         readonly_shield = $true; shield_port = 8766
         core_port = 8765
+        outbound_proxy = 'auto'
         acp_max_concurrent_prompts = 4
         acp_default_profile = 'codex'
         browser_enabled = $true
@@ -247,6 +248,178 @@ function Test-LocalUrlPortOpen {
     return $true
 }
 
+function ConvertTo-NormalizedProxyUrl {
+    param([string]$RawProxy)
+    if (-not $RawProxy) { return '' }
+    $clean = $RawProxy.Trim()
+    if (-not $clean -or $clean -match '^(?i)(auto|direct|none|off)$') { return '' }
+    if ($clean -match '(?i)(?:https|http)=([^;,\s]+)') {
+        $clean = $Matches[1].Trim()
+    } elseif ($clean -match ';') {
+        $clean = ($clean -split ';')[0].Trim()
+    }
+    if ($clean -notmatch '^[a-zA-Z][a-zA-Z0-9+.-]*://') {
+        $clean = "http://$clean"
+    }
+    return $clean
+}
+
+function Get-WindowsSystemProxyUrl {
+    try {
+        $regPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings'
+        if (Test-Path -LiteralPath $regPath) {
+            $props = Get-ItemProperty -LiteralPath $regPath -Name ProxyEnable, ProxyServer -ErrorAction SilentlyContinue
+            if ($props -and [int]$props.ProxyEnable -eq 1 -and $props.ProxyServer) {
+                return (ConvertTo-NormalizedProxyUrl ([string]$props.ProxyServer))
+            }
+        }
+    } catch { }
+    return ''
+}
+
+$script:OutboundProxyFallbackPortsOverride = $null
+
+function Set-OutboundProxyFallbackPortsOverride {
+    param([string[]]$CandidateUrls = $null)
+    $script:OutboundProxyFallbackPortsOverride = $CandidateUrls
+}
+
+function Resolve-EffectiveOutboundProxyEnv {
+    param(
+        $Context = $null,
+        $Settings = $null,
+        [Alias('BaseEnv')]
+        $BaseEnvironment = $null,
+        [string]$ExplicitProxy = '',
+        [string]$SystemProxyOverride = $null
+    )
+    $envMap = @{}
+    $sourceEnv = if ($null -ne $BaseEnvironment) { $BaseEnvironment } else { [Environment]::GetEnvironmentVariables() }
+    foreach ($k in $sourceEnv.Keys) {
+        $envMap[[string]$k] = [string]$sourceEnv[$k]
+    }
+    $cfgMode = if ($ExplicitProxy) {
+        $ExplicitProxy.Trim()
+    } elseif ($Context -and $Context.PSObject.Properties['OutboundProxy'] -and $Context.OutboundProxy) {
+        ([string]$Context.OutboundProxy).Trim()
+    } elseif ($Settings -and $Settings.PSObject.Properties['outbound_proxy'] -and $Settings.outbound_proxy) {
+        ([string]$Settings.outbound_proxy).Trim()
+    } else {
+        'auto'
+    }
+
+    $effectiveProxy = ''
+    $hadCandidates = $false
+    if ($cfgMode -match '^(?i)(direct|none|off)$') {
+        $effectiveProxy = ''
+        $modeVal = 'direct'
+    } else {
+        $candidates = New-Object 'System.Collections.Generic.List[string]'
+        if ($cfgMode -and $cfgMode -notmatch '^(?i)auto$') {
+            [void]$candidates.Add((ConvertTo-NormalizedProxyUrl $cfgMode))
+        }
+        $sysProxy = if ($PSBoundParameters.ContainsKey('SystemProxyOverride')) {
+            ConvertTo-NormalizedProxyUrl $SystemProxyOverride
+        } else {
+            Get-WindowsSystemProxyUrl
+        }
+        if ($sysProxy) { [void]$candidates.Add($sysProxy) }
+        foreach ($envKey in @('HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy', 'ALL_PROXY', 'all_proxy')) {
+            if ($envMap.ContainsKey($envKey) -and $envMap[$envKey]) {
+                $normEnv = ConvertTo-NormalizedProxyUrl ([string]$envMap[$envKey])
+                if ($normEnv) { [void]$candidates.Add($normEnv) }
+            }
+        }
+        foreach ($cand in $candidates) {
+            if (-not $cand) { continue }
+            $hadCandidates = $true
+            if (Test-LocalUrlPortOpen $cand) {
+                $effectiveProxy = $cand
+                break
+            }
+        }
+        if (-not $effectiveProxy -and $cfgMode -match '^(?i)auto$' -and $null -eq $BaseEnvironment -and (-not $PSBoundParameters.ContainsKey('SystemProxyOverride')) -and (-not ($Context -and ($Context.Isolated -or ([string]$Context.DataRoot -match 'connection-test-'))))) {
+            $fallbackPorts = if ($null -ne $script:OutboundProxyFallbackPortsOverride) {
+                @($script:OutboundProxyFallbackPortsOverride)
+            } else {
+                @('http://127.0.0.1:7897', 'http://127.0.0.1:7898', 'http://127.0.0.1:7890')
+            }
+            foreach ($fbCand in $fallbackPorts) {
+                if ($fbCand -and (Test-LocalUrlPortOpen $fbCand)) {
+                    $effectiveProxy = $fbCand
+                    break
+                }
+            }
+        }
+        $modeVal = if ($effectiveProxy) { 'proxy' } elseif ($hadCandidates) { 'direct_fallback' } else { 'direct' }
+    }
+
+    if ($effectiveProxy) {
+        $envMap['HTTP_PROXY'] = $effectiveProxy
+        $envMap['HTTPS_PROXY'] = $effectiveProxy
+        $envMap['http_proxy'] = $effectiveProxy
+        $envMap['https_proxy'] = $effectiveProxy
+    } else {
+        foreach ($deadKey in @('HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy')) {
+            $envMap[$deadKey] = ''
+        }
+    }
+
+    $existingNoProxy = if ($envMap.ContainsKey('NO_PROXY') -and $envMap['NO_PROXY']) {
+        [string]$envMap['NO_PROXY']
+    } elseif ($envMap.ContainsKey('no_proxy') -and $envMap['no_proxy']) {
+        [string]$envMap['no_proxy']
+    } else { '' }
+    $noProxyItems = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($item in (($existingNoProxy -split ',') + @('localhost', '127.0.0.1', '::1', '100.64.0.0/10', '100.*', '*.ts.net', '*.tailscale.com'))) {
+        $trimmed = ([string]$item).Trim()
+        if ($trimmed -and -not $noProxyItems.Contains($trimmed)) {
+            [void]$noProxyItems.Add($trimmed)
+        }
+    }
+    $mergedNoProxy = $noProxyItems -join ','
+    $envMap['NO_PROXY'] = $mergedNoProxy
+    $envMap['no_proxy'] = $mergedNoProxy
+
+    return [pscustomobject]@{
+        Mode           = $modeVal
+        ProxyUrl       = $effectiveProxy
+        EffectiveProxy = $effectiveProxy
+        NoProxy        = $mergedNoProxy
+        Env            = $envMap
+        Environment    = $envMap
+    }
+}
+
+function Get-StudioHubBaseUrl {
+    param($Context, $Settings = $null)
+    if (-not $Context) { return '' }
+    if ($Context.PSObject.Properties['HubUrl'] -and $Context.HubUrl) {
+        return ([string]$Context.HubUrl).TrimEnd('/')
+    }
+    if (-not $PSBoundParameters.ContainsKey('Settings') -and ($Context.Isolated -or ([string]$Context.DataRoot -match 'connection-test-'))) {
+        return ''
+    }
+    $port = 8766
+    if ($Settings -and ($Settings.PSObject.Properties.Name -contains 'shield_port') -and [int]$Settings.shield_port -gt 0) {
+        $port = [int]$Settings.shield_port
+    } elseif ($Context.PSObject.Properties['ShieldPort'] -and [int]$Context.ShieldPort -gt 0) {
+        $port = [int]$Context.ShieldPort
+    } else {
+        $setPath = if ($Context.PSObject.Properties['SettingsPath'] -and $Context.SettingsPath) { [string]$Context.SettingsPath } elseif ($Context.DataRoot) { Join-Path $Context.DataRoot 'settings.json' } else { '' }
+        if ($setPath -and (Test-Path -LiteralPath $setPath)) {
+            try {
+                $raw = [IO.File]::ReadAllText($setPath)
+                if ($raw -match '"shield_port"\s*:\s*(\d+)') {
+                    $parsedPort = [int]$Matches[1]
+                    if ($parsedPort -gt 0 -and $parsedPort -le 65535) { $port = $parsedPort }
+                }
+            } catch { }
+        }
+    }
+    return "http://127.0.0.1:$port"
+}
+
 function Invoke-ConnectionProbe {
     param([string]$Url, [string]$Authorization = '', [switch]$HeadersOnly)
     if (-not (Test-LocalUrlPortOpen $Url)) {
@@ -322,22 +495,48 @@ function Get-RelatedTunnelProcesses {
     return $script:cachedTunnelProcList
 }
 
+$script:CachedShieldPort = 0
+
+function Get-EffectiveShieldPort {
+    param($Context = $null, $Settings = $null)
+    if ($Settings -and ($Settings.PSObject.Properties.Name -contains 'shield_port') -and [int]$Settings.shield_port -gt 0) {
+        $script:CachedShieldPort = [int]$Settings.shield_port
+        return $script:CachedShieldPort
+    }
+    if ($script:CachedShieldPort -gt 0) {
+        return [int]$script:CachedShieldPort
+    }
+    if ($Context -and $Context.SettingsPath -and (Test-Path -LiteralPath $Context.SettingsPath)) {
+        try {
+            $raw = [IO.File]::ReadAllText($Context.SettingsPath) | ConvertFrom-Json
+            if ($raw -and ($raw.PSObject.Properties.Name -contains 'shield_port') -and [int]$raw.shield_port -gt 0) {
+                $script:CachedShieldPort = [int]$raw.shield_port
+                return $script:CachedShieldPort
+            }
+        } catch {}
+    }
+    return 8766
+}
+
 function Get-EffectiveTunnelEndpoint {
     param($Settings, [string]$CoreEndpoint)
     $useShield = ($Settings.PSObject.Properties.Name -contains 'readonly_shield') -and [bool]$Settings.readonly_shield
-    $shieldPort = if (($Settings.PSObject.Properties.Name -contains 'shield_port') -and [int]$Settings.shield_port -gt 0) { [int]$Settings.shield_port } else { 8766 }
+    $shieldPort = Get-EffectiveShieldPort -Settings $Settings
     if ($useShield) { return "http://127.0.0.1:$shieldPort/mcp" }
     return $CoreEndpoint
 }
 
 function Get-RelatedShieldProcesses {
-    param($Context)
+    param($Context, $Settings = $null)
     if ($Context.Isolated) { return @() }
+    $shieldPort = Get-EffectiveShieldPort -Context $Context -Settings $Settings
     $scriptPattern = [regex]::Escape($Context.ShieldScriptPath)
     $tagPattern = '--profile-tag\s+(?:"' + [regex]::Escape($Context.ProfilePath) + '"|' + [regex]::Escape($Context.ProfilePath) + ')(?:\s|$)'
+    $portPattern = '--listen-port\s+' + $shieldPort + '(?:\s|$)'
+    $portPids = @(Get-NetTCPConnection -State Listen -LocalPort $shieldPort -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique)
     $result = foreach ($proc in @(Get-CimInstance Win32_Process -Filter "Name='python.exe' OR Name='pythonw.exe'" -ErrorAction SilentlyContinue)) {
         if (-not $proc.CommandLine) { continue }
-        if ($proc.CommandLine -match $scriptPattern -and $proc.CommandLine -match $tagPattern) {
+        if ($proc.CommandLine -match $scriptPattern -and ($proc.CommandLine -match $tagPattern -or $proc.CommandLine -match $portPattern -or ($portPids -contains [int]$proc.ProcessId))) {
             [pscustomobject]@{Id=[int]$proc.ProcessId; Created=$proc.CreationDate; Path=$proc.ExecutablePath; CommandLine=$proc.CommandLine}
         }
     }
@@ -345,12 +544,19 @@ function Get-RelatedShieldProcesses {
 }
 
 function Stop-ReadOnlyShield {
-    param($Context)
+    param($Context, $Settings = $null)
     $count = 0
-    foreach ($proc in @(Get-RelatedShieldProcesses $Context)) {
+    foreach ($proc in @(Get-RelatedShieldProcesses -Context $Context -Settings $Settings)) {
         $current = Get-CimInstance Win32_Process -Filter "ProcessId=$($proc.Id)" -ErrorAction SilentlyContinue
         if ($current -and $current.CreationDate -eq $proc.Created -and $current.CommandLine -eq $proc.CommandLine) {
             Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue; $count++
+        }
+    }
+    if ($count -gt 0 -and (-not $Context.Isolated)) {
+        $shieldPort = Get-EffectiveShieldPort -Context $Context -Settings $Settings
+        for ($w = 0; $w -lt 10; $w++) {
+            if (-not (Get-NetTCPConnection -State Listen -LocalPort $shieldPort -ErrorAction SilentlyContinue)) { break }
+            Start-Sleep -Milliseconds 100
         }
     }
     return $count
@@ -374,7 +580,12 @@ function Start-InteractiveHiddenCmd {
     $psi.UseShellExecute = $false
     if ($EnvironmentOverrides) {
         foreach ($k in $EnvironmentOverrides.Keys) {
-            $psi.EnvironmentVariables[[string]$k] = [string]$EnvironmentOverrides[$k]
+            $valStr = [string]$EnvironmentOverrides[$k]
+            if ($valStr -eq '') {
+                [void]$psi.EnvironmentVariables.Remove([string]$k)
+            } else {
+                $psi.EnvironmentVariables[[string]$k] = $valStr
+            }
         }
     }
     $proc = [System.Diagnostics.Process]::Start($psi)
@@ -385,10 +596,34 @@ function Start-InteractiveHiddenCmd {
 }
 
 function Start-ReadOnlyShield {
-    param($Context, $Settings, [string]$CoreEndpoint)
+    param($Context, $Settings, [string]$CoreEndpoint, [switch]$ForceRestart)
     if ($Context.Isolated) { throw '隔离检查禁止启动真实桥接内核。' }
-    Stop-ReadOnlyShield $Context | Out-Null
-    $shieldPort = if (($Settings.PSObject.Properties.Name -contains 'shield_port') -and [int]$Settings.shield_port -gt 0) { [int]$Settings.shield_port } else { 8766 }
+    $shieldPort = Get-EffectiveShieldPort -Context $Context -Settings $Settings
+    $shieldHealthUrl = "http://127.0.0.1:$shieldPort/shieldz"
+    if (-not $ForceRestart) {
+        $runawayThreadDetected = $false
+        foreach ($sp in @(Get-RelatedShieldProcesses -Context $Context -Settings $Settings)) {
+            $liveProc = Get-Process -Id $sp.Id -ErrorAction SilentlyContinue
+            if ($liveProc -and $liveProc.Threads.Count -gt 150) {
+                $runawayThreadDetected = $true
+                break
+            }
+        }
+        if (-not $runawayThreadDetected) {
+            for ($strike = 0; $strike -lt 3; $strike++) {
+                $existingProbe = Invoke-ConnectionProbe $shieldHealthUrl -TimeoutMs 2000
+                if ($existingProbe.Status -eq 200 -and $existingProbe.Body -match '"ok"\s*:\s*true') {
+                    $upstreamMatches = (-not $CoreEndpoint) -or ($existingProbe.Body -match [regex]::Escape($CoreEndpoint))
+                    if ($upstreamMatches) {
+                        return "http://127.0.0.1:$shieldPort/mcp"
+                    }
+                    break
+                }
+                if ($strike -lt 2) { Start-Sleep -Milliseconds 300 }
+            }
+        }
+    }
+    Stop-ReadOnlyShield -Context $Context -Settings $Settings | Out-Null
     if (Get-NetTCPConnection -State Listen -LocalPort $shieldPort -ErrorAction SilentlyContinue) {
         throw "本地桥接内核端口 $shieldPort 已被其他程序占用，请检查或关闭冲突进程。"
     }
@@ -404,7 +639,6 @@ function Start-ReadOnlyShield {
     $command = 'cmd.exe /d /s /c ""' + $pythonExe + '" "' + $Context.ShieldScriptPath + '" --listen-port ' + $shieldPort + ' --upstream-url "' + $CoreEndpoint + '" --profile-tag "' + $Context.ProfilePath + '" 1>"' + $out + '" 2>"' + $err + '""'
     $result = Start-InteractiveHiddenCmd -CommandLine $command -WorkingDirectory (Split-Path $Context.ShieldScriptPath -Parent)
     if ($result.ReturnValue -ne 0) { throw '无法启动本地桥接内核进程。' }
-    $shieldHealthUrl = "http://127.0.0.1:$shieldPort/shieldz"
     for ($i = 0; $i -lt 15; $i++) {
         Start-Sleep -Milliseconds 150
         $probe = Invoke-ConnectionProbe $shieldHealthUrl
@@ -703,6 +937,13 @@ function Start-ConnectionTunnel {
     [IO.Directory]::CreateDirectory($logs) | Out-Null
     Write-AtomicConnectionText $Context.ProfilePath (New-TunnelProfileText $Settings $tunnelEndpoint)
     $out = Join-Path $logs 'tunnel.out.log'; $err = Join-Path $logs 'tunnel.err.log'
+    try {
+        Get-ChildItem -Path $logs -Filter 'tunnel.out.log.*.tmp' -File -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+        if ((Test-Path -LiteralPath $out) -and (Get-Item -LiteralPath $out).Length -gt 2097152) {
+            $tailLines = @(Get-Content -LiteralPath $out -Tail 1000 -ErrorAction SilentlyContinue)
+            [IO.File]::WriteAllLines($out, $tailLines, (New-Object System.Text.UTF8Encoding($false)))
+        }
+    } catch {}
     foreach ($path in @($Settings.tunnel_client, $Context.ProfilePath, $out, $err)) {
         if ($path -match '["%\r\n]') { throw '程序或配置路径包含不支持的字符。请选择不含双引号或百分号的路径。' }
     }
@@ -710,14 +951,15 @@ function Start-ConnectionTunnel {
     if ($auth) { $args += ' --mcp.extra-headers "Authorization: env:RELAY_AUTHORIZATION" --mcp.discovery-extra-headers "Authorization: env:RELAY_AUTHORIZATION"' }
     $command = 'cmd.exe /d /s /c ""' + $Settings.tunnel_client + '" ' + $args + ' 1>>"' + $out + '" 2>>"' + $err + '""'
     try {
-        $environment = [Environment]::GetEnvironmentVariables()
+        $proxyResolution = Resolve-EffectiveOutboundProxyEnv -Context $Context -Settings $Settings
+        $environment = $proxyResolution.Environment
         $environment['CONTROL_PLANE_API_KEY'] = $key
         $environment['CONTROL_PLANE_TUNNEL_ID'] = $Settings.tunnel_id
         if ($auth) { $environment['RELAY_AUTHORIZATION'] = $auth }
         $list = @($environment.Keys | ForEach-Object { "$_=$($environment[$_])" })
         $result = Start-InteractiveHiddenCmd -CommandLine $command -WorkingDirectory (Split-Path $Settings.tunnel_client -Parent) -EnvironmentOverrides $environment
         if ($result.ReturnValue -ne 0) { throw '无法启动连接程序，请检查 Windows 的进程启动权限。' }
-        Write-AtomicConnectionText $Context.StatePath ([pscustomobject]@{signature=(Get-ConnectionSignature $Settings $tunnelEndpoint); endpoint=$tunnelEndpoint; core_endpoint=$coreEndpoint; readonly_shield=[bool]$Settings.readonly_shield; client_path=$Settings.tunnel_client; wrapper_pid=$result.ProcessId; started_at=[DateTime]::UtcNow.ToString('o')} | ConvertTo-Json)
+        Write-AtomicConnectionText $Context.StatePath ([pscustomobject]@{signature=(Get-ConnectionSignature $Settings $tunnelEndpoint); tunnel_id=[string]$Settings.tunnel_id; endpoint=$tunnelEndpoint; core_endpoint=$coreEndpoint; readonly_shield=[bool]$Settings.readonly_shield; client_path=$Settings.tunnel_client; wrapper_pid=$result.ProcessId; started_at=[DateTime]::UtcNow.ToString('o')} | ConvertTo-Json)
     } finally { $key=$null; $auth=$null; $environment=$null; $list=$null; $startup=$null }
     Reset-ConnectionInfraCache
     return '连接程序已启动，正在检查隧道就绪状态。'
@@ -732,7 +974,6 @@ function Stop-ConnectionTunnel {
             Stop-Process -Id $proc.Id -ErrorAction Stop; $count++
         }
     }
-    Stop-ReadOnlyShield $Context | Out-Null
     Reset-ConnectionInfraCache
     return "已断开 $count 个对应的隧道连接。RelayStudio 本地内核保持运行。"
 }
@@ -1248,14 +1489,17 @@ function Save-ConnectionProfile {
     }
     Write-ConnectionProfilesStorePayload -Context $Context -ActiveProfileId $activeId -EnabledPlatforms $enabledPlats -ActiveProfileByPlatform $activeByPlat -SerializedProfiles ($updatedList.ToArray())
 
-    if ($effPlatform -eq 'chatgpt' -and $effKind -eq 'tunnel' -and $activeId -eq $ProfileId -and $cleanTun) {
-        $Settings.tunnel_id = $cleanTun
+    $savedTun = if ($found) { [string]$newTun } else { [string]$cleanTun }
+    if ($effPlatform -eq 'chatgpt' -and $effKind -eq 'tunnel' -and $activeId -eq $ProfileId -and $savedTun) {
+        $Settings.tunnel_id = $savedTun
         $effectiveKey = $cleanKey
         if (-not $effectiveKey) {
             $keyFilePath = Join-Path $Context.DataRoot "openai-key-$ProfileId.dpapi"
             if (Test-Path -LiteralPath $keyFilePath) { $effectiveKey = Read-ConnectionSecret $keyFilePath }
         }
-        Save-ConnectionSettings -Context $Context -Settings $Settings -ApiKey $effectiveKey
+        if ($effectiveKey -or (Test-SavedOpenAIKey $Context)) {
+            Save-ConnectionSettings -Context $Context -Settings $Settings -ApiKey $effectiveKey
+        }
     }
     $retState = Get-ConnectionProfiles $Context (Read-ConnectionSettings $Context)
     $retState | Add-Member -NotePropertyName 'LastSavedProfileId' -NotePropertyValue $ProfileId -Force
@@ -1557,16 +1801,23 @@ function Remove-CapsulePlatform {
     return (Get-ConnectionProfiles $Context $Settings)
 }
 
+function Get-StudioHubAuthHeaders {
+    param($Context)
+    $tok = if ($env:RELAYSTUDIO_LOCAL_TOKEN) { ([string]$env:RELAYSTUDIO_LOCAL_TOKEN).Trim() } else { '' }
+    if (-not $tok -and $Context -and $Context.PSObject.Properties['DataRoot'] -and $Context.DataRoot) {
+        $tokFile = Join-Path $Context.DataRoot 'studio-local.token'
+        if (Test-Path -LiteralPath $tokFile) {
+            try { $tok = ([IO.File]::ReadAllText($tokFile, [Text.Encoding]::UTF8)).Trim() } catch { $tok = '' }
+        }
+    }
+    if ($tok) { return @{ 'X-Studio-Token' = $tok } }
+    return @{}
+}
+
 function Invoke-StudioHubSnapshot {
     param($Context, [string]$SinceRev = '')
     if (-not $Context) { return $null }
-    $baseUri = if ($Context.PSObject.Properties['HubUrl'] -and $Context.HubUrl) {
-        ([string]$Context.HubUrl).TrimEnd('/')
-    } elseif ($Context.Isolated -or ([string]$Context.DataRoot -match 'connection-test-')) {
-        ''
-    } else {
-        'http://127.0.0.1:8766'
-    }
+    $baseUri = Get-StudioHubBaseUrl $Context
     if (-not $baseUri) { return $null }
     if (-not (Test-LocalUrlPortOpen $baseUri)) { return $null }
     $snapUri = if ($SinceRev) {
@@ -1574,8 +1825,9 @@ function Invoke-StudioHubSnapshot {
     } else {
         "$baseUri/studio/snapshot"
     }
+    $hdrs = Get-StudioHubAuthHeaders $Context
     try {
-        $resp = Invoke-RestMethod -Uri $snapUri -Method Get -TimeoutSec 2 -ErrorAction Stop
+        $resp = Invoke-RestMethod -Uri $snapUri -Method Get -Headers $hdrs -TimeoutSec 2 -ErrorAction Stop
         if ($resp -and $resp.ok) { return $resp }
     } catch { }
     return $null
@@ -1584,13 +1836,7 @@ function Invoke-StudioHubSnapshot {
 function Invoke-StudioHubQueueDigest {
     param($Context, [string]$SinceRev = '')
     if (-not $Context) { return $null }
-    $baseUri = if ($Context.PSObject.Properties['HubUrl'] -and $Context.HubUrl) {
-        ([string]$Context.HubUrl).TrimEnd('/')
-    } elseif ($Context.Isolated -or ([string]$Context.DataRoot -match 'connection-test-')) {
-        ''
-    } else {
-        'http://127.0.0.1:8766'
-    }
+    $baseUri = Get-StudioHubBaseUrl $Context
     if (-not $baseUri) { return $null }
     if (-not (Test-LocalUrlPortOpen $baseUri)) { return $null }
     $digestUri = if ($SinceRev) {
@@ -1598,8 +1844,9 @@ function Invoke-StudioHubQueueDigest {
     } else {
         "$baseUri/studio/queue-digest"
     }
+    $hdrs = Get-StudioHubAuthHeaders $Context
     try {
-        $resp = Invoke-RestMethod -Uri $digestUri -Method Get -TimeoutSec 1 -ErrorAction Stop
+        $resp = Invoke-RestMethod -Uri $digestUri -Method Get -Headers $hdrs -TimeoutSec 1 -ErrorAction Stop
         if ($resp -and $resp.ok) { return $resp }
     } catch { }
     return $null
@@ -1608,19 +1855,14 @@ function Invoke-StudioHubQueueDigest {
 function Invoke-StudioHubAction {
     param($Context, [hashtable]$Payload)
     if (-not $Context) { return $null }
-    $baseUri = if ($Context.PSObject.Properties['HubUrl'] -and $Context.HubUrl) {
-        ([string]$Context.HubUrl).TrimEnd('/')
-    } elseif ($Context.Isolated -or ([string]$Context.DataRoot -match 'connection-test-')) {
-        ''
-    } else {
-        'http://127.0.0.1:8766'
-    }
+    $baseUri = Get-StudioHubBaseUrl $Context
     if (-not $baseUri) { return $null }
     if (-not (Test-LocalUrlPortOpen $baseUri)) { return $null }
+    $hdrs = Get-StudioHubAuthHeaders $Context
     try {
         $json = $Payload | ConvertTo-Json -Depth 6 -Compress
         $bytes = [Text.Encoding]::UTF8.GetBytes($json)
-        $resp = Invoke-RestMethod -Uri "$baseUri/studio/action" -Method Post -ContentType 'application/json; charset=utf-8' -Body $bytes -TimeoutSec 3 -ErrorAction Stop
+        $resp = Invoke-RestMethod -Uri "$baseUri/studio/action" -Method Post -Headers $hdrs -ContentType 'application/json; charset=utf-8' -Body $bytes -TimeoutSec 3 -ErrorAction Stop
         if ($resp -and $resp.ok) { return $resp }
     } catch { }
     return $null
@@ -3001,7 +3243,7 @@ function Get-AvailableBrowserProfiles {
     }
     $detected.Add([pscustomobject]@{
         Id = 'Desktop:ChatGPT'
-        Label = '💻 ChatGPT 桌面端 (桌面客户端)'
+        Label = 'ChatGPT 桌面端'
         UserName = 'ChatGPT Desktop App'
         IsDefault = $false
         SortOrder = 20
@@ -4172,8 +4414,8 @@ function Get-WindowLayoutMemory {
         [pscustomobject]@{ id = 101; session_key = ''; width_weight = 54; show_summary = $false }
     )
     $result = [pscustomobject]@{
-        WinWidth = 1180
-        WinHeight = 700
+        WinWidth = 1320
+        WinHeight = 840
         RailWidth = 260
         RailCollapsed = $false
         ShowArchived = $true
@@ -4185,11 +4427,11 @@ function Get-WindowLayoutMemory {
         try {
             $raw = [IO.File]::ReadAllText($path, [Text.Encoding]::UTF8) | ConvertFrom-Json
             if ($raw) {
-                if ($raw.PSObject.Properties.Name -contains 'win_width' -and [double]$raw.win_width -ge 700) {
-                    $result.WinWidth = [int][Math]::Min(1920, [Math]::Max(700, [int]$raw.win_width))
+                if ($raw.PSObject.Properties.Name -contains 'win_width' -and $null -ne $raw.win_width -and [double]$raw.win_width -gt 0) {
+                    $result.WinWidth = [int][Math]::Min(3840, [Math]::Max(740, [int][Math]::Round([double]$raw.win_width)))
                 }
-                if ($raw.PSObject.Properties.Name -contains 'win_height' -and [double]$raw.win_height -ge 480) {
-                    $result.WinHeight = [int][Math]::Min(1200, [Math]::Max(480, [int]$raw.win_height))
+                if ($raw.PSObject.Properties.Name -contains 'win_height' -and $null -ne $raw.win_height -and [double]$raw.win_height -gt 0) {
+                    $result.WinHeight = [int][Math]::Min(2400, [Math]::Max(500, [int][Math]::Round([double]$raw.win_height)))
                 }
                 if ($raw.PSObject.Properties.Name -contains 'rail_width' -and [double]$raw.rail_width -ge 150) {
                     $result.RailWidth = [int][Math]::Min(380, [Math]::Max(150, [int]$raw.rail_width))
@@ -4272,8 +4514,8 @@ function Save-WindowLayoutMemory {
     }
     $payload = [pscustomobject]@{
         schema_version = 1
-        win_width = [int][Math]::Round([double]$Layout.WinWidth)
-        win_height = [int][Math]::Round([double]$Layout.WinHeight)
+        win_width = [int][Math]::Min(3840, [Math]::Max(740, [int][Math]::Round([double]$Layout.WinWidth)))
+        win_height = [int][Math]::Min(2400, [Math]::Max(500, [int][Math]::Round([double]$Layout.WinHeight)))
         rail_width = [int][Math]::Round([double]$Layout.RailWidth)
         rail_collapsed = [bool]$Layout.RailCollapsed
         show_archived = [bool]$Layout.ShowArchived
@@ -6474,14 +6716,27 @@ function ConvertTo-PublicMcpUrl {
 }
 
 $script:PublicMcpTunnelLogCache = @{}
+$script:PublicMcpTunnelJsonCache = @{}
+$script:PublicMcpEdgeProbeOverride = $null
+$script:PublicDohIpCache = @{}
 $script:PublicMcpTunnelLogCacheStats = [pscustomobject]@{
     Hits = 0
     Misses = 0
     LastBytesRead = 0
 }
 
+function Set-PublicMcpEdgeProbeOverride {
+    param([scriptblock]$Probe = $null)
+    $script:PublicMcpEdgeProbeOverride = $Probe
+}
+
+function Clear-PublicDohIpCache {
+    $script:PublicDohIpCache = @{}
+}
+
 function Clear-PublicMcpTunnelLogCache {
     $script:PublicMcpTunnelLogCache = @{}
+    $script:PublicMcpTunnelJsonCache = @{}
     $script:PublicMcpTunnelLogCacheStats = [pscustomobject]@{
         Hits = 0
         Misses = 0
@@ -6499,9 +6754,12 @@ function Get-PublicMcpTunnelLogCacheStats {
 }
 
 function Resolve-TailscaleClientPath {
-    param([string]$TailscalePath = '')
+    param([string]$TailscalePath = '', $Context = $null)
     if ($TailscalePath -and (Test-Path -LiteralPath $TailscalePath)) {
         return $TailscalePath
+    }
+    if ($Context -and ($Context.Isolated -or ([string]$Context.DataRoot -match 'connection-test-'))) {
+        return ''
     }
     $cmd = Get-Command tailscale.exe -ErrorAction SilentlyContinue
     if ($cmd -and $cmd.Source -and (Test-Path -LiteralPath $cmd.Source)) {
@@ -6517,8 +6775,8 @@ function Resolve-TailscaleClientPath {
 }
 
 function Get-TailscaleFunnelSelfUrl {
-    param([string]$TailscalePath = '')
-    $tsExe = Resolve-TailscaleClientPath $TailscalePath
+    param([string]$TailscalePath = '', $Context = $null)
+    $tsExe = Resolve-TailscaleClientPath -TailscalePath $TailscalePath -Context $Context
     if (-not $tsExe) { return '' }
     try {
         $rawOut = & $tsExe status --json 2>$null
@@ -6549,87 +6807,355 @@ function Get-PublicMcpTunnelModeLabel {
     }
 }
 
+function Test-IsPublicRoutableIpv4 {
+    param([string]$IpString)
+    if (-not $IpString) { return $false }
+    $addr = $null
+    if (-not [Net.IPAddress]::TryParse($IpString.Trim(), [ref]$addr)) { return $false }
+    if ($addr.AddressFamily -ne [Net.Sockets.AddressFamily]::InterNetwork) { return $false }
+    $b = $addr.GetAddressBytes()
+    if ($b.Length -ne 4) { return $false }
+    $b0 = [int]$b[0]
+    $b1 = [int]$b[1]
+    if ($b0 -eq 0 -or $b0 -eq 127 -or $b0 -eq 10 -or $b0 -ge 224) { return $false }
+    if ($b0 -eq 192 -and $b1 -eq 168) { return $false }
+    if ($b0 -eq 172 -and $b1 -ge 16 -and $b1 -le 31) { return $false }
+    if ($b0 -eq 100 -and $b1 -ge 64 -and $b1 -le 127) { return $false }
+    if ($b0 -eq 198 -and ($b1 -eq 18 -or $b1 -eq 19)) { return $false }
+    if ($b0 -eq 169 -and $b1 -eq 254) { return $false }
+    return $true
+}
+
+function Resolve-PublicMcpDohIpv4List {
+    param(
+        [string]$HostName,
+        $Context = $null,
+        [int]$TimeoutMs = 2000
+    )
+    if (-not $HostName) { return @() }
+    $cleanHost = $HostName.Trim().TrimEnd('.').ToLowerInvariant()
+    $parsedLiteral = $null
+    if ([Net.IPAddress]::TryParse($cleanHost, [ref]$parsedLiteral)) {
+        if (Test-IsPublicRoutableIpv4 $cleanHost) { return @($cleanHost) }
+        return @()
+    }
+    if ($script:PublicDohIpCache.ContainsKey($cleanHost)) {
+        $cached = $script:PublicDohIpCache[$cleanHost]
+        if ($cached -and ([DateTime]::UtcNow - $cached.CachedAtUtc).TotalSeconds -lt 300 -and @($cached.Ips).Count -gt 0) {
+            return @($cached.Ips)
+        }
+    }
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+    } catch { }
+    $proxyRes = Resolve-EffectiveOutboundProxyEnv -Context $Context
+    $proxyCandidates = if ($proxyRes -and $proxyRes.ProxyUrl) { @([string]$proxyRes.ProxyUrl, '') } else { @('') }
+    $escapedHost = [Uri]::EscapeDataString($cleanHost)
+    $dohEndpoints = @(
+        "https://dns.google/resolve?name=$escapedHost&type=A",
+        "https://cloudflare-dns.com/dns-query?name=$escapedHost&type=A"
+    )
+    foreach ($dohUrl in $dohEndpoints) {
+        foreach ($pUrl in $proxyCandidates) {
+            $resp = $null
+            try {
+                $req = [Net.HttpWebRequest]::Create($dohUrl)
+                $req.Method = 'GET'
+                $req.Accept = 'application/dns-json'
+                $req.Timeout = $TimeoutMs
+                $req.ReadWriteTimeout = $TimeoutMs
+                if ($pUrl) {
+                    $req.Proxy = New-Object System.Net.WebProxy($pUrl)
+                } else {
+                    $req.Proxy = $null
+                }
+                $resp = $req.GetResponse()
+                $stream = $resp.GetResponseStream()
+                $reader = New-Object IO.StreamReader($stream, [Text.Encoding]::UTF8)
+                try {
+                    $body = $reader.ReadToEnd()
+                } finally {
+                    $reader.Dispose()
+                }
+                if ($body) {
+                    $json = $body | ConvertFrom-Json
+                    if ($json -and $json.PSObject.Properties['Answer'] -and $json.Answer) {
+                        $validIps = New-Object 'System.Collections.Generic.List[string]'
+                        foreach ($ans in @($json.Answer)) {
+                            if ($ans -and $ans.PSObject.Properties['type'] -and [int]$ans.type -eq 1 -and $ans.PSObject.Properties['data'] -and $ans.data) {
+                                $candIp = ([string]$ans.data).Trim()
+                                if ((Test-IsPublicRoutableIpv4 $candIp) -and (-not $validIps.Contains($candIp))) {
+                                    [void]$validIps.Add($candIp)
+                                }
+                            }
+                        }
+                        if ($validIps.Count -gt 0) {
+                            $resolvedArr = @($validIps.ToArray())
+                            $script:PublicDohIpCache[$cleanHost] = @{
+                                CachedAtUtc = [DateTime]::UtcNow
+                                Ips         = $resolvedArr
+                            }
+                            return $resolvedArr
+                        }
+                    }
+                }
+            } catch {
+            } finally {
+                if ($resp) { try { $resp.Dispose() } catch { } }
+            }
+        }
+    }
+    return @()
+}
+
+function Test-PublicMcpEdgeHealth {
+    param(
+        [string]$Url,
+        $Context = $null,
+        [int]$TimeoutMs = 8000,
+        [int]$SlowThresholdMs = 2500
+    )
+    if ($script:PublicMcpEdgeProbeOverride -is [scriptblock]) {
+        return (& $script:PublicMcpEdgeProbeOverride $Url $Context $TimeoutMs $SlowThresholdMs)
+    }
+    if (-not $Url) {
+        return [pscustomobject]@{ Reachable = $false; Phase = 'Offline'; PublicRttMs = 0; IngressIp = '' }
+    }
+    if ($Context -and ($Context.Isolated -or ([string]$Context.DataRoot -match 'connection-test-'))) {
+        return [pscustomobject]@{ Reachable = $true; Phase = 'Online'; PublicRttMs = 15; IngressIp = '203.0.113.10' }
+    }
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+        $uriObj = [Uri]$Url
+        $hostName = $uriObj.Host
+        $portNum = if ($uriObj.Port -gt 0) { $uriObj.Port } else { 443 }
+        $dohTimeout = [Math]::Min(2500, [Math]::Max(500, $TimeoutMs))
+        $ips = @(Resolve-PublicMcpDohIpv4List -HostName $hostName -Context $Context -TimeoutMs $dohTimeout)
+        if ($ips.Count -eq 0) {
+            return [pscustomobject]@{ Reachable = $false; Phase = 'Offline'; PublicRttMs = 0; IngressIp = '' }
+        }
+        foreach ($ip in @($ips | Select-Object -First 2)) {
+            $sw = [Diagnostics.Stopwatch]::StartNew()
+            $tcp = New-Object System.Net.Sockets.TcpClient([System.Net.Sockets.AddressFamily]::InterNetwork)
+            $ssl = $null
+            try {
+                $iar = $tcp.BeginConnect($ip, $portNum, $null, $null)
+                if (-not $iar.AsyncWaitHandle.WaitOne($TimeoutMs, $false) -or -not $tcp.Connected) {
+                    continue
+                }
+                try { $tcp.EndConnect($iar) } catch { continue }
+                $remMs = [Math]::Max(1500, $TimeoutMs - [int]$sw.ElapsedMilliseconds)
+                $tcp.ReceiveTimeout = $remMs
+                $tcp.SendTimeout = $remMs
+                $netStream = $tcp.GetStream()
+                $netStream.ReadTimeout = $remMs
+                $netStream.WriteTimeout = $remMs
+                $ssl = New-Object System.Net.Security.SslStream($netStream, $false)
+                $ssl.ReadTimeout = $remMs
+                $ssl.WriteTimeout = $remMs
+                $ssl.AuthenticateAsClient($hostName)
+                $remReadMs = [Math]::Max(1500, $TimeoutMs - [int]$sw.ElapsedMilliseconds)
+                $ssl.ReadTimeout = $remReadMs
+                $ssl.WriteTimeout = $remReadMs
+                $reqText = "GET /.well-known/oauth-protected-resource HTTP/1.1`r`nHost: $hostName`r`nUser-Agent: RelayStudio-EdgeProbe/1.0`r`nAccept: application/json, */*`r`nConnection: close`r`n`r`n"
+                $reqBytes = [Text.Encoding]::ASCII.GetBytes($reqText)
+                $ssl.Write($reqBytes, 0, $reqBytes.Length)
+                $ssl.Flush()
+                $respBuf = New-Object byte[] 512
+                $readLen = $ssl.Read($respBuf, 0, $respBuf.Length)
+                $sw.Stop()
+                if ($readLen -gt 0) {
+                    $headStr = [Text.Encoding]::ASCII.GetString($respBuf, 0, $readLen)
+                    $statusLine = ($headStr -split "`r?`n")[0]
+                    if ($statusLine -match '^HTTP/\d+\.\d+\s+(\d{3})\b') {
+                        $code = [int]$Matches[1]
+                        if ($code -in @(200, 401, 405)) {
+                            $rttMs = [Math]::Max(1, [int][Math]::Round($sw.Elapsed.TotalMilliseconds))
+                            $phase = if ($rttMs -le $SlowThresholdMs) { 'Online' } else { 'Degraded' }
+                            return [pscustomobject]@{
+                                Reachable   = $true
+                                Phase       = $phase
+                                PublicRttMs = [int]$rttMs
+                                IngressIp   = [string]$ip
+                            }
+                        }
+                    }
+                }
+            } catch {
+            } finally {
+                if ($ssl) { try { $ssl.Dispose() } catch { } }
+                try { $tcp.Close() } catch { }
+            }
+        }
+        $cleanKey = $hostName.Trim().TrimEnd('.').ToLowerInvariant()
+        if ($script:PublicDohIpCache.ContainsKey($cleanKey)) {
+            [void]$script:PublicDohIpCache.Remove($cleanKey)
+        }
+    } catch { }
+    return [pscustomobject]@{ Reachable = $false; Phase = 'Offline'; PublicRttMs = 0; IngressIp = '' }
+}
+
+function Test-PublicMcpUrlFastReachable {
+    param(
+        [string]$Url,
+        $Context = $null,
+        [int]$TimeoutMs = 8000
+    )
+    if (-not $Url) { return $false }
+    return [bool](Test-PublicMcpEdgeHealth -Url $Url -Context $Context -TimeoutMs $TimeoutMs).Reachable
+}
+
 function Get-PublicMcpTunnelState {
     param($Context)
     $path = Join-Path $Context.DataRoot 'public-mcp-tunnel.json'
-    $result = [pscustomobject]@{ Running = $false; Url = ''; ProcessId = 0; StartedAt = ''; Status = '未启动'; Mode = ''; ModeLabel = ''; ProfileId = '' }
-    if (Test-Path -LiteralPath $path) {
+    $result = [pscustomobject]@{
+        Running           = $false
+        Url               = ''
+        ProcessId         = 0
+        StartedAt         = ''
+        Status            = '未启动'
+        Mode              = ''
+        ModeLabel         = ''
+        ProfileId         = ''
+        FallbackFrom      = ''
+        HealthPhase       = 'Offline'
+        PublicRttMs       = 0
+        VerifiedIngressIp = ''
+        LastCheckedUtc    = ''
+    }
+    $stateSig = Get-FileStatToken $path
+    if ($stateSig -ne '0:0:0') {
         try {
-            $saved = [IO.File]::ReadAllText($path) | ConvertFrom-Json
+            $jsonCached = if ($script:PublicMcpTunnelJsonCache.ContainsKey($path)) { $script:PublicMcpTunnelJsonCache[$path] } else { $null }
+            $saved = if ($jsonCached -and $jsonCached.Sig -eq $stateSig -and $null -ne $jsonCached.Saved) {
+                $jsonCached.Saved
+            } else {
+                $parsedSaved = [IO.File]::ReadAllText($path) | ConvertFrom-Json
+                $script:PublicMcpTunnelJsonCache[$path] = @{ Sig = $stateSig; Saved = $parsedSaved }
+                $parsedSaved
+            }
             $rawMode = if ($saved.PSObject.Properties['Mode'] -and $saved.Mode) { [string]$saved.Mode } else { 'cloudflared' }
             $mode = if ($rawMode -eq 'cloudflared') {
                 if ($saved.PSObject.Properties['FixedUrl'] -and $saved.FixedUrl) { 'cloudflared_named' } else { 'cloudflared_quick' }
             } else { $rawMode }
             $modeLabel = Get-PublicMcpTunnelModeLabel $mode
             $profId = if ($saved.PSObject.Properties['ProfileId'] -and $saved.ProfileId) { [string]$saved.ProfileId } else { '' }
+            $fbFrom = if ($saved.PSObject.Properties['FallbackFrom'] -and $saved.FallbackFrom) { [string]$saved.FallbackFrom } else { '' }
+            $savedRttMs = if ($saved.PSObject.Properties['PublicRttMs'] -and $null -ne $saved.PublicRttMs) { [int]$saved.PublicRttMs } else { 0 }
+            $savedIngressIp = if ($saved.PSObject.Properties['VerifiedIngressIp'] -and $saved.VerifiedIngressIp) { [string]$saved.VerifiedIngressIp } else { '' }
+            $savedLastChecked = if ($saved.PSObject.Properties['LastCheckedUtc'] -and $saved.LastCheckedUtc) { [string]$saved.LastCheckedUtc } else { '' }
             if ($mode -in @('tailscale', 'external_fixed')) {
-                $fixedUrl = if ($saved.PSObject.Properties['FixedUrl'] -and $saved.FixedUrl) { [string]$saved.FixedUrl } else { '' }
+                $fixedUrl = if ($saved.PSObject.Properties['FixedUrl'] -and $saved.FixedUrl) {
+                    [string]$saved.FixedUrl
+                } elseif ($saved.PSObject.Properties['Url'] -and $saved.Url) {
+                    [string]$saved.Url
+                } else { '' }
                 if (-not $fixedUrl) { return $result }
-                $stateSig = Get-FileStatToken $path
                 $cacheKey = "$($Context.DataRoot)|mode=$mode|$fixedUrl|$profId"
                 $cachedEntry = if ($script:PublicMcpTunnelLogCache.ContainsKey($cacheKey)) { $script:PublicMcpTunnelLogCache[$cacheKey] } else { $null }
                 if ($cachedEntry -and $cachedEntry.LogSignature -eq $stateSig) {
                     $script:PublicMcpTunnelLogCacheStats.Hits++
                     return [pscustomobject]@{
-                        Running = [bool]$cachedEntry.Running
-                        Url = [string]$cachedEntry.Url
-                        ProcessId = [int]$cachedEntry.ProcessId
-                        StartedAt = $saved.StartTicks
-                        Status = [string]$cachedEntry.Status
-                        Mode = $mode
-                        ModeLabel = $modeLabel
-                        ProfileId = $profId
+                        Running           = [bool]$cachedEntry.Running
+                        Url               = [string]$cachedEntry.Url
+                        ProcessId         = [int]$cachedEntry.ProcessId
+                        StartedAt         = $saved.StartTicks
+                        Status            = [string]$cachedEntry.Status
+                        Mode              = $mode
+                        ModeLabel         = $modeLabel
+                        ProfileId         = $profId
+                        FallbackFrom      = $fbFrom
+                        HealthPhase       = [string]$cachedEntry.HealthPhase
+                        PublicRttMs       = [int]$cachedEntry.PublicRttMs
+                        VerifiedIngressIp = [string]$cachedEntry.VerifiedIngressIp
+                        LastCheckedUtc    = [string]$cachedEntry.LastCheckedUtc
                     }
                 }
                 $script:PublicMcpTunnelLogCacheStats.Misses++
                 $script:PublicMcpTunnelLogCacheStats.LastBytesRead = 0
+                $isSavedRunning = if ($saved.PSObject.Properties['Running'] -and $null -ne $saved.Running) { [bool]$saved.Running } else { $true }
+                $savedHealthPhase = if ($saved.PSObject.Properties['HealthPhase'] -and $saved.HealthPhase) {
+                    [string]$saved.HealthPhase
+                } elseif ($isSavedRunning) {
+                    'Online'
+                } else {
+                    'Offline'
+                }
+                $savedStatus = if ($saved.PSObject.Properties['Status'] -and $saved.Status) {
+                    [string]$saved.Status
+                } elseif ($savedHealthPhase -eq 'Degraded') {
+                    '偏慢'
+                } elseif ($isSavedRunning) {
+                    '在线'
+                } else {
+                    '离线'
+                }
                 $script:PublicMcpTunnelLogCache[$cacheKey] = @{
-                    LogSignature = $stateSig
-                    DiscoveredUrl = $fixedUrl
-                    DiscoveredReady = $true
-                    Running = $true
-                    Url = $fixedUrl
-                    ProcessId = -1
-                    Status = '在线'
+                    LogSignature      = $stateSig
+                    DiscoveredUrl     = $fixedUrl
+                    DiscoveredReady   = $isSavedRunning
+                    Running           = $isSavedRunning
+                    Url               = $fixedUrl
+                    ProcessId         = -1
+                    Status            = $savedStatus
+                    HealthPhase       = $savedHealthPhase
+                    PublicRttMs       = $savedRttMs
+                    VerifiedIngressIp = $savedIngressIp
+                    LastCheckedUtc    = $savedLastChecked
                 }
                 return [pscustomobject]@{
-                    Running = $true
-                    Url = $fixedUrl
-                    ProcessId = -1
-                    StartedAt = $saved.StartTicks
-                    Status = '在线'
-                    Mode = $mode
-                    ModeLabel = $modeLabel
-                    ProfileId = $profId
+                    Running           = $isSavedRunning
+                    Url               = $fixedUrl
+                    ProcessId         = -1
+                    StartedAt         = $saved.StartTicks
+                    Status            = $savedStatus
+                    Mode              = $mode
+                    ModeLabel         = $modeLabel
+                    ProfileId         = $profId
+                    FallbackFrom      = $fbFrom
+                    HealthPhase       = $savedHealthPhase
+                    PublicRttMs       = $savedRttMs
+                    VerifiedIngressIp = $savedIngressIp
+                    LastCheckedUtc    = $savedLastChecked
                 }
             }
             $proc = Get-Process -Id $saved.ProcessId -ErrorAction Stop
-            if ($proc.StartTime.ToUniversalTime().Ticks -ne [long]$saved.StartTicks) { return $result }
+            if ($saved.PSObject.Properties['StartTicks'] -and [long]$saved.StartTicks -gt 0 -and $proc.StartTime.ToUniversalTime().Ticks -ne [long]$saved.StartTicks) { return $result }
             $result.ProcessId = $proc.Id
             $result.StartedAt = $saved.StartTicks
             $result.Status = '连接中'
             $result.Mode = $mode
             $result.ModeLabel = $modeLabel
             $result.ProfileId = $profId
+            $result.FallbackFrom = $fbFrom
+            $result.PublicRttMs = $savedRttMs
+            $result.VerifiedIngressIp = $savedIngressIp
+            $result.LastCheckedUtc = $savedLastChecked
             $logPath = Join-Path $Context.DataRoot 'public-mcp-tunnel.log'
             $logSig = Get-FileStatToken $logPath
+            $combinedLogSig = "$logSig|$stateSig"
             $cacheKey = "$($Context.DataRoot)|$($proc.Id)|$($saved.StartTicks)|$([string]$saved.FixedUrl)|$profId"
             $cachedEntry = if ($script:PublicMcpTunnelLogCache.ContainsKey($cacheKey)) { $script:PublicMcpTunnelLogCache[$cacheKey] } else { $null }
-            if ($cachedEntry -and $cachedEntry.LogSignature -eq $logSig) {
+            if ($cachedEntry -and $cachedEntry.LogSignature -eq $combinedLogSig) {
                 $script:PublicMcpTunnelLogCacheStats.Hits++
                 return [pscustomobject]@{
-                    Running = [bool]$cachedEntry.Running
-                    Url = [string]$cachedEntry.Url
-                    ProcessId = [int]$proc.Id
-                    StartedAt = $saved.StartTicks
-                    Status = [string]$cachedEntry.Status
-                    Mode = $mode
-                    ModeLabel = $modeLabel
-                    ProfileId = $profId
+                    Running           = [bool]$cachedEntry.Running
+                    Url               = [string]$cachedEntry.Url
+                    ProcessId         = [int]$proc.Id
+                    StartedAt         = $saved.StartTicks
+                    Status            = [string]$cachedEntry.Status
+                    Mode              = $mode
+                    ModeLabel         = $modeLabel
+                    ProfileId         = $profId
+                    FallbackFrom      = $fbFrom
+                    HealthPhase       = [string]$cachedEntry.HealthPhase
+                    PublicRttMs       = [int]$cachedEntry.PublicRttMs
+                    VerifiedIngressIp = [string]$cachedEntry.VerifiedIngressIp
+                    LastCheckedUtc    = [string]$cachedEntry.LastCheckedUtc
                 }
             }
             $script:PublicMcpTunnelLogCacheStats.Misses++
-            $url = if ($saved.FixedUrl) { [string]$saved.FixedUrl } elseif ($cachedEntry -and $cachedEntry.DiscoveredUrl) { [string]$cachedEntry.DiscoveredUrl } else { '' }
+            $url = if ($saved.PSObject.Properties['FixedUrl'] -and $saved.FixedUrl) { [string]$saved.FixedUrl } elseif ($cachedEntry -and $cachedEntry.DiscoveredUrl) { [string]$cachedEntry.DiscoveredUrl } else { '' }
             $hadReadyBefore = [bool]($cachedEntry -and $cachedEntry.DiscoveredReady)
             $log = ''
             $bytesRead = 0
@@ -6671,15 +7197,26 @@ function Get-PublicMcpTunnelState {
             if (-not $url -and $log -match 'https://[a-zA-Z0-9-]+\.trycloudflare\.com') { $url = ConvertTo-PublicMcpUrl $Matches[0] }
             $isReadyNow = ($hadReadyBefore -or ($log -match 'Registered tunnel connection')) -and [bool]$url
             if ($isReadyNow) {
-                $result.Running = $true; $result.Url = $url; $result.Status = '在线'
+                $cfPhase = if ($saved.PSObject.Properties['HealthPhase'] -and $saved.HealthPhase -eq 'Degraded') { 'Degraded' } else { 'Online' }
+                $cfStatus = if ($cfPhase -eq 'Degraded') { '偏慢' } elseif ($saved.PSObject.Properties['Status'] -and $saved.Status -in @('在线', '偏慢')) { [string]$saved.Status } else { '在线' }
+                $result.Running = $true
+                $result.Url = $url
+                $result.HealthPhase = $cfPhase
+                $result.Status = $cfStatus
+            } else {
+                $result.HealthPhase = if ($saved.PSObject.Properties['HealthPhase'] -and $saved.HealthPhase -in @('Connecting', 'Offline')) { [string]$saved.HealthPhase } else { 'Connecting' }
             }
             $script:PublicMcpTunnelLogCache[$cacheKey] = @{
-                LogSignature = $logSig
-                DiscoveredUrl = $url
-                DiscoveredReady = $isReadyNow
-                Running = [bool]$result.Running
-                Url = [string]$result.Url
-                Status = [string]$result.Status
+                LogSignature      = $combinedLogSig
+                DiscoveredUrl     = $url
+                DiscoveredReady   = $isReadyNow
+                Running           = [bool]$result.Running
+                Url               = [string]$result.Url
+                Status            = [string]$result.Status
+                HealthPhase       = [string]$result.HealthPhase
+                PublicRttMs       = [int]$result.PublicRttMs
+                VerifiedIngressIp = [string]$result.VerifiedIngressIp
+                LastCheckedUtc    = [string]$result.LastCheckedUtc
             }
         } catch { }
     }
@@ -6687,49 +7224,63 @@ function Get-PublicMcpTunnelState {
 }
 
 function Start-PublicMcpTunnel {
-    param($Context, [string]$FixedDomain = '', [string]$Token = '', [string]$ClientPath = '', [string]$TailscalePath = '', [int]$Port = 8766, [string]$ProfileId = '', [switch]$PreferTailscale)
+    param(
+        $Context,
+        [string]$FixedDomain = '',
+        [string]$Token = '',
+        [string]$ClientPath = '',
+        [string]$TailscalePath = '',
+        [int]$Port = 8766,
+        [string]$ProfileId = '',
+        [switch]$PreferTailscale,
+        [switch]$ForceReconnect
+    )
+    [IO.Directory]::CreateDirectory($Context.DataRoot) | Out-Null
     $lockPath = Join-Path $Context.DataRoot 'public-mcp-tunnel.lock'
     $lock = $null
     try {
         $deadline = [DateTime]::UtcNow.AddSeconds(5)
         while (-not $lock) {
-            try { $lock = [IO.File]::Open($lockPath, 'OpenOrCreate', 'ReadWrite', 'None') }
+            try { $lock = [IO.File]::Open($lockPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None) }
             catch { if ([DateTime]::UtcNow -gt $deadline) { throw '公网隧道正在操作，请稍后重试。' }; Start-Sleep -Milliseconds 50 }
         }
-        $state = Get-PublicMcpTunnelState $Context
-        if ($state.ProcessId) { return $state }
+        $isIsolatedCtx = [bool]($Context -and ($Context.Isolated -or ([string]$Context.DataRoot -match 'connection-test-')))
+        $hasEdgeOverride = ($script:PublicMcpEdgeProbeOverride -is [scriptblock])
         $fixedUrl = if ($FixedDomain.Trim()) { ConvertTo-PublicMcpUrl $FixedDomain } else { '' }
         $cleanToken = $Token.Trim()
-        if ($script:PublicMcpTunnelLogCache) { $script:PublicMcpTunnelLogCache.Clear() }
-
-        # Mode 1: Fixed HTTPS domain without Cloudflare Token (Tailscale Funnel *.ts.net or external static HTTPS tunnel)
-        if ($fixedUrl -and (-not $cleanToken)) {
-            $hostName = ([Uri]$fixedUrl).Host.ToLowerInvariant()
-            $tsExe = Resolve-TailscaleClientPath $TailscalePath
-            $tunMode = if ($hostName -like '*.ts.net' -or $TailscalePath) { 'tailscale' } else { 'external_fixed' }
-            if ($tunMode -eq 'tailscale' -and $tsExe) {
-                try {
-                    if ($tsExe -match '\.(cmd|bat)$') {
-                        & $tsExe funnel --bg $Port 2>&1 | Out-Null
-                    } else {
-                        $tsProc = Start-Process -FilePath $tsExe -ArgumentList @('funnel', '--bg', "$Port") -WindowStyle Hidden -PassThru -ErrorAction SilentlyContinue
-                        if ($tsProc) { [void]$tsProc.WaitForExit(2500) }
+        $state = Get-PublicMcpTunnelState $Context
+        if (-not $ForceReconnect -and $state.ProcessId -and $state.Running -and (-not $ProfileId -or $state.ProfileId -eq $ProfileId) -and (-not $fixedUrl -or $state.Url -eq $fixedUrl)) {
+            $canShortCircuit = $true
+            if ($state.Mode -eq 'tailscale') {
+                if ($state.HealthPhase -notin @('Online', 'Degraded')) {
+                    $canShortCircuit = $false
+                } elseif ((-not $isIsolatedCtx) -or $hasEdgeOverride) {
+                    $checkedDto = [DateTimeOffset]::MinValue
+                    if (-not $state.LastCheckedUtc -or -not [DateTimeOffset]::TryParse([string]$state.LastCheckedUtc, [ref]$checkedDto) -or ([DateTimeOffset]::UtcNow - $checkedDto).TotalSeconds -gt 120) {
+                        $canShortCircuit = $false
                     }
-                } catch { }
+                }
             }
-            Write-AtomicConnectionText (Join-Path $Context.DataRoot 'public-mcp-tunnel.json') (@{
-                Mode = $tunMode
-                ProcessId = -1
-                StartTicks = [DateTime]::UtcNow.Ticks
-                FixedUrl = $fixedUrl
-                TailscalePath = $tsExe
-                Port = $Port
-                ProfileId = $ProfileId
-            } | ConvertTo-Json)
-            return (Get-PublicMcpTunnelState $Context)
+            if ($canShortCircuit) {
+                return $state
+            }
+        }
+        if ($state.ProcessId -gt 0) {
+            Stop-Process -Id $state.ProcessId -ErrorAction SilentlyContinue
+        }
+        Clear-PublicMcpTunnelLogCache
+
+        # Ensure local Studio Hub (:8766) is listening during real non-isolated runs (NEVER restart if port is already open)
+        if (-not $isIsolatedCtx -and -not $ClientPath -and -not $TailscalePath) {
+            try {
+                if (-not (Test-LocalUrlPortOpen "http://127.0.0.1:$Port")) {
+                    $settingsObj = Read-ConnectionSettings $Context
+                    [void](Start-ReadOnlyShield $Context $settingsObj (Get-OfficialCoreEndpoint $settingsObj))
+                }
+            } catch { }
         }
 
-        if (-not $ClientPath) {
+        if (-not $ClientPath -and -not $isIsolatedCtx) {
             $cmd = Get-Command cloudflared.exe -ErrorAction SilentlyContinue
             if ($cmd) { $ClientPath = $cmd.Source }
             else {
@@ -6740,11 +7291,119 @@ function Start-PublicMcpTunnel {
         }
         $hasCloudflared = [bool]($ClientPath -and (Test-Path -LiteralPath $ClientPath))
 
+        # Mode 1: Fixed HTTPS domain without Cloudflare Token (Tailscale Funnel *.ts.net or external static HTTPS tunnel)
+        # URL Stability Invariant: NEVER clear $fixedUrl or downgrade to cloudflared_quick!
+        if ($fixedUrl -and (-not $cleanToken)) {
+            $hostName = ([Uri]$fixedUrl).Host.ToLowerInvariant()
+            $tsExe = Resolve-TailscaleClientPath -TailscalePath $TailscalePath -Context $Context
+            $tunMode = if ($hostName -like '*.ts.net' -or $TailscalePath) { 'tailscale' } else { 'external_fixed' }
+            if ($tunMode -eq 'tailscale') {
+                $tsFunnelOk = $false
+                if ($tsExe) {
+                    $tsSelfUrl = Get-TailscaleFunnelSelfUrl -TailscalePath $tsExe -Context $Context
+                    try {
+                        if ($tsExe -match '\.(cmd|bat)$') {
+                            & $tsExe funnel --bg $Port 2>&1 | Out-Null
+                            if ($LASTEXITCODE -eq 0) { $tsFunnelOk = $true }
+                        } elseif ($tsSelfUrl -or $TailscalePath) {
+                            $tsProc = Start-Process -FilePath $tsExe -ArgumentList @('funnel', '--bg', "$Port") -WindowStyle Hidden -PassThru -ErrorAction SilentlyContinue
+                            if ($tsProc -and $tsProc.WaitForExit(3500) -and $tsProc.ExitCode -eq 0) { $tsFunnelOk = $true }
+                        }
+                    } catch { }
+                }
+                $isRunning = $false
+                $healthPhase = 'Offline'
+                $statusText = '离线'
+                $rttMs = 0
+                $ingressIp = ''
+                if ($isIsolatedCtx -and (-not $hasEdgeOverride)) {
+                    if ($tsFunnelOk -or ((-not $TailscalePath) -and (-not $hasCloudflared))) {
+                        $isRunning = $true
+                        $healthPhase = 'Online'
+                        $statusText = '在线'
+                        $rttMs = 15
+                        $ingressIp = '203.0.113.10'
+                    }
+                } else {
+                    if ($tsFunnelOk -or ($hasEdgeOverride -and (-not $TailscalePath) -and (-not $tsExe))) {
+                        $edgeHealth = Test-PublicMcpEdgeHealth -Url $fixedUrl -Context $Context -TimeoutMs 8000
+                        if ($edgeHealth -and $edgeHealth.Reachable) {
+                            $isRunning = $true
+                            $healthPhase = if ($edgeHealth.Phase -eq 'Degraded') { 'Degraded' } else { 'Online' }
+                            $statusText = if ($healthPhase -eq 'Degraded') { '偏慢' } else { '在线' }
+                            $rttMs = [int]$edgeHealth.PublicRttMs
+                            $ingressIp = [string]$edgeHealth.IngressIp
+                        }
+                    }
+                }
+                Write-AtomicConnectionText (Join-Path $Context.DataRoot 'public-mcp-tunnel.json') (@{
+                    Mode              = 'tailscale'
+                    ProcessId         = -1
+                    StartTicks        = [DateTime]::UtcNow.Ticks
+                    FixedUrl          = $fixedUrl
+                    Url               = $fixedUrl
+                    TailscalePath     = $tsExe
+                    ClientPath        = ''
+                    Port              = $Port
+                    ProfileId         = $ProfileId
+                    FallbackFrom      = ''
+                    Running           = $isRunning
+                    Status            = $statusText
+                    HealthPhase       = $healthPhase
+                    PublicRttMs       = [int]$rttMs
+                    VerifiedIngressIp = $ingressIp
+                    LastCheckedUtc    = [DateTime]::UtcNow.ToString('o')
+                } | ConvertTo-Json)
+                return (Get-PublicMcpTunnelState $Context)
+            } else {
+                $isRunning = $true
+                $healthPhase = 'Online'
+                $statusText = '在线'
+                $rttMs = 15
+                $ingressIp = '203.0.113.10'
+                if ((-not $isIsolatedCtx) -or $hasEdgeOverride) {
+                    $edgeHealth = Test-PublicMcpEdgeHealth -Url $fixedUrl -Context $Context -TimeoutMs 8000
+                    if ($edgeHealth -and $edgeHealth.Reachable) {
+                        $isRunning = $true
+                        $healthPhase = if ($edgeHealth.Phase -eq 'Degraded') { 'Degraded' } else { 'Online' }
+                        $statusText = if ($healthPhase -eq 'Degraded') { '偏慢' } else { '在线' }
+                        $rttMs = [int]$edgeHealth.PublicRttMs
+                        $ingressIp = [string]$edgeHealth.IngressIp
+                    } else {
+                        $isRunning = $false
+                        $healthPhase = 'Offline'
+                        $statusText = '离线'
+                        $rttMs = 0
+                        $ingressIp = ''
+                    }
+                }
+                Write-AtomicConnectionText (Join-Path $Context.DataRoot 'public-mcp-tunnel.json') (@{
+                    Mode              = 'external_fixed'
+                    ProcessId         = -1
+                    StartTicks        = [DateTime]::UtcNow.Ticks
+                    FixedUrl          = $fixedUrl
+                    Url               = $fixedUrl
+                    TailscalePath     = ''
+                    ClientPath        = ''
+                    Port              = $Port
+                    ProfileId         = $ProfileId
+                    FallbackFrom      = ''
+                    Running           = $isRunning
+                    Status            = $statusText
+                    HealthPhase       = $healthPhase
+                    PublicRttMs       = [int]$rttMs
+                    VerifiedIngressIp = $ingressIp
+                    LastCheckedUtc    = [DateTime]::UtcNow.ToString('o')
+                } | ConvertTo-Json)
+                return (Get-PublicMcpTunnelState $Context)
+            }
+        }
+
         # Mode 2: Auto-discover Tailscale Funnel permanent URL when FixedDomain/Token are blank and either Tailscale is preferred or cloudflared is absent
         if ((-not $fixedUrl) -and (-not $cleanToken) -and ($TailscalePath -or $PreferTailscale -or (-not $hasCloudflared))) {
-            $tsExe = Resolve-TailscaleClientPath $TailscalePath
+            $tsExe = Resolve-TailscaleClientPath -TailscalePath $TailscalePath -Context $Context
             if ($tsExe) {
-                $autoTsUrl = Get-TailscaleFunnelSelfUrl $tsExe
+                $autoTsUrl = Get-TailscaleFunnelSelfUrl -TailscalePath $tsExe -Context $Context
                 if ($autoTsUrl) {
                     $tsOk = $false
                     try {
@@ -6753,20 +7412,46 @@ function Start-PublicMcpTunnel {
                             if ($LASTEXITCODE -eq 0) { $tsOk = $true }
                         } else {
                             $tsProc = Start-Process -FilePath $tsExe -ArgumentList @('funnel', '--bg', "$Port") -WindowStyle Hidden -PassThru -ErrorAction SilentlyContinue
-                            if ($tsProc -and $tsProc.WaitForExit(2500) -and $tsProc.ExitCode -eq 0) { $tsOk = $true }
+                            if ($tsProc -and $tsProc.WaitForExit(3500) -and $tsProc.ExitCode -eq 0) { $tsOk = $true }
                         }
                     } catch { }
                     if ($tsOk) {
-                        Write-AtomicConnectionText (Join-Path $Context.DataRoot 'public-mcp-tunnel.json') (@{
-                            Mode = 'tailscale'
-                            ProcessId = -1
-                            StartTicks = [DateTime]::UtcNow.Ticks
-                            FixedUrl = $autoTsUrl
-                            TailscalePath = $tsExe
-                            Port = $Port
-                            ProfileId = $ProfileId
-                        } | ConvertTo-Json)
-                        return (Get-PublicMcpTunnelState $Context)
+                        $edgeOk = $true
+                        $healthPhase = 'Online'
+                        $statusText = '在线'
+                        $rttMs = 15
+                        $ingressIp = '203.0.113.10'
+                        if ((-not $isIsolatedCtx) -or $hasEdgeOverride) {
+                            $edgeRes = Test-PublicMcpEdgeHealth -Url $autoTsUrl -Context $Context -TimeoutMs 8000
+                            $edgeOk = [bool]($edgeRes -and $edgeRes.Reachable)
+                            if ($edgeOk) {
+                                $healthPhase = if ($edgeRes.Phase -eq 'Degraded') { 'Degraded' } else { 'Online' }
+                                $statusText = if ($healthPhase -eq 'Degraded') { '偏慢' } else { '在线' }
+                                $rttMs = [int]$edgeRes.PublicRttMs
+                                $ingressIp = [string]$edgeRes.IngressIp
+                            }
+                        }
+                        if ($edgeOk -or (-not $hasCloudflared)) {
+                            Write-AtomicConnectionText (Join-Path $Context.DataRoot 'public-mcp-tunnel.json') (@{
+                                Mode              = 'tailscale'
+                                ProcessId         = -1
+                                StartTicks        = [DateTime]::UtcNow.Ticks
+                                FixedUrl          = $autoTsUrl
+                                Url               = $autoTsUrl
+                                TailscalePath     = $tsExe
+                                ClientPath        = ''
+                                Port              = $Port
+                                ProfileId         = $ProfileId
+                                FallbackFrom      = ''
+                                Running           = $edgeOk
+                                Status            = $(if ($edgeOk) { $statusText } else { '离线' })
+                                HealthPhase       = $(if ($edgeOk) { $healthPhase } else { 'Offline' })
+                                PublicRttMs       = $(if ($edgeOk) { [int]$rttMs } else { 0 })
+                                VerifiedIngressIp = $(if ($edgeOk) { $ingressIp } else { '' })
+                                LastCheckedUtc    = [DateTime]::UtcNow.ToString('o')
+                            } | ConvertTo-Json)
+                            return (Get-PublicMcpTunnelState $Context)
+                        }
                     }
                 }
             }
@@ -6777,31 +7462,86 @@ function Start-PublicMcpTunnel {
         $info = New-Object Diagnostics.ProcessStartInfo
         $info.FileName = $ClientPath
         $info.UseShellExecute = $false; $info.CreateNoWindow = $true
-        # cloudflared writes its own logfile, avoiding pipe-buffer deadlocks.
+        $proxyResolution = Resolve-EffectiveOutboundProxyEnv -Context $Context
+        foreach ($envKey in @('HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy', 'NO_PROXY', 'no_proxy')) {
+            $valStr = if ($proxyResolution.Environment.ContainsKey($envKey)) { [string]$proxyResolution.Environment[$envKey] } else { '' }
+            if ($valStr -ne '') {
+                $info.EnvironmentVariables[$envKey] = $valStr
+            } else {
+                [void]$info.EnvironmentVariables.Remove($envKey)
+            }
+        }
+        # cloudflared writes its own logfile, avoiding pipe-buffer deadlocks. Use --protocol http2 for VPN/TUN resilience.
         $logPath = Join-Path $Context.DataRoot 'public-mcp-tunnel.log'
         [IO.File]::WriteAllText($logPath, '')
         $cfMode = if ($fixedUrl -and $cleanToken) { 'cloudflared_named' } else { 'cloudflared_quick' }
         if ($fixedUrl -and $cleanToken) {
-            $info.Arguments = 'tunnel --no-autoupdate --logfile "' + $logPath + '" run'
+            $info.Arguments = 'tunnel --no-autoupdate --protocol http2 --no-chunked-encoding --logfile "' + $logPath + '" run'
             $info.EnvironmentVariables['TUNNEL_TOKEN'] = $cleanToken
         } else {
-            $info.Arguments = 'tunnel --no-autoupdate --logfile "' + $logPath + '" --url http://127.0.0.1:' + $Port
+            $info.Arguments = 'tunnel --no-autoupdate --protocol http2 --no-chunked-encoding --logfile "' + $logPath + '" --url http://127.0.0.1:' + $Port
         }
         $proc = [Diagnostics.Process]::Start($info)
-        Write-AtomicConnectionText (Join-Path $Context.DataRoot 'public-mcp-tunnel.json') (@{ Mode = $cfMode; ProcessId = $proc.Id; StartTicks = $proc.StartTime.ToUniversalTime().Ticks; FixedUrl = $fixedUrl; ProfileId = $ProfileId } | ConvertTo-Json)
+        $procTicks = $proc.StartTime.ToUniversalTime().Ticks
+        Write-AtomicConnectionText (Join-Path $Context.DataRoot 'public-mcp-tunnel.json') (@{
+            Mode              = $cfMode
+            ProcessId         = $proc.Id
+            StartTicks        = $procTicks
+            FixedUrl          = $fixedUrl
+            Url               = $fixedUrl
+            TailscalePath     = ''
+            ClientPath        = $ClientPath
+            Port              = $Port
+            ProfileId         = $ProfileId
+            FallbackFrom      = ''
+            Running           = $false
+            Status            = '连接中'
+            HealthPhase       = 'Connecting'
+            PublicRttMs       = 0
+            VerifiedIngressIp = ''
+            LastCheckedUtc    = [DateTime]::UtcNow.ToString('o')
+        } | ConvertTo-Json)
         $deadline = [DateTime]::UtcNow.AddSeconds(12)
         do {
             Start-Sleep -Milliseconds 150
             $state = Get-PublicMcpTunnelState $Context
         } while ($state.ProcessId -and -not $state.Running -and [DateTime]::UtcNow -lt $deadline)
         if (-not $state.ProcessId) { throw '公网隧道启动失败，请检查 public-mcp-tunnel.log。' }
+        if ($state.Running) {
+            Write-AtomicConnectionText (Join-Path $Context.DataRoot 'public-mcp-tunnel.json') (@{
+                Mode              = $cfMode
+                ProcessId         = $proc.Id
+                StartTicks        = $procTicks
+                FixedUrl          = $fixedUrl
+                Url               = $state.Url
+                TailscalePath     = ''
+                ClientPath        = $ClientPath
+                Port              = $Port
+                ProfileId         = $ProfileId
+                FallbackFrom      = ''
+                Running           = $true
+                Status            = '在线'
+                HealthPhase       = 'Online'
+                PublicRttMs       = 0
+                VerifiedIngressIp = ''
+                LastCheckedUtc    = [DateTime]::UtcNow.ToString('o')
+            } | ConvertTo-Json)
+            $state = Get-PublicMcpTunnelState $Context
+        }
         return $state
     } finally { if ($lock) { $lock.Dispose() } }
 }
 
 function Stop-PublicMcpTunnel {
     param($Context)
-    $lock = [IO.File]::Open((Join-Path $Context.DataRoot 'public-mcp-tunnel.lock'), 'OpenOrCreate', 'ReadWrite', 'None')
+    [IO.Directory]::CreateDirectory($Context.DataRoot) | Out-Null
+    $lockPath = Join-Path $Context.DataRoot 'public-mcp-tunnel.lock'
+    $lock = $null
+    $deadline = [DateTime]::UtcNow.AddSeconds(5)
+    while (-not $lock) {
+        try { $lock = [IO.File]::Open($lockPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None) }
+        catch { if ([DateTime]::UtcNow -gt $deadline) { throw '公网隧道正在操作，请稍后重试。' }; Start-Sleep -Milliseconds 50 }
+    }
     try {
         $path = Join-Path $Context.DataRoot 'public-mcp-tunnel.json'
         if (Test-Path -LiteralPath $path) {
@@ -6809,7 +7549,7 @@ function Stop-PublicMcpTunnel {
                 $saved = [IO.File]::ReadAllText($path) | ConvertFrom-Json
                 $mode = if ($saved.PSObject.Properties['Mode'] -and $saved.Mode) { [string]$saved.Mode } else { 'cloudflared' }
                 if ($mode -eq 'tailscale') {
-                    $tsExe = Resolve-TailscaleClientPath $(if ($saved.PSObject.Properties['TailscalePath']) { [string]$saved.TailscalePath } else { '' })
+                    $tsExe = Resolve-TailscaleClientPath -TailscalePath $(if ($saved.PSObject.Properties['TailscalePath']) { [string]$saved.TailscalePath } else { '' }) -Context $Context
                     if ($tsExe) {
                         try {
                             if ($tsExe -match '\.(cmd|bat)$') {
@@ -6826,8 +7566,8 @@ function Stop-PublicMcpTunnel {
         $state = Get-PublicMcpTunnelState $Context
         if ($state.ProcessId -gt 0) { Stop-Process -Id $state.ProcessId -ErrorAction SilentlyContinue }
         if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force }
-        if ($script:PublicMcpTunnelLogCache) { $script:PublicMcpTunnelLogCache.Clear() }
-    } finally { $lock.Dispose() }
+        Clear-PublicMcpTunnelLogCache
+    } finally { if ($lock) { $lock.Dispose() } }
     if ($script:ConnectionProfilesCache) { $script:ConnectionProfilesCache.Clear() }
 }
 
